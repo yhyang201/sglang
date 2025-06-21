@@ -250,6 +250,8 @@ def extend(reqs, model_runner):
     forward_batch = ForwardBatch.init_new(model_worker_batch, model_runner)
     logits_output, _ = model_runner.forward(forward_batch)
     next_token_ids = model_runner.sample(logits_output, forward_batch)
+    print(next_token_ids)
+    print(logits_output)
     return next_token_ids, logits_output.next_token_logits, batch
 
 
@@ -263,6 +265,54 @@ def decode(input_token_ids, batch, model_runner):
     logits_output, _ = model_runner.forward(forward_batch)
     next_token_ids = model_runner.sample(logits_output, forward_batch)
     return next_token_ids, logits_output.next_token_logits
+
+
+@torch.no_grad
+def batch_extend(reqs, model_runner):
+    batch_size = 1024
+    running_batch = None
+    running_next_token_ids = None
+    running_logits_output = None
+    for i in range(0, len(reqs), batch_size):
+        batch_reqs = reqs[i : i + batch_size]
+        batch = ScheduleBatch.init_new(
+            reqs=batch_reqs,
+            req_to_token_pool=model_runner.req_to_token_pool,
+            token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
+            tree_cache=None,
+            model_config=model_runner.model_config,
+            enable_overlap=False,
+            spec_algorithm=SpeculativeAlgorithm.NONE,
+            enable_custom_logit_processor=False,
+        )
+        batch.prepare_for_extend()
+        _maybe_prepare_mlp_sync_batch(batch, model_runner)
+        model_worker_batch = batch.get_model_worker_batch()
+        forward_batch = ForwardBatch.init_new(model_worker_batch, model_runner)
+        logits_output, _ = model_runner.forward(forward_batch)
+        next_token_ids = model_runner.sample(logits_output, forward_batch)
+        if running_batch is None:
+            running_batch = batch
+            running_next_token_ids = next_token_ids
+            running_logits_output = logits_output
+        else:
+            running_batch.merge_batch(batch)
+            running_next_token_ids = torch.cat(
+                [running_next_token_ids, next_token_ids], dim=0
+            )
+            running_logits_output.next_token_logits = torch.cat(
+                [
+                    running_logits_output.next_token_logits,
+                    logits_output.next_token_logits,
+                ],
+                dim=0,
+            )
+
+    return (
+        running_next_token_ids,
+        running_logits_output.next_token_logits,
+        running_batch,
+    )
 
 
 def _maybe_prepare_mlp_sync_batch(batch: ScheduleBatch, model_runner):
