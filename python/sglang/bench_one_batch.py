@@ -68,6 +68,7 @@ from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.utils import (
+    DeepEPMode,
     configure_logger,
     get_bool_env_var,
     kill_process_tree,
@@ -234,6 +235,8 @@ def prepare_synthetic_inputs_for_latency_test(batch_size, input_len):
 
 @torch.no_grad
 def extend(reqs, model_runner):
+    return batch_extend(reqs, model_runner)
+
     batch = ScheduleBatch.init_new(
         reqs=reqs,
         req_to_token_pool=model_runner.req_to_token_pool,
@@ -269,11 +272,12 @@ def decode(input_token_ids, batch, model_runner):
 
 @torch.no_grad
 def batch_extend(reqs, model_runner):
-    batch_size = 1024
+    batch_size = 4
     running_batch = None
     running_next_token_ids = None
     running_logits_output = None
     for i in range(0, len(reqs), batch_size):
+        print(i)
         batch_reqs = reqs[i : i + batch_size]
         batch = ScheduleBatch.init_new(
             reqs=batch_reqs,
@@ -327,6 +331,9 @@ def _maybe_prepare_mlp_sync_batch(batch: ScheduleBatch, model_runner):
             spec_algorithm=SpeculativeAlgorithm.NONE,
             speculative_num_draft_tokens=None,
             require_mlp_tp_gather=require_mlp_tp_gather(model_runner.server_args),
+            enable_two_batch_overlap=model_runner.server_args.enable_two_batch_overlap,
+            enable_deepep_moe=model_runner.server_args.enable_deepep_moe,
+            deepep_mode=DeepEPMode[model_runner.server_args.deepep_mode],
         )
 
 
@@ -392,12 +399,12 @@ def latency_test_run_once(
     profile,
     profile_filename_prefix,
 ):
-    max_batch_size = model_runner.max_total_num_tokens // (input_len + output_len)
-    if batch_size > max_batch_size:
-        rank_print(
-            f"skipping ({batch_size}, {input_len}, {output_len}) due to max batch size limit"
-        )
-        return
+    # max_batch_size = model_runner.max_total_num_tokens // (input_len + output_len)
+    # if batch_size > max_batch_size:
+    #     rank_print(
+    #         f"skipping ({batch_size}, {input_len}, {output_len}) due to max batch size limit"
+    #     )
+    #     return
 
     # Clear the pools.
     model_runner.req_to_token_pool.clear()
@@ -448,7 +455,7 @@ def latency_test_run_once(
         tot_latency += latency
         throughput = batch_size / latency
         decode_latencies.append(latency)
-        if i < 5 or (log_decode_step > 0 and i % log_decode_step == 0):
+        if i or (log_decode_step > 0 and i % log_decode_step == 0):
             rank_print(
                 f"Decode {i}. Batch size: {batch_size}, latency: {latency:6.5f} s, throughput: {throughput:9.2f} token/s"
             )
