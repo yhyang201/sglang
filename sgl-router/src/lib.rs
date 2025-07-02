@@ -7,7 +7,11 @@ pub mod pd_router;
 pub mod pd_types;
 pub mod prometheus;
 pub mod request_adapter;
+#[path = "router.rs"]
+pub mod legacy_router;
+#[path = "router/mod.rs"]
 pub mod router;
+pub mod core;
 pub mod server;
 pub mod service_discovery;
 pub mod tree;

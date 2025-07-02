@@ -16,6 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::spawn;
 use tracing::{error, info, warn, Level};
+use crate::core::WorkerFactory;
+use crate::core::Worker;
+
 
 #[derive(Debug)]
 pub struct AppState {
@@ -33,8 +36,27 @@ impl AppState {
         // Check if this is PD mode from policy config
         let is_pd_mode = matches!(policy_config, PolicyConfig::PrefillDecodeConfig { .. });
 
+        // Convert worker URLs to Vec<Arc<dyn Worker>>
+        let workers: Vec<Arc<dyn Worker>> = worker_urls.iter().map(|url| {
+            if is_pd_mode {
+                if let PolicyConfig::PrefillDecodeConfig { prefill_urls, decode_urls, .. } = &policy_config {
+                    if prefill_urls.iter().any(|(u, _)| u == url) {
+                        WorkerFactory::create_prefill(url.clone(), None)
+                    } else if decode_urls.contains(url) {
+                        WorkerFactory::create_decode(url.clone())
+                    } else {
+                        WorkerFactory::create_regular(url.clone())
+                    }
+                } else {
+                    unreachable!("is_pd_mode is true but policy_config is not PrefillDecodeConfig")
+                }
+            } else {
+                WorkerFactory::create_regular(url.clone())
+            }
+        }).collect();
+
         // Create router based on policy
-        let router = Arc::new(Router::new(worker_urls, policy_config)?);
+        let router = Arc::new(Router::new(workers, policy_config)?);
         Ok(Self {
             router,
             client,
