@@ -12,8 +12,8 @@ pub fn worker_to_url(worker: &Arc<dyn Worker>) -> String {
 }
 
 /// Vec<String>  → Vec<Arc<dyn Worker>>
-pub fn urls_to_workers(urls: Vec<String>) -> Vec<Arc<dyn Worker>> {
-    urls.into_iter().map(WorkerFactory::create_regular).collect()
+pub fn urls_to_workers(urls: &[String]) -> Vec<Arc<dyn Worker>> {
+    urls.iter().map(|url| WorkerFactory::create_regular(url.clone())).collect()
 }
 
 /// Vec<Arc<dyn Worker>> → Vec<String>

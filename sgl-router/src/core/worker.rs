@@ -22,6 +22,7 @@ pub enum WorkerError {
 
 pub const HEALTH_ENDPOINT: &str = "/health";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
+const HEALTH_CACHE_TTL: Duration = Duration::from_secs(10);
 
 #[async_trait]
 pub trait Worker: Send + Sync + Debug  {
@@ -69,6 +70,19 @@ impl Worker for WorkerImpl {
     }
 
     async fn check_health(&self) -> Result<(), WorkerError> {
+        {
+            let last = *self.last_health_check.read().unwrap();
+            if last.elapsed() < HEALTH_CACHE_TTL {
+                // 用已有结果直接返回
+                return if self.is_healthy() {
+                    Ok(())
+                } else {
+                    Err(WorkerError::HealthCheckFailed("Cached unhealthy".into()))
+                };
+            }
+        }
+
+
         let client = Client::builder()
             .timeout(HEALTH_TIMEOUT)
             .build()
@@ -79,19 +93,15 @@ impl Worker for WorkerImpl {
 
         let full_url = format!("{}{}", self.url, HEALTH_ENDPOINT);
         match client.get(&full_url).send().await {
-            Ok(res) => {
-                if !res.status().is_success() {
-                    self.update_health(false);
-                    return Err(WorkerError::HealthCheckFailed(
-                        format!("Unhealthy status: {}", res.status())
-                    ));
-                }
+            Ok(res) if res.status().is_success() => {
                 self.update_health(true);
+                *self.last_health_check.write().unwrap() = Instant::now();
                 Ok(())
             }
-            Err(e) => {
+            _ => {
                 self.update_health(false);
-                Err(WorkerError::HealthCheckFailed(format!("Request failed: {}", e)))
+                *self.last_health_check.write().unwrap() = Instant::now();
+                Err(WorkerError::HealthCheckFailed("…".into()))
             }
         }
     }

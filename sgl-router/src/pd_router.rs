@@ -4,6 +4,7 @@
 use crate::pd_types::{
     Bootstrap, ChatReqInput, EngineInfo, GenerateReqInput, PDRouterError, PDSelectionPolicy,
 };
+use crate::core::adapter::{url_to_worker, urls_to_workers, worker_to_url, workers_to_urls};
 use crate::tree::Tree;
 use actix_web::http::header::{HeaderValue, CONTENT_TYPE};
 use actix_web::{HttpRequest, HttpResponse};
@@ -78,7 +79,7 @@ impl PDRouter {
 
         // Wait for the new server to be healthy
         crate::router::Router::wait_for_healthy_workers(
-            &[url.clone()],
+            &[url_to_worker(url.clone())],
             self.timeout_secs,
             self.interval_secs,
         )
@@ -118,7 +119,7 @@ impl PDRouter {
 
         // Wait for the new server to be healthy
         crate::router::Router::wait_for_healthy_workers(
-            &[url.clone()],
+            &[url_to_worker(url.clone())],
             self.timeout_secs,
             self.interval_secs,
         )
@@ -231,7 +232,7 @@ impl PDRouter {
             .chain(decode_workers.iter())
             .map(|engine| engine.url.clone())
             .collect();
-        crate::router::Router::wait_for_healthy_workers(&all_urls, timeout_secs, interval_secs)?;
+        crate::router::Router::wait_for_healthy_workers(&urls_to_workers(&all_urls), timeout_secs, interval_secs)?;
 
         // Initialize load tracking with atomic counters
         let load_tracking = Arc::new(dashmap::DashMap::new());
