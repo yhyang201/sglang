@@ -1,5 +1,5 @@
 import abc
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import torch
 
@@ -143,6 +143,30 @@ class PagedMultiModalCache(MultimodalCache):
 
         # used for chunked cpu-offloading
         self.cpu_offloading_chunk_size = 8192
+
+    # for disaggregation, aligned with get_contiguous_buf_infos
+    def get_mm_buffer_info(self) -> Tuple[int, int, int]:
+        """Returns the pointer, size, and item length of the multimodal buffer."""
+        return (
+            self.mm_buffer.data_ptr(),
+            self.mm_buffer.nbytes,
+            self.hidden_size * self.mm_buffer.element_size(),
+        )
+
+    def get_pointers_from_locs(self, locs: torch.Tensor) -> torch.Tensor:
+        """
+        Given a tensor of locations (indices), returns a tensor of pointers
+        to these locations in the multimodal buffer.
+        """
+        base_ptr = self.mm_buffer.data_ptr()
+        item_size = self.hidden_size * self.mm_buffer.element_size()
+
+        # Ensure locs is on the right device and is of type int64 for arithmetic
+        locs_gpu = locs.to(device=self.device, dtype=torch.int64)
+
+        # Calculate pointers
+        pointers = base_ptr + locs_gpu * item_size
+        return pointers
 
     def get_mm_embedding(self, mm_hash: int) -> torch.Tensor:
         indices = self.mm_hash_to_indices.get(mm_hash)
