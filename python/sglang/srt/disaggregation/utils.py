@@ -28,6 +28,7 @@ FAKE_BOOTSTRAP_HOST = "2.2.2.2"
 
 class DisaggregationMode(Enum):
     NULL = "null"
+    ENCODE = "encode"
     PREFILL = "prefill"
     DECODE = "decode"
 
