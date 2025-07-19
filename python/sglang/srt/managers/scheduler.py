@@ -46,6 +46,7 @@ from sglang.srt.disaggregation.decode import (
     DecodeTransferQueue,
     SchedulerDisaggregationDecodeMixin,
 )
+from sglang.srt.disaggregation.encode import EncodeBootstrapQueue
 from sglang.srt.disaggregation.kv_events import EventPublisherFactory, KVEventBatch
 from sglang.srt.disaggregation.prefill import (
     PrefillBootstrapQueue,
@@ -119,6 +120,7 @@ from sglang.srt.managers.schedule_batch import (
 )
 from sglang.srt.managers.schedule_policy import (
     AddReqResult,
+    EncodeAdder,
     PrefillAdder,
     SchedulePolicy,
 )
@@ -585,6 +587,11 @@ class Scheduler(
             self.tp_worker.get_memory_pool()
         )
 
+        # TODO: initialize only when encode exists
+        self.mm_embedding, self.mm_embedding_allocator = (
+            self.tp_worker.get_mm_memory_pool()
+        )
+
         if (
             server_args.chunked_prefill_size is not None
             and server_args.disable_radix_cache
@@ -739,7 +746,7 @@ class Scheduler(
                 draft_token_to_kv_pool=(
                     None
                     if self.draft_worker is None
-                    else self.draft_worker.model_runner.token_to_kv_pool
+                    else self.draft_worker.model_runner.mm_embedding_pool
                 ),
                 req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
                 metadata_buffers=self.disagg_metadata_buffers,
@@ -776,7 +783,7 @@ class Scheduler(
                 draft_token_to_kv_pool=(
                     None
                     if self.draft_worker is None
-                    else self.draft_worker.model_runner.token_to_kv_pool
+                    else self.draft_worker.model_runner.mm_embedding_pool
                 ),
                 req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
                 metadata_buffers=self.disagg_metadata_buffers,
@@ -795,6 +802,32 @@ class Scheduler(
             )
             # The prefill requests that are in the middle of kv sending
             self.disagg_prefill_inflight_queue: List[Req] = []
+        elif self.disaggregation_mode == DisaggregationMode.ENCODE:
+            # The prefill requests that are in the middle of kv sending
+            self.disagg_encode_inflight_queue: List[Req] = []
+            # The encode requests pushing embeddings
+            self.disagg_encode_bootstrap_queue = EncodeBootstrapQueue(
+                token_to_kv_pool=self.token_to_kv_pool_allocator.get_kvcache(),
+                draft_token_to_kv_pool=(
+                    None
+                    if self.draft_worker is None
+                    else self.draft_worker.model_runner.mm_embedding_pool
+                ),
+                req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
+                metadata_buffers=self.disagg_metadata_buffers,
+                tp_rank=self.tp_rank,
+                tp_size=self.tp_size,
+                gpu_id=self.gpu_id,
+                bootstrap_port=self.server_args.disaggregation_bootstrap_port,
+                gloo_group=self.attn_tp_cpu_group,
+                max_total_num_tokens=self.max_total_num_tokens,
+                decode_tp_size=self.server_args.disaggregation_decode_tp,
+                decode_dp_size=self.server_args.disaggregation_decode_dp,
+                scheduler=self,
+                pp_rank=self.pp_rank,
+                pp_size=self.pp_size,
+                transfer_backend=self.transfer_backend,
+            )
 
     @DynamicGradMode()
     def event_loop_normal(self):
@@ -1348,7 +1381,7 @@ class Scheduler(
 
     def log_prefill_stats(
         self,
-        adder: PrefillAdder,
+        adder: Union[PrefillAdder, EncodeAdder],
         can_run_list: List[Req],
         running_bs: int,
     ):
@@ -1390,7 +1423,7 @@ class Scheduler(
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             f += f"#unbootstrapped-req: {len(self.disagg_prefill_bootstrap_queue.queue)}, "
             f += f"#queue-req: {len(self.waiting_queue)}, "
-            f += f"#transferring-req: {len(self.disagg_prefill_inflight_queue)}, "
+            f += f"#transferring-req: {len(self.disagg_encode_inflight_queue)}, "
             f += f"input throughput (token/s): {self.last_input_throughput:.2f}, "
         else:
             f += f"#running-req: {running_bs}, "
@@ -1822,6 +1855,105 @@ class Scheduler(
             )
         else:
             new_batch.decoding_reqs = None
+
+        return new_batch
+
+    def get_num_allocatable_reqs_encode(self, running_bs):
+        res = global_server_args_dict["max_micro_batch_size"] - running_bs
+        return res
+
+    def get_new_batch_encode(self) -> Optional[ScheduleBatch]:
+        assert self.disaggregation_mode == DisaggregationMode.ENCODE
+        # TODO: consider merging with get_new_batch_prefill later
+        # Handle the cases where encode is not allowed
+        if (
+            self.running_batch.batch_is_full or len(self.waiting_queue) == 0
+        ) and self.chunked_req is None:
+            return None
+
+        running_bs = len(self.running_batch.reqs)
+        # Ignore the check if self.chunked_req is not None.
+        # In the non-PP case, when self.chunked_req is not None, num_allocatable_reqs should always be greater than 0,
+        # as the space for the chunked request has just been released.
+        # In PP case, a chunked req can start in one microbatch and end in another microbatch, so the max_running_requests per microbatch should not be strict.
+        # Instead, we should always allow chunked request to be added, otherwise, there will be a memory leak.
+
+        if self.get_num_allocatable_reqs(running_bs) <= 0:
+            self.running_batch.batch_is_full = True
+            return None
+
+        # Get priority queue
+        self.policy.calc_priority(self.waiting_queue)
+
+        # Encode policy
+        adder = EncodeAdder(
+            self.page_size,
+            self.token_to_kv_pool_allocator,
+            self.running_batch,
+            self.new_token_ratio,
+            self.max_prefill_tokens,
+            self.chunked_prefill_size,
+            running_bs if self.is_mixed_chunk else 0,
+        )
+
+        # Get requests from the waiting queue to a new encode batch
+        for req in self.waiting_queue:
+            if len(adder.can_run_list) >= self.get_num_allocatable_reqs(running_bs):
+                self.running_batch.batch_is_full = True
+                break
+
+            req.init_next_round_input(self.tree_cache)
+            res = adder.add_one_req(req, has_chunked_req=(self.chunked_req is not None))
+
+            if res != AddReqResult.CONTINUE:
+                if res == AddReqResult.NO_TOKEN:
+                    if self.enable_hierarchical_cache:
+                        # Set batch_is_full after making sure there are requests that can be served
+                        self.running_batch.batch_is_full = len(
+                            adder.can_run_list
+                        ) > 0 or (not self.running_batch.is_empty())
+                    else:
+                        self.running_batch.batch_is_full = True
+                break
+
+        # Update waiting queue
+        can_run_list: List[Req] = adder.can_run_list
+        if len(can_run_list) == 0:
+            return None
+
+        if self.enable_metrics:
+            # only record queue time when enable_metrics is True to avoid overhead
+            for req in can_run_list:
+                req.queue_time_end = time.perf_counter()
+
+        self.waiting_queue = [
+            x for x in self.waiting_queue if x not in set(can_run_list)
+        ]
+
+        # Print stats
+        self.log_prefill_stats(adder, can_run_list, running_bs)
+
+        # Create a new batch
+        new_batch = ScheduleBatch.init_new(
+            can_run_list,
+            self.req_to_token_pool,
+            self.token_to_kv_pool_allocator,
+            self.tree_cache,
+            self.model_config,
+            self.enable_overlap,
+            self.spec_algorithm,
+            self.server_args.enable_custom_logit_processor,
+            chunked_req=None,
+        )
+        if self.enable_hierarchical_cache:
+            # todo (zhiqiang): disable cuda graph execution if hicache loading triggered
+            new_batch.hicache_consumer_index = (
+                self.tree_cache.ready_to_load_host_cache()
+            )
+
+        new_batch.prepare_for_extend()
+
+        new_batch.decoding_reqs = None
 
         return new_batch
 

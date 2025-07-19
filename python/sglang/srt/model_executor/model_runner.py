@@ -89,6 +89,7 @@ from sglang.srt.mem_cache.memory_pool import (
     ReqToTokenPool,
     SWAKVPool,
 )
+from sglang.srt.mem_cache.multimodal_cache import PagedMultiModalCache
 from sglang.srt.model_executor.cuda_graph_runner import CudaGraphRunner
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader import get_model
@@ -164,6 +165,8 @@ class ModelRunner:
         is_draft_worker: bool = False,
         req_to_token_pool: Optional[ReqToTokenPool] = None,
         token_to_kv_pool_allocator: Optional[BaseTokenToKVPoolAllocator] = None,
+        mm_item_to_token_pool: Optional[PagedMultiModalCache] = None,
+        mm_embedding_allocator: Optional[BaseTokenToKVPoolAllocator] = None,
     ):
         # Parse args
         self.mem_fraction_static = mem_fraction_static
@@ -193,6 +196,10 @@ class ModelRunner:
         self.page_size = server_args.page_size
         self.req_to_token_pool = req_to_token_pool
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
+
+        self.mm_item_to_token_pool = mm_item_to_token_pool
+        self.mm_embedding_allocator = mm_embedding_allocator
+
         self.is_hybrid = model_config.is_hybrid
         self.use_mla_backend = self.model_config.attention_arch == AttentionArch.MLA
         self.attention_chunk_size = model_config.attention_chunk_size
@@ -314,6 +321,14 @@ class ModelRunner:
             server_args.max_running_requests,
             server_args.max_total_tokens,
         )
+
+        # Init memory pool for mm embedding (only allocated in PDE-disaggregation)
+        self.init_mm_memory_pool(
+            min_per_gpu_memory,
+            server_args.max_running_requests,
+            server_args.max_total_tokens,
+        )
+
         if self.device == "cuda":
             self.init_cublas()
             self.init_attention_backend()
@@ -1049,6 +1064,15 @@ class ModelRunner:
             logger.info(
                 f"Use Sliding window memory pool. full_layer_tokens={self.full_max_total_num_tokens}, swa_layer_tokens={self.swa_max_total_num_tokens}"
             )
+
+    def init_mm_memory_pool(
+        self,
+        total_gpu_memory: int,
+        max_num_reqs: Optional[int] = None,
+        max_total_tokens: Optional[int] = None,
+    ):
+        # TODO: consider gpu mem usage from normal memory pool
+        pass
 
     def init_memory_pool(
         self,

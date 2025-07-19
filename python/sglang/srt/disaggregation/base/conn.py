@@ -12,6 +12,10 @@ if TYPE_CHECKING:
     from sglang.srt.disaggregation.utils import DisaggregationMode
 
 
+class EmbeddingArgs:
+    pass
+
+
 class KVArgs:
     engine_rank: int
     kv_data_ptrs: List[int]

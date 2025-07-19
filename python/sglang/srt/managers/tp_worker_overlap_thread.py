@@ -34,6 +34,8 @@ from sglang.srt.managers.io_struct import (
 )
 from sglang.srt.managers.schedule_batch import ModelWorkerBatch
 from sglang.srt.managers.tp_worker import TpModelWorker
+from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
+from sglang.srt.mem_cache.multimodal_cache import PagedMultiModalCache
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import DynamicGradMode, get_compiler_backend
 from sglang.utils import get_exception_traceback
@@ -131,8 +133,16 @@ class TpModelWorkerClient:
             self.worker.model_runner.token_to_kv_pool_allocator,
         )
 
+    def get_mm_memory_pool(
+        self,
+    ) -> Tuple[PagedMultiModalCache, BaseTokenToKVPoolAllocator]:
+        return (
+            self.worker.model_runner.mm_item_to_token_pool,
+            self.worker.model_runner.mm_embedding_allocator,
+        )
+
     def get_kv_cache(self):
-        return self.worker.model_runner.token_to_kv_pool
+        return self.worker.model_runner.mm_embedding_pool
 
     def forward_thread_func(self):
         try:
