@@ -50,10 +50,16 @@ class PrefillConfig:
 
 
 class MiniLoadBalancer:
-    def __init__(self, prefill_configs: List[PrefillConfig], decode_servers: List[str]):
+    def __init__(
+        self,
+        prefill_configs: List[PrefillConfig],
+        decode_servers: List[str],
+        encode_servers: List[str] = None,
+    ):
         self.prefill_configs = prefill_configs
         self.prefill_servers = [p.url for p in prefill_configs]
         self.decode_servers = decode_servers
+        self.encode_servers = encode_servers
 
     def add_prefill_server(self, new_prefill_config: PrefillConfig):
         self.prefill_configs.append(new_prefill_config)
@@ -62,6 +68,9 @@ class MiniLoadBalancer:
     def add_decode_server(self, new_decode_server: str):
         self.decode_servers.append(new_decode_server)
 
+    def add_encode_server(self, new_encode_server: str):
+        self.encode_servers.append(new_encode_server)
+
     def select_pair(self):
         # TODO: return some message instead of panic
         assert len(self.prefill_configs) > 0, "No prefill servers available"
@@ -69,10 +78,19 @@ class MiniLoadBalancer:
 
         prefill_config = random.choice(self.prefill_configs)
         decode_server = random.choice(self.decode_servers)
-        return prefill_config.url, prefill_config.bootstrap_port, decode_server
+        if self.encode_servers:
+            encode_server = random.choice(self.encode_servers)
+        else:
+            encode_server = None
+        return (
+            prefill_config.url,
+            prefill_config.bootstrap_port,
+            decode_server,
+            encode_server,
+        )
 
     async def generate(
-        self, modified_request, prefill_server, decode_server, endpoint
+        self, modified_request, prefill_server, decode_server, encode_server, endpoint
     ) -> ORJSONResponse:
         assert endpoint[0] != "/", f"Endpoint should not start with '/': {endpoint}"
 
@@ -84,15 +102,19 @@ class MiniLoadBalancer:
             tasks = [
                 session.post(f"{prefill_server}/{endpoint}", json=modified_request),
                 session.post(f"{decode_server}/{endpoint}", json=modified_request),
+                session.post(f"{encode_server}/{endpoint}", json=modified_request),
             ]
 
             # Wait for both responses to complete. Prefill should end first.
-            prefill_response, decode_response = await asyncio.gather(*tasks)
+            prefill_response, decode_response, encode_response = await asyncio.gather(
+                *tasks
+            )
 
             if "return_logprob" in modified_request:
 
                 prefill_json = await prefill_response.json()
                 ret_json = await decode_response.json()
+                encode_json = await encode_response.json()
 
                 # merge `meta_info.input_token_logprobs` from prefill to decode
                 if "meta_info" in ret_json:
@@ -110,7 +132,12 @@ class MiniLoadBalancer:
             )
 
     async def generate_stream(
-        self, modified_request, prefill_server, decode_server, endpoint="generate"
+        self,
+        modified_request,
+        prefill_server,
+        decode_server,
+        encode_server,
+        endpoint="generate",
     ):
         assert endpoint[0] != "/", f"Endpoint should not start with '/': {endpoint}"
 
@@ -124,6 +151,7 @@ class MiniLoadBalancer:
                 tasks = [
                     session.post(f"{prefill_server}/{endpoint}", json=modified_request),
                     session.post(f"{decode_server}/{endpoint}", json=modified_request),
+                    session.post(f"{encode_server}/{endpoint}", json=modified_request),
                 ]
                 # Wait for both responses to complete. Since this is streaming, they return immediately.
                 prefill_response, decode_response = await asyncio.gather(*tasks)
@@ -268,7 +296,9 @@ async def get_model_info():
 
 @app.post("/generate")
 async def handle_generate_request(request_data: dict):
-    prefill_server, bootstrap_port, decode_server = load_balancer.select_pair()
+    prefill_server, bootstrap_port, decode_server, encode_server = (
+        load_balancer.select_pair()
+    )
 
     # Parse and transform prefill_server for bootstrap data
     parsed_url = urllib.parse.urlparse(prefill_server)
@@ -306,7 +336,9 @@ async def handle_generate_request(request_data: dict):
 
 
 async def _forward_to_backend(request_data: dict, endpoint_name: str):
-    prefill_server, bootstrap_port, decode_server = load_balancer.select_pair()
+    prefill_server, bootstrap_port, decode_server, encode_server = (
+        load_balancer.select_pair()
+    )
 
     # Parse and transform prefill_server for bootstrap data
     parsed_url = urllib.parse.urlparse(prefill_server)
@@ -325,6 +357,7 @@ async def _forward_to_backend(request_data: dict, endpoint_name: str):
             modified_request,
             prefill_server,
             decode_server,
+            encode_server,
             endpoint=endpoint_name,
         )
     else:
@@ -332,6 +365,7 @@ async def _forward_to_backend(request_data: dict, endpoint_name: str):
             modified_request,
             prefill_server,
             decode_server,
+            encode_server,
             endpoint=endpoint_name,
         )
 

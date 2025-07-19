@@ -582,6 +582,18 @@ class ServerArgs:
             self.disable_cuda_graph = True
             logger.warning("Cuda graph is disabled for prefill server")
 
+        elif self.disaggregation_mode == "encode":
+            if self.disaggregation_decode_tp is None:
+                self.disaggregation_decode_tp = self.tp_size
+            if self.disaggregation_decode_dp is None:
+                self.disaggregation_decode_dp = self.dp_size
+
+            # self.disaggregation_prefill_pp = self.pp_size
+            self.validate_disagg_tp_size(self.tp_size, self.disaggregation_decode_tp)
+
+            # self.disable_cuda_graph = True
+            # logger.warning("Cuda graph is disabled for encode server")
+
         # Propagate env vars
         os.environ["SGLANG_ENABLE_TORCH_COMPILE"] = (
             "1" if self.enable_torch_compile else "0"
@@ -1720,8 +1732,8 @@ class ServerArgs:
             "--disaggregation-mode",
             type=str,
             default="null",
-            choices=["null", "prefill", "decode"],
-            help='Only used for PD disaggregation. "prefill" for prefill-only server, and "decode" for decode-only server. If not specified, it is not PD disaggregated',
+            choices=["null", "prefill", "decode", "encode"],
+            help='Only used for PD disaggregation. "prefill" for prefill-only server, "decode" for decode-only server, and "encode" for encode-only server. If not specified, it is not PD disaggregated',
         )
         parser.add_argument(
             "--disaggregation-transfer-backend",

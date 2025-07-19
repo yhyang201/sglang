@@ -45,7 +45,11 @@ from sglang.srt.managers.mm_utils import (
     MultiModalityDataPaddingPatternMultimodalTokens,
     general_mm_embed_routine,
 )
-from sglang.srt.managers.schedule_batch import MultimodalDataItem, MultimodalInputs
+from sglang.srt.managers.schedule_batch import (
+    MultimodalDataItem,
+    MultimodalInputs,
+    global_server_args_dict,
+)
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen2 import Qwen2Model
@@ -464,6 +468,8 @@ class Qwen2VLForConditionalGeneration(nn.Module):
             config, quant_config, prefix=add_prefix("model", prefix)
         )
 
+        self.is_encoder = global_server_args_dict["disaggregation_mode"] == "encode"
+
         if config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
         else:
@@ -575,6 +581,10 @@ class Qwen2VLForConditionalGeneration(nn.Module):
                 continue
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
                 continue
+
+            if self.is_encoder:
+                if "visual" not in name:
+                    continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
