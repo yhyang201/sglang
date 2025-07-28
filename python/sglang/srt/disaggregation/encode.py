@@ -491,9 +491,9 @@ class SchedulerDisaggregationEncodeMixin:
         end_idx: Optional[int] = None,
     ) -> None:
         """
-        Send a prefilled chunk to the decode server
+        Send a embedding to the prefill server
         """
-        page_size = self.token_to_kv_pool_allocator.page_size
+        page_size = self.mm_embedding_pool.page_size
         start_idx = req.start_send_idx
         end_idx = (
             end_idx
@@ -501,14 +501,14 @@ class SchedulerDisaggregationEncodeMixin:
             else min(len(req.fill_ids), len(req.origin_input_ids))
         )
 
-        kv_indices = (
-            self.req_to_token_pool.req_to_token[req.req_pool_idx, start_idx:end_idx]
+        embedding_indices = (
+            self.mm_embedding_pool.req_to_token[req.req_pool_idx, start_idx:end_idx]
             .cpu()
             .numpy()
         )
         req.start_send_idx = end_idx
         self.disagg_metadata_buffers.set_buf(req)
-        page_indices = kv_to_page_indices(kv_indices, page_size)
+        page_indices = kv_to_page_indices(embedding_indices, page_size)
         if len(page_indices) == 0:
             logger.info(
                 f"Skip sending kv chunk for request {req.rid=} {req.bootstrap_room=} because page_indices is empty"

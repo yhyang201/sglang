@@ -46,7 +46,10 @@ from sglang.srt.disaggregation.decode import (
     DecodeTransferQueue,
     SchedulerDisaggregationDecodeMixin,
 )
-from sglang.srt.disaggregation.encode import EncodeBootstrapQueue, SchedulerDisaggregationEncodeMixin
+from sglang.srt.disaggregation.encode import (
+    EncodeBootstrapQueue,
+    SchedulerDisaggregationEncodeMixin,
+)
 from sglang.srt.disaggregation.kv_events import EventPublisherFactory, KVEventBatch
 from sglang.srt.disaggregation.prefill import (
     PrefillBootstrapQueue,
@@ -54,10 +57,11 @@ from sglang.srt.disaggregation.prefill import (
 )
 from sglang.srt.disaggregation.utils import (
     DisaggregationMode,
+    EncoderMetadataBuffers,
     MetadataBuffers,
     ReqToMetadataIdxAllocator,
     TransferBackend,
-    prepare_abort, EncoderMetadataBuffers,
+    prepare_abort,
 )
 from sglang.srt.distributed import get_pp_group, get_world_group
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
@@ -589,7 +593,7 @@ class Scheduler(
         )
 
         # TODO: initialize only when encode exists
-        self.mm_embedding, self.mm_embedding_allocator = (
+        self.mm_embedding_pool, self.mm_embedding_allocator = (
             self.tp_worker.get_mm_memory_pool()
         )
 
@@ -3097,8 +3101,6 @@ def run_scheduler_process(
                 raise RuntimeError("overlapped encode scheduler is not supported")
             else:
                 scheduler.event_loop_normal_disagg_decode()
-
-
 
     except Exception:
         traceback = get_exception_traceback()
