@@ -30,12 +30,26 @@ class MultimodalCache(abc.ABC):
 
     @abc.abstractmethod
     def get_mm_embedding(self, mm_hash: int) -> torch.Tensor:
+        """
+            Extract the embedding with a hash id. the returned tensor may not be contiguous
+        """
         raise NotImplementedError()
 
     @abc.abstractmethod
     def set_mm_embedding(
         self, mm_hash: int, embedding: torch.Tensor, loc: Optional[torch.Tensor] = None
     ) -> bool:
+        """
+        Set the embedding to the pre-allocated locations with a hash id
+        """
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def get_pointers_from_locs(self, locs: torch.Tensor) -> torch.Tensor:
+        """
+        Given a tensor of locations (indices), returns a tensor of pointers
+        to these locations in the multimodal buffer.
+        """
         raise NotImplementedError()
 
     @abc.abstractmethod
