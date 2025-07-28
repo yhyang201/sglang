@@ -36,7 +36,6 @@ from sglang.srt.disaggregation.utils import (
     ReqToMetadataIdxAllocator,
     TransferBackend,
     get_kv_class,
-    kv_to_page_indices,
     kv_to_page_num,
     poll_and_all_reduce,
     prepare_abort,
@@ -171,7 +170,7 @@ class EncodeBootstrapQueue:
         indices_to_remove = set()
 
         if len(self.queue) == 0:
-            if return_failed_reqs is False:
+            if not return_failed_reqs:
                 return []
             else:
                 return [], []
@@ -396,7 +395,7 @@ class SchedulerDisaggregationEncodeMixin:
         #         )
         #         logprob_pt += num_input_logprobs
         for i, req in enumerate(batch.reqs):
-            self.send_embedding_chunk(req, last_chunk=True)
+            self.send_embedding_chunk(req)
 
         # We need to remove the sync in the following function for overlap schedule.
         self.set_next_batch_sampling_info_done(batch)
@@ -488,30 +487,10 @@ class SchedulerDisaggregationEncodeMixin:
     def send_embedding_chunk(
         self: Scheduler,
         req: Req,
-        end_idx: Optional[int] = None,
     ) -> None:
         """
         Send a embedding to the prefill server
         """
-        page_size = self.mm_embedding_pool.page_size
-        start_idx = req.start_send_idx
-        end_idx = (
-            end_idx
-            if end_idx is not None
-            else min(len(req.fill_ids), len(req.origin_input_ids))
-        )
 
-        embedding_indices = (
-            self.mm_embedding_pool.req_to_token[req.req_pool_idx, start_idx:end_idx]
-            .cpu()
-            .numpy()
-        )
-        req.start_send_idx = end_idx
-        self.disagg_metadata_buffers.set_buf(req)
-        page_indices = kv_to_page_indices(embedding_indices, page_size)
-        if len(page_indices) == 0:
-            logger.info(
-                f"Skip sending kv chunk for request {req.rid=} {req.bootstrap_room=} because page_indices is empty"
-            )
-            return
-        req.disagg_kv_sender.send(page_indices)
+        embeddings = req.hidden_states_tensor
+        req.disagg_kv_sender.send_embedding(embeddings, [0])

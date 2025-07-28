@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, List, Optional
 
 import numpy as np
 import numpy.typing as npt
+import torch
 
 from sglang.srt.server_args import ServerArgs
 
@@ -79,6 +80,15 @@ class BaseKVSender(ABC):
     def send(self, kv_indices: npt.NDArray[np.int32]):
         """
         Send the kv cache at the given kv indices to the decoder server
+        """
+        ...
+
+    @abstractmethod
+    def send_embedding(
+        self, embeddings: torch.Tensor, embedding_start_indices: List[int]
+    ):
+        """
+        Send the concatenated embeddings with each embedding's start token indices
         """
         ...
 
