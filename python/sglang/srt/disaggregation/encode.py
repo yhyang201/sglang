@@ -41,7 +41,7 @@ from sglang.srt.disaggregation.utils import (
     prepare_abort,
 )
 from sglang.srt.managers.schedule_batch import FINISH_LENGTH, Req, ScheduleBatch
-from sglang.srt.mem_cache.multimodal_cache import PagedMultiModalCache
+from sglang.srt.mem_cache.multimodal_cache import PagedMultiModalEmbeddingPool
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.utils import require_mlp_sync
 
@@ -60,8 +60,8 @@ class EncodeBootstrapQueue:
 
     def __init__(
         self,
-        mm_embedding_pool: PagedMultiModalCache,
-        draft_mm_embedding_pool: Optional[PagedMultiModalCache],
+        # mm_embedding_pool: PagedMultiModalEmbeddingPool,
+        # draft_mm_embedding_pool: Optional[PagedMultiModalCache],
         req_to_metadata_buffer_idx_allocator: ReqToMetadataIdxAllocator,
         metadata_buffers: EncoderMetadataBuffers,
         gpu_id: int,
@@ -72,8 +72,8 @@ class EncodeBootstrapQueue:
         scheduler: Scheduler,
         transfer_backend: TransferBackend,
     ):
-        self.mm_embedding_pool = mm_embedding_pool
-        self.draft_mm_embedding_pool = draft_mm_embedding_pool
+        # self.mm_embedding_pool = mm_embedding_pool
+        # self.draft_mm_embedding_pool = draft_mm_embedding_pool
         self.metadata_buffers = metadata_buffers
         self.req_to_metadata_buffer_idx_allocator = req_to_metadata_buffer_idx_allocator
         self.encode_dp_size = encode_dp_size
@@ -258,7 +258,7 @@ class SchedulerDisaggregationEncodeMixin:
                 self.process_disagg_encode_inflight_queue()
 
             if batch is None and len(self.disagg_encode_inflight_queue) == 0:
-                self.check_memory()
+                # self.check_memory()
                 self.new_token_ratio = self.init_new_token_ratio
                 self.maybe_sleep_on_idle()
 

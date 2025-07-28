@@ -1,5 +1,5 @@
 import abc
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -64,6 +64,10 @@ class MultimodalCache(abc.ABC):
     def clear(self):
         raise NotImplementedError()
 
+    @abc.abstractmethod
+    def available_size(self):
+        raise NotImplementedError()
+
 
 class MultiModalStaticCache(MultimodalCache):
     """MultiModalStaticCache is used to store precomputed multimodal embeddings.
@@ -114,8 +118,11 @@ class MultiModalStaticCache(MultimodalCache):
     def __len__(self):
         return len(self.mm_cache)
 
+    def available_size(self):
+        return self.__len__()
 
-class PagedMultiModalCache(MultimodalCache):
+
+class PagedMultiModalEmbeddingPool(MultimodalCache):
     """PagedMultiModalCache pre-allocates a buffer to store multimodal embeddings,
     and works with an external paged allocator. The allocator manages the allocation
     of token slots from this cache's buffer.
@@ -139,6 +146,7 @@ class PagedMultiModalCache(MultimodalCache):
         self.page_size = page_size
         self.dtype = dtype
         self.device = device
+        self.used_size = 0
         if dtype in (torch.float8_e5m2, torch.float8_e4m3fn):
             # NOTE: Store as torch.uint8 because Tensor.index_put is not implemented for torch.float8_e5m2
             self.store_dtype = torch.uint8
@@ -156,7 +164,7 @@ class PagedMultiModalCache(MultimodalCache):
         self.mem_usage = 0
 
         # used for chunked cpu-offloading
-        self.cpu_offloading_chunk_size = 8192
+        # self.cpu_offloading_chunk_size = 8192
 
     # for disaggregation, aligned with get_contiguous_buf_infos
     def get_mm_buffer_info(self) -> Tuple[int, int, int]:
@@ -181,6 +189,14 @@ class PagedMultiModalCache(MultimodalCache):
         # Calculate pointers
         pointers = base_ptr + locs_gpu * item_size
         return pointers
+
+    def get_embedding_locs_from_hash(self, mm_hash) -> torch.Tensor:
+        return self.mm_hash_to_indices[mm_hash]
+
+    def get_embedding_locs_from_hashes(
+        self, mm_hashes: List[int]
+    ) -> List[torch.Tensor]:
+        return [self.get_embedding_locs_from_hash(mm_hash) for mm_hash in mm_hashes]
 
     def get_mm_embedding(self, mm_hash: int) -> torch.Tensor:
         indices = self.mm_hash_to_indices.get(mm_hash)
@@ -209,6 +225,7 @@ class PagedMultiModalCache(MultimodalCache):
 
         self.mm_buffer.index_put_((loc,), embedding_to_store)
         self.mm_hash_to_indices[mm_hash] = loc
+        self.used_size += embedding.size(0)
 
         return True
 
@@ -217,7 +234,8 @@ class PagedMultiModalCache(MultimodalCache):
 
     def free(self, mm_hash: int) -> bool:
         if mm_hash in self.mm_hash_to_indices:
-            del self.mm_hash_to_indices[mm_hash]
+            embedding = self.mm_hash_to_indices.pop(mm_hash)
+            self.used_size -= embedding.size(0)
             return True
         return False
 
@@ -226,3 +244,12 @@ class PagedMultiModalCache(MultimodalCache):
 
     def __len__(self):
         return len(self.mm_hash_to_indices)
+
+    def capacity(self) -> int:
+        return self.mm_buffer.size(0)
+
+    def allocated(self) -> int:
+        return self.used_size
+
+    def available_size(self):
+        return self.capacity() - self.allocated()

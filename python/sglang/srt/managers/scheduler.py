@@ -53,6 +53,8 @@ from sglang.srt.disaggregation.encode import (
 from sglang.srt.disaggregation.kv_events import EventPublisherFactory, KVEventBatch
 from sglang.srt.disaggregation.prefill import (
     PrefillBootstrapQueue,
+    PrefillPreallocQueue,
+    PrefillTransferQueue,
     SchedulerDisaggregationPrefillMixin,
 )
 from sglang.srt.disaggregation.utils import (
@@ -597,6 +599,9 @@ class Scheduler(
             self.tp_worker.get_mm_memory_pool()
         )
 
+        print(f"{self.req_to_token_pool=}")
+        print(f"{self.mm_embedding_pool=}")
+
         if (
             server_args.chunked_prefill_size is not None
             and server_args.disable_radix_cache
@@ -807,6 +812,36 @@ class Scheduler(
             )
             # The prefill requests that are in the middle of kv sending
             self.disagg_prefill_inflight_queue: List[Req] = []
+
+            # TODO: only if encode is disaggregated
+            # The prefill requests polling mm embedding cache
+            self.disagg_prefill_transfer_queue = PrefillTransferQueue(
+                gloo_group=self.attn_tp_cpu_group,
+                req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
+                tp_rank=self.tp_rank,
+                metadata_buffers=self.disagg_metadata_buffers,
+                scheduler=self,
+            )
+
+            # The decode requests pending for pre-allocation
+            self.disagg_prefill_prealloc_queue = PrefillPreallocQueue(
+                mm_embedding_pool=self.mm_embedding_pool,
+                token_to_kv_pool_allocator=self.mm_embedding_allocator,
+                req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
+                metadata_buffers=self.disagg_metadata_buffers,
+                scheduler=self,
+                transfer_queue=self.disagg_prefill_transfer_queue,
+                gloo_group=self.attn_tp_cpu_group,
+                tp_rank=self.tp_rank,
+                tp_size=self.tp_size,
+                dp_size=self.server_args.disaggregation_encode_dp,
+                gpu_id=self.gpu_id,
+                bootstrap_port=self.server_args.disaggregation_bootstrap_port,
+                max_total_num_tokens=self.max_total_num_tokens,
+                prefill_pp_size=self.server_args.disaggregation_prefill_pp,
+                # num_reserved_decode_tokens=self.server_args.num_reserved_decode_tokens,
+                transfer_backend=self.transfer_backend,
+            )
         elif self.disaggregation_mode == DisaggregationMode.ENCODE:
             assert self.model_config.vision_config is not None
             buffer_size = self.max_running_requests * 2
@@ -814,32 +849,35 @@ class Scheduler(
                 buffer_size,
                 hidden_size=self.model_config.vision_config.hidden_size,
                 dtype=self.model_config.dtype,
-                custom_mem_pool=self.mm_embedding_allocator.get_kvcache().maybe_get_custom_mem_pool(),
+                # custom_mem_pool=self.mm_embedding_allocator.get_kvcache().maybe_get_custom_mem_pool(),
+            )
+            self.req_to_metadata_buffer_idx_allocator = ReqToMetadataIdxAllocator(
+                buffer_size
             )
             # The prefill requests that are in the middle of kv sending
             self.disagg_encode_inflight_queue: List[Req] = []
             # The encode requests pushing embeddings
             self.disagg_encode_bootstrap_queue = EncodeBootstrapQueue(
-                mm_embedding_pool=self.mm_embedding_allocator.get_kvcache(),
-                draft_mm_embedding_pool=(
-                    None
-                    if self.draft_worker is None
-                    else self.draft_worker.model_runner.mm_embedding_pool
-                ),
+                # mm_embedding_pool=self.mm_embedding_allocator.get_kvcache(),
+                # draft_mm_embedding_pool=(
+                #     None
+                #     if self.draft_worker is None
+                #     else self.draft_worker.model_runner.mm_embedding_pool
+                # ),
                 req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
                 metadata_buffers=self.disagg_metadata_buffers,
-                tp_rank=self.tp_rank,
-                tp_size=self.tp_size,
+                # tp_rank=self.tp_rank,
+                # tp_size=self.tp_size,
                 gpu_id=self.gpu_id,
                 bootstrap_port=self.server_args.disaggregation_bootstrap_port,
                 gloo_group=self.attn_tp_cpu_group,
                 max_total_num_tokens=self.max_total_num_tokens,
                 # decode_tp_size=self.server_args.disaggregation_decode_tp,
-                encode_tp_size=1,
+                # encode_tp_size=1,
                 encode_dp_size=self.server_args.disaggregation_encode_dp,
                 scheduler=self,
-                pp_rank=self.pp_rank,
-                pp_size=self.pp_size,
+                # pp_rank=self.pp_rank,
+                # pp_size=self.pp_size,
                 transfer_backend=self.transfer_backend,
             )
 
@@ -2402,7 +2440,7 @@ class Scheduler(
             self.token_to_kv_pool_allocator.clear()
 
             if not self.spec_algorithm.is_none():
-                self.draft_worker.model_runner.req_to_token_pool.clear()
+                self.draft_worker.model_runner.mm_embedding_pool.clear()
                 self.draft_worker.model_runner.token_to_kv_pool_allocator.clear()
 
             self.num_generated_tokens = 0
@@ -3100,7 +3138,7 @@ def run_scheduler_process(
             if scheduler.enable_overlap:
                 raise RuntimeError("overlapped encode scheduler is not supported")
             else:
-                scheduler.event_loop_normal_disagg_decode()
+                scheduler.event_loop_normal_disagg_encode()
 
     except Exception:
         traceback = get_exception_traceback()

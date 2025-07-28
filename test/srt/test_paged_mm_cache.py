@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from sglang.srt.mem_cache.multimodal_cache import PagedMultiModalCache
+from sglang.srt.mem_cache.multimodal_cache import PagedMultiModalEmbeddingPool
 from sglang.test.test_utils import CustomTestCase
 
 
@@ -20,7 +20,7 @@ class TestPagedMMCache(CustomTestCase):
         dtype = torch.float16
 
         print("--- 1. Initializing PagedMultiModalCache ---")
-        cache = PagedMultiModalCache(
+        cache = PagedMultiModalEmbeddingPool(
             size=num_token_slots,
             hidden_size=hidden_size,
             page_size=page_size,
@@ -93,7 +93,7 @@ class TestPagedMMCache(CustomTestCase):
         dtype = torch.float16
 
         print("--- 1. Initializing PagedMultiModalCache ---")
-        cache = PagedMultiModalCache(
+        cache = PagedMultiModalEmbeddingPool(
             size=num_token_slots,
             hidden_size=hidden_size,
             page_size=page_size,

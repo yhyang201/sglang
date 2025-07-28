@@ -73,6 +73,8 @@ class ServerArgs:
 
     # Memory and scheduling
     mem_fraction_static: Optional[float] = None
+    # the fraction of size of encoder mm embedding pool in all runtime cache pool (including KVCacche)
+    encoder_mem_fraction: Optional[float] = None
     max_running_requests: Optional[int] = None
     max_total_tokens: Optional[int] = None
     chunked_prefill_size: Optional[int] = None
@@ -586,7 +588,10 @@ class ServerArgs:
         elif self.disaggregation_mode == "encode":
             if not self.disable_overlap_schedule:
                 self.disable_overlap_schedule = True
-                print(f"automatically turn off overlap schedule for encoder")
+                print(f"Automatically turn off overlap schedule for encoder")
+
+            self.disable_cuda_graph = True
+            print(f"Automatically turn off cuda graph for encoder")
 
             if self.disaggregation_decode_tp is None:
                 self.disaggregation_decode_tp = self.tp_size
@@ -815,6 +820,12 @@ class ServerArgs:
             type=float,
             default=ServerArgs.mem_fraction_static,
             help="The fraction of the memory used for static allocation (model weights and KV cache memory pool). Use a smaller value if you see out-of-memory errors.",
+        )
+        parser.add_argument(
+            "--encoder-mem-fraction",
+            type=float,
+            default=ServerArgs.encoder_mem_fraction,
+            help="The fraction of size of encoder mm embedding pool in all runtime cache pool (including KVCacche)",
         )
         parser.add_argument(
             "--max-running-requests",

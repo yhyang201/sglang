@@ -616,6 +616,11 @@ class Req:
         self.tmp_end_idx: int = -1
         self.metadata_buffer_index: int = -1
 
+        # for encoder-disaggregation
+        self.mm_embedding_lens = []
+        # self.mm_embedding_token_sum = []
+        self.mm_hashes = [mm_item.hash for mm_item in self.multimodal_inputs.mm_items]
+
     @property
     def seqlen(self):
         return len(self.origin_input_ids) + len(self.output_ids)

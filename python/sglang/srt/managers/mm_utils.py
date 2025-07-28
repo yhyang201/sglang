@@ -22,7 +22,7 @@ from sglang.srt.mem_cache.allocator import TokenToKVPoolAllocator
 from sglang.srt.mem_cache.multimodal_cache import (
     MultimodalCache,
     MultiModalStaticCache,
-    PagedMultiModalCache,
+    PagedMultiModalEmbeddingPool,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.utils import flatten_nested_list, print_warning_once
@@ -300,7 +300,7 @@ def init_embedding_cache(max_size: int = 0):
         page_size = 1
         dtype = torch.bfloat16
         device = "cuda:0"
-        embedding_cache = PagedMultiModalCache(
+        embedding_cache = PagedMultiModalEmbeddingPool(
             size, hidden_size, page_size, dtype, device
         )
     else:

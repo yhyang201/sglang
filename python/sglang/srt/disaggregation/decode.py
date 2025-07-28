@@ -128,6 +128,14 @@ class DecodeRequest:
     metadata_buffer_index: int = -1
 
 
+@dataclass
+class PrefillRequest:
+    req: Req
+    kv_receiver: BaseKVReceiver
+    waiting_for_input: bool = False
+    metadata_buffer_index: int = -1
+
+
 class DecodePreallocQueue:
     """
     Store the requests that are preallocating.
@@ -171,7 +179,6 @@ class DecodePreallocQueue:
         self.gpu_id = gpu_id
         self.bootstrap_port = bootstrap_port
         self.max_total_num_tokens = max_total_num_tokens
-        self.prefill_pp_size = prefill_pp_size
         self.num_reserved_decode_tokens = num_reserved_decode_tokens
         self.transfer_backend = transfer_backend
         # Queue for requests pending pre-allocation
