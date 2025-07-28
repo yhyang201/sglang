@@ -281,6 +281,7 @@ class MultimodalDataItem:
         return self.is_image() or self.is_video() or self.is_audio()
 
     def validate(self):
+        self.token_len = sum(e - s + 1 for s, e in self.offsets)
         ...
         # TODO
 
@@ -635,7 +636,7 @@ class Req:
             self.multimodal_inputs.merge(image_inputs)
 
         self.mm_hashes = [mm_item.hash for mm_item in self.multimodal_inputs.mm_items]
-        self.mm_embedding_lens = []
+        self.mm_embedding_lens = [mm_item.token_len for mm_item in self.multimodal_inputs.mm_items]
 
     def finished(self) -> bool:
         # Whether request reached finished condition

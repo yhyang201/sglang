@@ -287,7 +287,7 @@ class MultiModalityDataPaddingPatternMultimodalTokens(MultiModalityDataPaddingPa
         return ret_input_ids
 
 
-embedding_cache: Optional[MultiModalCache] = None
+embedding_cache: Optional[MultimodalCache] = None
 is_epd = True
 
 
