@@ -31,8 +31,8 @@ from sglang.srt.disaggregation.base import BaseKVManager, KVPoll
 from sglang.srt.disaggregation.base.conn import EmbeddingArgs
 from sglang.srt.disaggregation.utils import (
     FAKE_BOOTSTRAP_HOST,
+    EncoderMetadataBuffers,
     KVClassType,
-    MetadataBuffers,
     ReqToMetadataIdxAllocator,
     TransferBackend,
     get_kv_class,
@@ -64,7 +64,7 @@ class EncodeBootstrapQueue:
         mm_embedding_pool: PagedMultiModalCache,
         draft_mm_embedding_pool: Optional[PagedMultiModalCache],
         req_to_metadata_buffer_idx_allocator: ReqToMetadataIdxAllocator,
-        metadata_buffers: MetadataBuffers,
+        metadata_buffers: EncoderMetadataBuffers,
         gpu_id: int,
         bootstrap_port: int,
         gloo_group: ProcessGroup,
@@ -90,8 +90,8 @@ class EncodeBootstrapQueue:
     def _init_kv_manager(self) -> BaseKVManager:
         # TODO
         embedding_class = EmbeddingArgs()
-        # kv_args_class = get_kv_class(self.transfer_backend, KVClassType.KVARGS)
-        # kv_args = kv_args_class()
+        kv_args_class = get_kv_class(self.transfer_backend, KVClassType.KVARGS)
+        kv_args = kv_args_class()
         # kv_data_ptrs, kv_data_lens, kv_item_lens = (
         #     self.mm_embedding_pool.get_pointers_from_locs()
         # )
@@ -103,9 +103,9 @@ class EncodeBootstrapQueue:
 
         # kv_args.page_size = self.mm_embedding_pool.page_size
         #
-        # kv_args.aux_data_ptrs, kv_args.aux_data_lens, kv_args.aux_item_lens = (
-        #     self.metadata_buffers.get_buf_infos()
-        # )
+        kv_args.aux_data_ptrs, kv_args.aux_data_lens, kv_args.aux_item_lens = (
+            self.metadata_buffers.get_buf_infos()
+        )
         # kv_args.ib_device = self.scheduler.server_args.disaggregation_ib_device
         # kv_args.gpu_id = self.scheduler.gpu_id
         #
@@ -144,7 +144,7 @@ class EncodeBootstrapQueue:
             message = f"Request {req.rid} exceeds the maximum number of tokens: {len(req.origin_input_ids)} > {self.max_total_num_tokens}"
             logger.error(message)
             prepare_abort(req, message)
-            self.scheduler.stream_output([req], req.return_logprob)
+            # self.scheduler.stream_output([req], req.return_logprob)
             return True
         return False
 
@@ -330,7 +330,7 @@ class SchedulerDisaggregationEncodeMixin:
         """
         (
             logits_output,
-            next_token_ids,
+            _next_token_ids,
             extend_input_len_per_req,
             extend_logprob_start_len_per_req,
         ) = (
@@ -342,85 +342,61 @@ class SchedulerDisaggregationEncodeMixin:
 
         logprob_pt = 0
         # Transfer kv for prefill completed requests and add it into disagg_prefill_inflight_queue
-        if self.enable_overlap:
-            # wait
-            logits_output, next_token_ids, _ = self.tp_worker.resolve_last_batch_result(
-                launch_done
-            )
-        else:
-            next_token_ids = result.next_token_ids.tolist()
-            if batch.return_logprob:
-                if logits_output.next_token_logprobs is not None:
-                    logits_output.next_token_logprobs = (
-                        logits_output.next_token_logprobs.tolist()
-                    )
-                if logits_output.input_token_logprobs is not None:
-                    logits_output.input_token_logprobs = tuple(
-                        logits_output.input_token_logprobs.tolist()
-                    )
+        # if self.enable_overlap:
+        #     raise NotImplementedError()
+        # wait
+        # logits_output, next_token_ids, _ = self.tp_worker.resolve_last_batch_result(
+        #     launch_done
+        # )
+        # else:
+        # _next_token_ids = result.next_token_ids.tolist()
+        # if batch.return_logprob:
+        #     if logits_output.next_token_logprobs is not None:
+        #         logits_output.next_token_logprobs = (
+        #             logits_output.next_token_logprobs.tolist()
+        #         )
+        #     if logits_output.input_token_logprobs is not None:
+        #         logits_output.input_token_logprobs = tuple(
+        #             logits_output.input_token_logprobs.tolist()
+        #         )
 
         hidden_state_offset = 0
-        for i, (req, next_token_id) in enumerate(
-            zip(batch.reqs, next_token_ids, strict=True)
-        ):
-            req: Req
-            if req.is_chunked <= 0:
-                # There is no output_ids for prefill
-                req.output_ids.append(next_token_id)
-                self.tree_cache.cache_unfinished_req(req)  # update the tree and lock
-                self.disagg_encode_inflight_queue.append(req)
-                if logits_output.hidden_states is not None:
-                    last_hidden_index = (
-                        hidden_state_offset + extend_input_len_per_req[i] - 1
-                    )
-                    req.hidden_states_tensor = (
-                        logits_output.hidden_states[last_hidden_index].cpu().clone()
-                    )
-                    hidden_state_offset += extend_input_len_per_req[i]
-                else:
-                    req.hidden_states_tensor = None
-                if req.return_logprob:
-                    assert extend_logprob_start_len_per_req is not None
-                    assert extend_input_len_per_req is not None
-                    extend_logprob_start_len = extend_logprob_start_len_per_req[i]
-                    extend_input_len = extend_input_len_per_req[i]
-                    num_input_logprobs = extend_input_len - extend_logprob_start_len
-                    self.add_logprob_return_values(
-                        i,
-                        req,
-                        logprob_pt,
-                        next_token_ids,
-                        num_input_logprobs,
-                        logits_output,
-                    )
-                    logprob_pt += num_input_logprobs
-                self.send_kv_chunk(req, last_chunk=True)
-
-                if req.grammar is not None:
-                    req.grammar.accept_token(next_token_id)
-                    req.grammar.finished = req.finished()
-            else:
-                # being chunked reqs' prefill is not finished
-                req.is_chunked -= 1
-
-                if req.return_logprob:
-                    extend_logprob_start_len = extend_logprob_start_len_per_req[i]
-                    extend_input_len = extend_input_len_per_req[i]
-                    if extend_logprob_start_len < extend_input_len:
-                        # Update input logprobs.
-                        num_input_logprobs = extend_input_len - extend_logprob_start_len
-                        self.add_input_logprob_return_values(
-                            i,
-                            req,
-                            logits_output,
-                            logprob_pt,
-                            num_input_logprobs,
-                            last_prefill_chunk=False,
-                        )
-                        logprob_pt += num_input_logprobs
-
-                if self.enable_overlap:
-                    self.send_kv_chunk(req, last_chunk=False, end_idx=req.tmp_end_idx)
+        # for i, (req, next_token_id) in enumerate(
+        #     zip(batch.reqs, _next_token_ids, strict=True)
+        # ):
+        #     req: Req
+        #     assert req.is_chunked <= 0
+        #     # There is no output_ids for prefill
+        #     req.output_ids.append(next_token_id)
+        #     self.tree_cache.cache_unfinished_req(req)  # update the tree and lock
+        #     self.disagg_encode_inflight_queue.append(req)
+        #     if logits_output.hidden_states is not None:
+        #         last_hidden_index = (
+        #             hidden_state_offset + extend_input_len_per_req[i] - 1
+        #         )
+        #         req.hidden_states_tensor = (
+        #             logits_output.hidden_states[last_hidden_index].cpu().clone()
+        #         )
+        #         hidden_state_offset += extend_input_len_per_req[i]
+        #     else:
+        #         req.hidden_states_tensor = None
+        #     if req.return_logprob:
+        #         assert extend_logprob_start_len_per_req is not None
+        #         assert extend_input_len_per_req is not None
+        #         extend_logprob_start_len = extend_logprob_start_len_per_req[i]
+        #         extend_input_len = extend_input_len_per_req[i]
+        #         num_input_logprobs = extend_input_len - extend_logprob_start_len
+        #         self.add_logprob_return_values(
+        #             i,
+        #             req,
+        #             logprob_pt,
+        #             _next_token_ids,
+        #             num_input_logprobs,
+        #             logits_output,
+        #         )
+        #         logprob_pt += num_input_logprobs
+        for i, req in enumerate(batch.reqs):
+            self.send_embedding_chunk(req, last_chunk=True)
 
         # We need to remove the sync in the following function for overlap schedule.
         self.set_next_batch_sampling_info_done(batch)
@@ -509,10 +485,9 @@ class SchedulerDisaggregationEncodeMixin:
 
         return transferred_rids
 
-    def send_kv_chunk(
+    def send_embedding_chunk(
         self: Scheduler,
         req: Req,
-        last_chunk: bool = False,
         end_idx: Optional[int] = None,
     ) -> None:
         """
@@ -526,18 +501,13 @@ class SchedulerDisaggregationEncodeMixin:
             else min(len(req.fill_ids), len(req.origin_input_ids))
         )
 
-        if not last_chunk:
-            # if not the last chunk and the last page is partial, delay the last partial page to the next send
-            end_idx = end_idx - end_idx % page_size
-
         kv_indices = (
             self.req_to_token_pool.req_to_token[req.req_pool_idx, start_idx:end_idx]
             .cpu()
             .numpy()
         )
         req.start_send_idx = end_idx
-        if last_chunk:
-            self.disagg_metadata_buffers.set_buf(req)
+        self.disagg_metadata_buffers.set_buf(req)
         page_indices = kv_to_page_indices(kv_indices, page_size)
         if len(page_indices) == 0:
             logger.info(

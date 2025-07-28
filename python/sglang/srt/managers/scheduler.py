@@ -46,7 +46,7 @@ from sglang.srt.disaggregation.decode import (
     DecodeTransferQueue,
     SchedulerDisaggregationDecodeMixin,
 )
-from sglang.srt.disaggregation.encode import EncodeBootstrapQueue
+from sglang.srt.disaggregation.encode import EncodeBootstrapQueue, SchedulerDisaggregationEncodeMixin
 from sglang.srt.disaggregation.kv_events import EventPublisherFactory, KVEventBatch
 from sglang.srt.disaggregation.prefill import (
     PrefillBootstrapQueue,
@@ -57,7 +57,7 @@ from sglang.srt.disaggregation.utils import (
     MetadataBuffers,
     ReqToMetadataIdxAllocator,
     TransferBackend,
-    prepare_abort,
+    prepare_abort, EncoderMetadataBuffers,
 )
 from sglang.srt.distributed import get_pp_group, get_world_group
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
@@ -228,6 +228,7 @@ class Scheduler(
     SchedulerOutputProcessorMixin,
     SchedulerDisaggregationDecodeMixin,
     SchedulerDisaggregationPrefillMixin,
+    SchedulerDisaggregationEncodeMixin,
 ):
     """A scheduler that manages a tensor parallel GPU worker."""
 
@@ -803,12 +804,20 @@ class Scheduler(
             # The prefill requests that are in the middle of kv sending
             self.disagg_prefill_inflight_queue: List[Req] = []
         elif self.disaggregation_mode == DisaggregationMode.ENCODE:
+            assert self.model_config.vision_config is not None
+            buffer_size = self.max_running_requests * 2
+            self.disagg_metadata_buffers = EncoderMetadataBuffers(
+                buffer_size,
+                hidden_size=self.model_config.vision_config.hidden_size,
+                dtype=self.model_config.dtype,
+                custom_mem_pool=self.mm_embedding_allocator.get_kvcache().maybe_get_custom_mem_pool(),
+            )
             # The prefill requests that are in the middle of kv sending
             self.disagg_encode_inflight_queue: List[Req] = []
             # The encode requests pushing embeddings
             self.disagg_encode_bootstrap_queue = EncodeBootstrapQueue(
-                token_to_kv_pool=self.token_to_kv_pool_allocator.get_kvcache(),
-                draft_token_to_kv_pool=(
+                mm_embedding_pool=self.mm_embedding_allocator.get_kvcache(),
+                draft_mm_embedding_pool=(
                     None
                     if self.draft_worker is None
                     else self.draft_worker.model_runner.mm_embedding_pool
@@ -821,8 +830,9 @@ class Scheduler(
                 bootstrap_port=self.server_args.disaggregation_bootstrap_port,
                 gloo_group=self.attn_tp_cpu_group,
                 max_total_num_tokens=self.max_total_num_tokens,
-                decode_tp_size=self.server_args.disaggregation_decode_tp,
-                decode_dp_size=self.server_args.disaggregation_decode_dp,
+                # decode_tp_size=self.server_args.disaggregation_decode_tp,
+                encode_tp_size=1,
+                encode_dp_size=self.server_args.disaggregation_encode_dp,
                 scheduler=self,
                 pp_rank=self.pp_rank,
                 pp_size=self.pp_size,
@@ -3077,12 +3087,18 @@ def run_scheduler_process(
                 scheduler.event_loop_overlap_disagg_prefill()
             else:
                 scheduler.event_loop_normal_disagg_prefill()
-
         elif disaggregation_mode == DisaggregationMode.DECODE:
             if scheduler.enable_overlap:
                 scheduler.event_loop_overlap_disagg_decode()
             else:
                 scheduler.event_loop_normal_disagg_decode()
+        elif disaggregation_mode == DisaggregationMode.ENCODE:
+            if scheduler.enable_overlap:
+                raise RuntimeError("overlapped encode scheduler is not supported")
+            else:
+                scheduler.event_loop_normal_disagg_decode()
+
+
 
     except Exception:
         traceback = get_exception_traceback()
