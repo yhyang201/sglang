@@ -1,5 +1,5 @@
 """
-Minimal HTTP load balancer for prefill and decode servers for testing.
+Minimal HTTP load balancer for encode, prefill and decode servers for testing.
 """
 
 import asyncio
@@ -45,6 +45,12 @@ logger = setup_logger()
 
 @dataclasses.dataclass
 class PrefillConfig:
+    url: str
+    bootstrap_port: Optional[int] = None
+
+
+@dataclasses.dataclass
+class EncodeConfig:
     url: str
     bootstrap_port: Optional[int] = None
 
@@ -114,7 +120,7 @@ class MiniLoadBalancer:
 
                 prefill_json = await prefill_response.json()
                 ret_json = await decode_response.json()
-                encode_json = await encode_response.json()
+                # encode_json = await encode_response.json()
 
                 # merge `meta_info.input_token_logprobs` from prefill to decode
                 if "meta_info" in ret_json:
@@ -154,7 +160,9 @@ class MiniLoadBalancer:
                     session.post(f"{encode_server}/{endpoint}", json=modified_request),
                 ]
                 # Wait for both responses to complete. Since this is streaming, they return immediately.
-                prefill_response, decode_response = await asyncio.gather(*tasks)
+                prefill_response, decode_response, _encode_response = (
+                    await asyncio.gather(*tasks)
+                )
 
                 if modified_request.get("return_logprob", False):
                     prefill_chunks = []
@@ -209,14 +217,15 @@ async def health_check():
 
 @app.get("/health_generate")
 async def health_check():
-    prefill_servers, decode_servers = (
+    encode_servers, prefill_servers, decode_servers = (
+        load_balancer.encode_servers,
         load_balancer.prefill_servers,
         load_balancer.decode_servers,
     )
     async with aiohttp.ClientSession() as session:
         # Create the tasks
         tasks = []
-        for server in chain(prefill_servers, decode_servers):
+        for server in chain(encode_servers, prefill_servers, decode_servers):
             tasks.append(session.post(f"{server}/health_generate"))
         for i, response in enumerate(asyncio.as_completed(tasks)):
             await response
@@ -225,14 +234,15 @@ async def health_check():
 
 @app.post("/flush_cache")
 async def flush_cache():
-    prefill_servers, decode_servers = (
+    encode_servers, prefill_servers, decode_servers = (
+        load_balancer.encode_servers,
         load_balancer.prefill_servers,
         load_balancer.decode_servers,
     )
     async with aiohttp.ClientSession() as session:
         # Create the tasks
         tasks = []
-        for server in chain(prefill_servers, decode_servers):
+        for server in chain(encode_servers, prefill_servers, decode_servers):
             tasks.append(session.post(f"{server}/flush_cache"))
         for i, response in enumerate(asyncio.as_completed(tasks)):
             await response
@@ -241,15 +251,20 @@ async def flush_cache():
 
 @app.get("/get_server_info")
 async def get_server_info():
-    prefill_servers, decode_servers = (
+    encode_servers, prefill_servers, decode_servers = (
+        load_balancer.encode_servers,
         load_balancer.prefill_servers,
         load_balancer.decode_servers,
     )
     prefill_infos = []
     decode_infos = []
+    encode_infos = []
     all_internal_states = []
 
     async with aiohttp.ClientSession() as session:
+        for server in chain(encode_servers):
+            server_info = await session.get(f"{server}/get_server_info")
+            encode_infos.append(await server_info.json())
         for server in chain(prefill_servers):
             server_info = await session.get(f"{server}/get_server_info")
             prefill_infos.append(await server_info.json())
@@ -265,6 +280,7 @@ async def get_server_info():
     if all_internal_states:
         return {
             "internal_states": all_internal_states,
+            "encode": encode_infos,
             "prefill": prefill_infos,
             "decode": decode_infos,
         }
@@ -277,6 +293,7 @@ async def get_server_info():
                     "avg_spec_accept_length": None,
                 }
             ],
+            "encode": encode_infos,
             "prefill": prefill_infos,
             "decode": decode_infos,
         }
@@ -327,11 +344,11 @@ async def handle_generate_request(request_data: dict):
 
     if request_data.get("stream", False):
         return await load_balancer.generate_stream(
-            modified_request, prefill_server, decode_server, "generate"
+            modified_request, prefill_server, decode_server, encode_server, "generate"
         )
     else:
         return await load_balancer.generate(
-            modified_request, prefill_server, decode_server, "generate"
+            modified_request, prefill_server, decode_server, encode_server, "generate"
         )
 
 
@@ -411,7 +428,10 @@ async def get_models():
 
 @app.post("/register")
 async def register(obj: PDRegistryRequest):
-    if obj.mode == "prefill":
+    if obj.mode == "encode":
+        load_balancer.add_encode_server(obj.registry_url)
+        logger.info(f"Registered encode server: {obj.registry_url}")
+    elif obj.mode == "prefill":
         load_balancer.add_prefill_server(
             PrefillConfig(obj.registry_url, obj.bootstrap_port)
         )
@@ -428,6 +448,7 @@ async def register(obj: PDRegistryRequest):
         )
 
     logger.info(
+        f"#Encode servers: {len(load_balancer.encode_servers)}, "
         f"#Prefill servers: {len(load_balancer.prefill_configs)}, "
         f"#Decode servers: {len(load_balancer.decode_servers)}"
     )
@@ -435,9 +456,9 @@ async def register(obj: PDRegistryRequest):
     return Response(status_code=200)
 
 
-def run(prefill_configs, decode_addrs, host, port):
+def run(prefill_configs, decode_addrs, encode_addrs, host, port):
     global load_balancer
-    load_balancer = MiniLoadBalancer(prefill_configs, decode_addrs)
+    load_balancer = MiniLoadBalancer(prefill_configs, decode_addrs, encode_addrs)
     uvicorn.run(app, host=host, port=port)
 
 
