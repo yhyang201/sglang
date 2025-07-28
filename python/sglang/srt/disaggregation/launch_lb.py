@@ -97,6 +97,9 @@ class LBArgs:
             (url, port) for url, port in zip(args.prefill, bootstrap_ports)
         ]
 
+        if args.encode and args.rust_lb:
+            raise RuntimeError("encode disaggregation is not supported in rust lb")
+
         return cls(
             rust_lb=args.rust_lb,
             host=args.host,
