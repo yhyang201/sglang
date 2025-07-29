@@ -11,7 +11,7 @@ class LBArgs:
     encode_infos: list = dataclasses.field(default_factory=list)
     prefill_infos: list = dataclasses.field(default_factory=list)
     decode_infos: list = dataclasses.field(default_factory=list)
-    prefill_and_decode_infos: list = dataclasses.field(default_factory=list)
+    text_infos: list = dataclasses.field(default_factory=list)
     log_interval: int = 5
     timeout: int = 600
 
@@ -63,11 +63,11 @@ class LBArgs:
             help="URLs for decode servers",
         )
         parser.add_argument(
-            "--prefill-and-decode",
+            "--text",
             type=str,
             default=[],
             nargs="+",
-            help="URLs for non-disaggregated prefill-and-decode servers. This only makes sense when encoder is disaggregated",
+            help="URLs for non-disaggregated text servers. This only makes sense when encoder is disaggregated",
         )
         parser.add_argument(
             "--prefill-bootstrap-ports",
@@ -109,9 +109,9 @@ class LBArgs:
             assert not args.rust_lb, "encode disaggregation is not supported in rust lb"
             assert (
                 args.prefill and args.decode
-            ) or args.prefill_and_decode, "Both p and d or p-and-d should be specified under encoder disaggregation"
+            ) or args.text, "Both p and d or p-and-d should be specified under encoder disaggregation"
 
-        if args.prefill_and_decode is not None:
+        if args.text is not None:
             assert (
                 args.encode is not None
             ), "Non-disaggregated pd must work with encoder disaggregated"
@@ -124,7 +124,7 @@ class LBArgs:
             encode_infos=args.encode,
             prefill_infos=prefill_infos,
             decode_infos=args.decode,
-            prefill_and_decode_infos=args.prefill_and_decode,
+            text_infos=args.text,
             log_interval=args.log_interval,
             timeout=args.timeout,
         )
@@ -166,7 +166,7 @@ def main():
             prefill_configs,
             lb_args.decode_infos,
             lb_args.encode_infos,
-            lb_args.prefill_and_decode_infos,
+            lb_args.text_infos,
             lb_args.host,
             lb_args.port,
         )

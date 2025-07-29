@@ -69,13 +69,13 @@ class MiniLoadBalancer:
         prefill_configs: List[PrefillConfig],
         decode_servers: List[str],
         encode_servers: List[str] = None,
-        prefill_and_decode_addrs: List[str] = None,
+        text_addrs: List[str] = None,
     ):
         self.prefill_configs = prefill_configs
         self.prefill_servers = [p.url for p in prefill_configs]
         self.decode_servers = decode_servers
         self.encode_servers = encode_servers
-        self.prefill_and_decode_addrs = prefill_and_decode_addrs
+        self.text_addrs = text_addrs
 
     def add_prefill_server(self, new_prefill_config: PrefillConfig):
         self.prefill_configs.append(new_prefill_config)
@@ -87,12 +87,12 @@ class MiniLoadBalancer:
     def add_encode_server(self, new_encode_server: str):
         self.encode_servers.append(new_encode_server)
 
-    def add_prefill_and_decode_server(self, new_encode_server: str):
-        self.prefill_and_decode_addrs.append(new_encode_server)
+    def add_text_server(self, new_encode_server: str):
+        self.text_addrs.append(new_encode_server)
 
     def select_pair(self):
         # TODO: return some message instead of panic
-        if not self.prefill_and_decode_addrs or not self.encode_servers:
+        if not self.text_addrs or not self.encode_servers:
             assert len(self.prefill_configs) > 0, "No prefill servers available"
             assert len(self.decode_servers) > 0, "No decode servers available"
 
@@ -105,10 +105,10 @@ class MiniLoadBalancer:
             decode_server = random.choice(self.decode_servers)
         else:
             decode_server = None
-        if self.prefill_and_decode_addrs:
-            prefill_and_decode = random.choice(self.prefill_and_decode_addrs)
+        if self.text_addrs:
+            text = random.choice(self.text_addrs)
         else:
-            prefill_and_decode = None
+            text = None
         if self.encode_servers:
             encode_server = random.choice(self.encode_servers)
         else:
@@ -118,7 +118,7 @@ class MiniLoadBalancer:
             prefill_config.bootstrap_port if prefill_config else None,
             decode_server,
             encode_server,
-            prefill_and_decode,
+            text,
         )
 
     async def generate(
@@ -128,7 +128,7 @@ class MiniLoadBalancer:
         decode_server,
         endpoint,
         encode_server=None,
-        prefill_and_decode_server=None,
+        text_server=None,
     ) -> ORJSONResponse:
         assert endpoint[0] != "/", f"Endpoint should not start with '/': {endpoint}"
 
@@ -144,7 +144,7 @@ class MiniLoadBalancer:
                 (ServerRole.PREFILL, prefill_server),
                 (ServerRole.DECODE, decode_server),
                 (ServerRole.ENCODE, encode_server),
-                (ServerRole.TEXT, prefill_and_decode_server),
+                (ServerRole.TEXT, text_server),
             ]:
                 if server:
                     tasks_mapping[server_role] = session.post(
@@ -161,7 +161,7 @@ class MiniLoadBalancer:
                     (ServerRole.PREFILL, prefill_server),
                     (ServerRole.DECODE, decode_server),
                     (ServerRole.ENCODE, encode_server),
-                    (ServerRole.TEXT, prefill_and_decode_server),
+                    (ServerRole.TEXT, text_server),
                 ]
             ):
                 if server_role in tasks_mapping:
@@ -202,7 +202,7 @@ class MiniLoadBalancer:
         prefill_server,
         decode_server,
         encode_server=None,
-        prefill_and_decode_server=None,
+        text_server=None,
         endpoint="generate",
     ):
         assert endpoint[0] != "/", f"Endpoint should not start with '/': {endpoint}"
@@ -378,7 +378,7 @@ async def handle_generate_request(request_data: dict):
         bootstrap_port,
         decode_server,
         encode_server,
-        prefill_and_decode_server,
+        text_server,
     ) = load_balancer.select_pair()
 
     # Parse and transform prefill_server for bootstrap data
@@ -412,7 +412,7 @@ async def handle_generate_request(request_data: dict):
             prefill_server,
             decode_server,
             encode_server,
-            prefill_and_decode_server,
+            text_server,
             "generate",
         )
     else:
@@ -422,7 +422,7 @@ async def handle_generate_request(request_data: dict):
             decode_server,
             "generate",
             encode_server=encode_server,
-            prefill_and_decode_server=prefill_and_decode_server,
+            text_server=text_server,
         )
 
 
@@ -432,7 +432,7 @@ async def _forward_to_backend(request_data: dict, endpoint_name: str):
         bootstrap_port,
         decode_server,
         encode_server,
-        prefill_and_decode_server,
+        text_server,
     ) = load_balancer.select_pair()
 
     # Parse and transform prefill_server for bootstrap data
@@ -454,7 +454,7 @@ async def _forward_to_backend(request_data: dict, endpoint_name: str):
             decode_server,
             endpoint=endpoint_name,
             encode_server=encode_server,
-            prefill_and_decode_server=prefill_and_decode_server,
+            text_server=text_server,
         )
     else:
         return await load_balancer.generate(
@@ -463,7 +463,7 @@ async def _forward_to_backend(request_data: dict, endpoint_name: str):
             decode_server,
             endpoint=endpoint_name,
             encode_server=encode_server,
-            prefill_and_decode_server=prefill_and_decode_server,
+            text_server=text_server,
         )
 
 
@@ -536,12 +536,10 @@ async def register(obj: PDRegistryRequest):
     return Response(status_code=200)
 
 
-def run(
-    prefill_configs, decode_addrs, encode_addrs, prefill_and_decode_addrs, host, port
-):
+def run(prefill_configs, decode_addrs, encode_addrs, text_addrs, host, port):
     global load_balancer
     load_balancer = MiniLoadBalancer(
-        prefill_configs, decode_addrs, encode_addrs, prefill_and_decode_addrs
+        prefill_configs, decode_addrs, encode_addrs, text_addrs
     )
     uvicorn.run(app, host=host, port=port)
 
