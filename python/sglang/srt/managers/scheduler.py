@@ -1164,7 +1164,7 @@ class Scheduler(
     def process_input_requests(self, recv_reqs: List):
         for recv_req in recv_reqs:
             # If it is a health check generation request and there are running requests, ignore it.
-            print(f"{recv_req=}")
+            # print(f"{recv_req=}")
             if is_health_check_generate_req(recv_req) and (
                 self.chunked_req is not None or not self.running_batch.is_empty()
             ):
@@ -2067,8 +2067,6 @@ class Scheduler(
             time.sleep(self.forward_sleep_time)
 
         # Run forward
-        print(f"{self.is_generation=}")
-        print(f"{self.spec_algorithm=}")
         if self.is_generation:
             if self.spec_algorithm.is_none():
                 model_worker_batch = batch.get_model_worker_batch()

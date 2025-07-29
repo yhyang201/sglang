@@ -745,7 +745,6 @@ class TokenizerManager:
                 continue
 
             out = state.out_list[-1]
-
             state.out_list = []
             if state.finished:
                 if self.log_requests:

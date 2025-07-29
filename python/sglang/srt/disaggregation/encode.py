@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import socket
+import struct
 import threading
 from collections import deque
 from http import HTTPStatus
@@ -254,8 +255,7 @@ class SchedulerDisaggregationEncodeMixin:
                 result = self.run_batch(batch)
                 self.process_batch_result_disagg_encode(batch, result)
 
-            if len(self.disagg_encode_inflight_queue) > 0:
-                self.process_disagg_encode_inflight_queue()
+            # self.process_disagg_encode_inflight_queue()
 
             if batch is None and len(self.disagg_encode_inflight_queue) == 0:
                 # self.check_memory()
@@ -394,11 +394,15 @@ class SchedulerDisaggregationEncodeMixin:
         #             logits_output,
         #         )
         #         logprob_pt += num_input_logprobs
-        # for i, req in enumerate(batch.reqs):
-        self.send_embedding_chunk(result)
+        # FIXME: manually set finish reason to let req response
+        for i, req in enumerate(batch.reqs):
+            req.finished_reason = FINISH_LENGTH(length=0)
 
+        self.send_embedding_chunk(result)
         # We need to remove the sync in the following function for overlap schedule.
         self.set_next_batch_sampling_info_done(batch)
+        # print(f"{batch.reqs=}")
+        self.stream_output(batch.reqs, batch.return_logprob)
 
     def process_disagg_encode_inflight_queue(
         self: Scheduler, rids_to_check: Optional[List[str]] = None
@@ -409,6 +413,7 @@ class SchedulerDisaggregationEncodeMixin:
         """
         if len(self.disagg_encode_inflight_queue) == 0:
             return []
+        # print(f"process_disagg_encode_inflight_queue")
 
         done_reqs = []
 
@@ -453,6 +458,7 @@ class SchedulerDisaggregationEncodeMixin:
                 assert False, f"Unexpected polling state {poll=}"
 
         # Stream requests which have finished transfer
+        print(f"streaming requests out")
         self.stream_output(
             done_reqs,
             any(req.return_logprob for req in done_reqs),
@@ -494,14 +500,20 @@ class SchedulerDisaggregationEncodeMixin:
         """
         s = socket.socket()
         ip = "127.0.0.1"
-        port = 60002
+        port = 60003
+        print(f"connecting...")
         s.connect((ip, port))
+        print(f"connected, sending...")
 
         embeddings: torch.Tensor = result.logits_output
+
+        shape = embeddings.shape
+        s.sendall(struct.pack("2I", *shape))  # 2个无符号int
         print(f"{embeddings.shape=}")
 
         data = embeddings.to(torch.float32).cpu().numpy().tobytes()
         s.sendall(data)
+        print(f"sent")
         s.close()
         # print(f"{req=}")
         # req.disagg_kv_sender.send_embedding(embeddings, [0])

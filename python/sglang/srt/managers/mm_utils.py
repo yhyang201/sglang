@@ -5,6 +5,7 @@ Multi-modality utils
 import hashlib
 import pickle
 import socket
+import struct
 from abc import abstractmethod
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
@@ -382,7 +383,8 @@ def _get_precomputed_embedding(
 def _get_chunked_prefill_embedding(
     data_embedding_func: Callable[[List[MultimodalDataItem]], torch.Tensor],
     embedding_items: List[MultimodalDataItem],
-    items_size: List[int],
+    cu_items_size: List[int],
+    item_token_lens: List[int],
     prefix_length: List[int],
     extend_length: List[int],
     items_offset_list: List[List[Tuple[int, int]]],
@@ -390,12 +392,16 @@ def _get_chunked_prefill_embedding(
 ) -> Optional[torch.Tensor]:
     # Calculate embedding for each request, try to get it from cache to avoid repeated calculation
     embedding_list = []
+    # print(f"{item_token_lens=}")
     # FIXME(Xinyuan): temporary workaround for eagle3, which may have len(items_size) > len(prefix_length)
-    max_iterations = min(len(items_size) - 1, len(prefix_length))
+    max_iterations = min(len(cu_items_size) - 1, len(prefix_length))
     for i in range(max_iterations):
-        if items_size[i] == items_size[i + 1]:
+        token_length = item_token_lens[i]
+        if cu_items_size[i] == cu_items_size[i + 1]:
             continue
-        embedding_items_per_req = embedding_items[items_size[i] : items_size[i + 1]]
+        embedding_items_per_req = embedding_items[
+            cu_items_size[i] : cu_items_size[i + 1]
+        ]
         items_offset = items_offset_list[i]
         assert items_offset is not None, items_offset
         embedding_items_hash = get_embedding_hash(embedding_items_per_req)
@@ -404,46 +410,56 @@ def _get_chunked_prefill_embedding(
             continue
         embedding_per_req = embedding_cache.get_mm_embedding(embedding_items_hash)
         if embedding_per_req is None:
-            if disaggregation_mode == "prefill":
+            if disaggregation_mode == "text":
                 s = socket.socket()
                 ip = "127.0.0.1"
-                port = 60001
+                port = 60003
                 print(f"start receiving....")
                 s.bind((ip, port))
                 s.listen(1)
                 conn, addr = s.accept()
+
+                shape_bytes = conn.recv(8)
+                rows, cols = struct.unpack("2I", shape_bytes)
+                # 再收数据
                 buf = b""
-                while len(buf) < 10 * 10 * 4:  # float32
+                expected = rows * cols * 4
+                while len(buf) < expected:
                     buf += conn.recv(4096)
-                arr = np.frombuffer(buf, dtype=np.float32).reshape(10, 10)
+
+                # arr = np.frombuffer(buf, dtype=np.float32).reshape(rows, cols)
+                # desired_size = (token_length, hidden_size)
+
+                arr = np.frombuffer(buf, dtype=np.float32).reshape(token_length, -1)
                 embedding_per_req = torch.from_numpy(arr)
                 print(f"end receiving....")
                 print(f"{embedding_per_req.shape=}")
                 conn.close()
-            embedding_per_req = data_embedding_func(embedding_items_per_req)
-            print(f"{embedding_per_req.shape=}")
-            if disaggregation_mode == "prefill":
-                # TODO: mock the pre-alloc
-                allocator = TokenToKVPoolAllocator(
-                    size=2000,
-                    dtype=torch.bfloat16,
-                    device="cuda:0",
-                    kvcache=embedding_cache,
-                )
-                locs = allocator.alloc(embedding_per_req.shape[0])
-                # TODO: mocking the `set` op here, in practice, this will done in `EmbeddingReceiver`
-                embedding_cache.set_mm_embedding(
-                    embedding_items_hash, embedding_per_req, loc=locs
-                )
-                # pass
             else:
-                if not embedding_cache.set_mm_embedding(
-                    embedding_items_hash, embedding_per_req
-                ):
-                    print_warning_once(
-                        "Multimodal embedding cache is full. Consider increasing the "
-                        "`SGLANG_VLM_CACHE_SIZE_MB` environment variable."
+                embedding_per_req = data_embedding_func(embedding_items_per_req)
+                print(f"{embedding_per_req.shape=}")
+                if disaggregation_mode == "prefill":
+                    # TODO: mock the pre-alloc
+                    allocator = TokenToKVPoolAllocator(
+                        size=2000,
+                        dtype=torch.bfloat16,
+                        device="cuda:0",
+                        kvcache=embedding_cache,
                     )
+                    locs = allocator.alloc(embedding_per_req.shape[0])
+                    # TODO: mocking the `set` op here, in practice, this will done in `EmbeddingReceiver`
+                    embedding_cache.set_mm_embedding(
+                        embedding_items_hash, embedding_per_req, loc=locs
+                    )
+                    # pass
+                else:
+                    if not embedding_cache.set_mm_embedding(
+                        embedding_items_hash, embedding_per_req
+                    ):
+                        print_warning_once(
+                            "Multimodal embedding cache is full. Consider increasing the "
+                            "`SGLANG_VLM_CACHE_SIZE_MB` environment variable."
+                        )
 
         if disaggregation_mode == "encode":
             return embedding_per_req
@@ -511,7 +527,8 @@ def get_embedding_and_mask(
     embedding_items: List[MultimodalDataItem],
     placeholder_tensor: torch.Tensor,
     input_ids: torch.Tensor,
-    items_size: List[int],
+    cu_items_count: List[int],
+    item_token_lens: List[int],
     prefix_length: List[int],
     extend_length: List[int],
     items_offset_list: List[List[Tuple[int, int]]],
@@ -525,7 +542,7 @@ def get_embedding_and_mask(
         embedding_items: List of multimodal items to embed
         placeholder_tensor: Tensor containing token IDs that serve as placeholders for multimodal content
         input_ids: The input token IDs tensor
-        items_size: Cumulative sizes of multimodal items per request
+        cu_items_count: Cumulative sizes of multimodal items per request
         prefix_length: Prefix lengths for each request
         extend_length: Sequence lengths for each request
         items_offset_list: List of offset ranges for multimodal items in each request
@@ -543,7 +560,8 @@ def get_embedding_and_mask(
         embedding = _get_chunked_prefill_embedding(
             data_embedding_func,
             embedding_items,
-            items_size,
+            cu_items_count,
+            item_token_lens,
             prefix_length,
             extend_length,
             items_offset_list,
@@ -593,7 +611,7 @@ def embed_mm_inputs(
 
     # 1. Calculate the multimodal data which exists in input_ids, with the help of pad_values
     # we assume that multimodal data are represented with its pad_values in input_ids
-    item_flatten_list = []
+    item_flatten_list: List[MultimodalDataItem] = []
     for mm_inputs in mm_inputs_list:
         item_flatten_list += [item for item in mm_inputs.mm_items if item is not None]
 
@@ -620,6 +638,8 @@ def embed_mm_inputs(
             )
             # calculate per request items length offset
             items_size = torch.zeros(len(mm_inputs_list) + 1, dtype=int)
+            item_token_lens = [item.token_len for item in items]
+
             items_offsets = []
             for i, mm_inputs in enumerate(mm_inputs_list):
                 mm_items = [
@@ -631,20 +651,20 @@ def embed_mm_inputs(
                 items_offsets.append(
                     flatten_nested_list([item.offsets for item in mm_inputs.mm_items])
                 )
-            items_size = torch.cumsum(items_size, dim=0).tolist()
-
+            cu_items_size = torch.cumsum(items_size, dim=0).tolist()
             embedding, mask = get_embedding_and_mask(
                 data_embedding_func=embedder,
                 embedding_items=items,
                 placeholder_tensor=placeholder_tensor,
                 input_ids=input_ids,
-                items_size=items_size,
+                cu_items_count=cu_items_size,
+                item_token_lens=item_token_lens,
                 prefix_length=extend_prefix_lens,
                 extend_length=extend_seq_lens,
                 items_offset_list=items_offsets,
                 disaggregation_mode=disaggregation_mode,
             )
-            print(f"{embedding.shape=}")
+            # print(f"{embedding.shape=}")
             embeddings += [embedding]
             masks += [mask]
 

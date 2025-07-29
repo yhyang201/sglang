@@ -69,13 +69,13 @@ class MiniLoadBalancer:
         prefill_configs: List[PrefillConfig],
         decode_servers: List[str],
         encode_servers: List[str] = None,
-        text_addrs: List[str] = None,
+        text_servers: List[str] = None,
     ):
         self.prefill_configs = prefill_configs
         self.prefill_servers = [p.url for p in prefill_configs]
         self.decode_servers = decode_servers
         self.encode_servers = encode_servers
-        self.text_addrs = text_addrs
+        self.text_addrs = text_servers
 
     def add_prefill_server(self, new_prefill_config: PrefillConfig):
         self.prefill_configs.append(new_prefill_config)
@@ -151,21 +151,23 @@ class MiniLoadBalancer:
                         f"{server}/{endpoint}", json=modified_request
                     )
 
-            # Wait for both responses to complete. Prefill should end first.
-            responses = await asyncio.gather(*tasks_mapping.values())
+            print(f"{tasks_mapping.values()=}")
 
+            # Wait for all responses to complete. Prefill should end first.
+            responses = await asyncio.gather(*tasks_mapping.values())
+            print(f"got all responses")
             # Extract responses based on server roles
             response_mapping = {}
-            for i, (server_role, _) in enumerate(
-                [
-                    (ServerRole.PREFILL, prefill_server),
-                    (ServerRole.DECODE, decode_server),
-                    (ServerRole.ENCODE, encode_server),
-                    (ServerRole.TEXT, text_server),
-                ]
-            ):
+            response_idx = 0
+            for server_role, _ in [
+                (ServerRole.PREFILL, prefill_server),
+                (ServerRole.DECODE, decode_server),
+                (ServerRole.ENCODE, encode_server),
+                (ServerRole.TEXT, text_server),
+            ]:
                 if server_role in tasks_mapping:
-                    response_mapping[server_role] = responses[i]
+                    response_mapping[server_role] = responses[response_idx]
+                    response_idx += 1
 
             if "return_logprob" in modified_request:
                 prefill_response = response_mapping.get(ServerRole.PREFILL)
@@ -188,7 +190,12 @@ class MiniLoadBalancer:
                     decode_response = response_mapping.get(ServerRole.DECODE)
                     ret_json = await decode_response.json() if decode_response else {}
             else:
-                decode_response = response_mapping.get(ServerRole.DECODE)
+                if decode_server:
+                    decode_response = response_mapping.get(ServerRole.DECODE)
+                else:
+                    assert text_server
+                    print(f"using text response as decode_response")
+                    decode_response = response_mapping.get(ServerRole.TEXT)
                 ret_json = await decode_response.json() if decode_response else {}
 
             return ORJSONResponse(
