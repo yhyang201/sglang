@@ -470,6 +470,9 @@ class Qwen2VLForConditionalGeneration(nn.Module):
 
         self.is_encoder = global_server_args_dict["disaggregation_mode"] == "encode"
         self.is_prefill = global_server_args_dict["disaggregation_mode"] == "prefill"
+        self.is_text_model_only = (
+            global_server_args_dict["disaggregation_mode"] == "text"
+        )
 
         if config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
@@ -540,7 +543,7 @@ class Qwen2VLForConditionalGeneration(nn.Module):
                 otherwise it will be `(seq_len,).
                 (Use input_metadata.mrope_positions to replace it)
         """
-
+        print(f"forwarding...")
         if self.is_encoder:
             pass
         else:
@@ -593,7 +596,7 @@ class Qwen2VLForConditionalGeneration(nn.Module):
             if self.is_encoder:
                 if "visual" not in name:
                     continue
-            if self.is_prefill:
+            if self.is_text_model_only:
                 if "visual" in name:
                     continue
 

@@ -1748,7 +1748,7 @@ class ServerArgs:
             "--disaggregation-mode",
             type=str,
             default="null",
-            choices=["null", "prefill", "decode", "encode"],
+            choices=["null", "prefill", "decode", "encode", "text"],
             help='Only used for PD disaggregation. "prefill" for prefill-only server, "decode" for decode-only server, and "encode" for encode-only server. If not specified, it is not PD disaggregated',
         )
         parser.add_argument(

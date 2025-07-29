@@ -4,6 +4,7 @@ Multi-modality utils
 
 import hashlib
 import pickle
+import socket
 from abc import abstractmethod
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
@@ -385,7 +386,7 @@ def _get_chunked_prefill_embedding(
     prefix_length: List[int],
     extend_length: List[int],
     items_offset_list: List[List[Tuple[int, int]]],
-    is_encoder: Optional[bool] = False,
+    disaggregation_mode: Optional[str] = "null",
 ) -> Optional[torch.Tensor]:
     # Calculate embedding for each request, try to get it from cache to avoid repeated calculation
     embedding_list = []
@@ -403,9 +404,25 @@ def _get_chunked_prefill_embedding(
             continue
         embedding_per_req = embedding_cache.get_mm_embedding(embedding_items_hash)
         if embedding_per_req is None:
+            if disaggregation_mode == "prefill":
+                s = socket.socket()
+                ip = "127.0.0.1"
+                port = 60001
+                print(f"start receiving....")
+                s.bind((ip, port))
+                s.listen(1)
+                conn, addr = s.accept()
+                buf = b""
+                while len(buf) < 10 * 10 * 4:  # float32
+                    buf += conn.recv(4096)
+                arr = np.frombuffer(buf, dtype=np.float32).reshape(10, 10)
+                embedding_per_req = torch.from_numpy(arr)
+                print(f"end receiving....")
+                print(f"{embedding_per_req.shape=}")
+                conn.close()
             embedding_per_req = data_embedding_func(embedding_items_per_req)
             print(f"{embedding_per_req.shape=}")
-            if is_epd:
+            if disaggregation_mode == "prefill":
                 # TODO: mock the pre-alloc
                 allocator = TokenToKVPoolAllocator(
                     size=2000,
@@ -428,7 +445,7 @@ def _get_chunked_prefill_embedding(
                         "`SGLANG_VLM_CACHE_SIZE_MB` environment variable."
                     )
 
-        if is_encoder:
+        if disaggregation_mode == "encode":
             return embedding_per_req
         embedding_per_req_chunk, _, end_index = get_embedding_chunk(
             embedding=embedding_per_req,
@@ -498,7 +515,7 @@ def get_embedding_and_mask(
     prefix_length: List[int],
     extend_length: List[int],
     items_offset_list: List[List[Tuple[int, int]]],
-    is_encoder: Optional[bool] = False,
+    disaggregation_mode: Optional[str] = "null",
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """
     Generate multimodal embeddings and create a mask for identifying their positions in the input sequence.
@@ -530,12 +547,11 @@ def get_embedding_and_mask(
             prefix_length,
             extend_length,
             items_offset_list,
-            is_encoder,
+            disaggregation_mode,
         )
-        print(f"530 {embedding.shape=}")
         if embedding is None:
             return None, None
-    if is_encoder:
+    if disaggregation_mode == "encode":
         return embedding, None
     # 2. Get mask
     special_multimodal_mask = _get_multimodal_mask(input_ids, placeholder_tensor)
@@ -555,7 +571,7 @@ def embed_mm_inputs(
         Modality, Callable[[List[MultimodalDataItem]], torch.Tensor]
     ] = None,
     placeholder_tokens: dict[Modality, List[int]] = None,
-    is_encoder: Optional[bool] = False,
+    disaggregation_mode: Optional[str] = "null",
 ) -> Union[Optional[torch.Tensor], List[torch.Tensor]]:
     """
     Embed multimodal inputs and integrate them with text token embeddings.
@@ -626,13 +642,13 @@ def embed_mm_inputs(
                 prefix_length=extend_prefix_lens,
                 extend_length=extend_seq_lens,
                 items_offset_list=items_offsets,
-                is_encoder=is_encoder,
+                disaggregation_mode=disaggregation_mode,
             )
             print(f"{embedding.shape=}")
             embeddings += [embedding]
             masks += [mask]
 
-    if is_encoder:
+    if disaggregation_mode == "encode":
         return embeddings
     # 3. Get input embeddings
     vocab_size = input_embedding.num_embeddings
@@ -680,9 +696,9 @@ def general_mm_embed_routine(
         Hidden states from language model forward pass
     """
 
-    is_encoder = global_server_args_dict["disaggregation_mode"] == "encode"
+    disaggregation_mode = global_server_args_dict["disaggregation_mode"]
 
-    if is_encoder:
+    if disaggregation_mode == "encode":
         embed_tokens = None
     else:
         assert hasattr(language_model, "get_input_embeddings")
@@ -713,7 +729,7 @@ def general_mm_embed_routine(
             multimodal_model=multimodal_model,
             data_embedding_func_mapping=data_embedding_funcs,
             placeholder_tokens=placeholder_tokens,
-            is_encoder=is_encoder,
+            disaggregation_mode=disaggregation_mode,
         )
         # once used, mm_inputs is useless, considering chunked-prefill is disabled for multimodal models
         # just being defensive here
@@ -721,7 +737,7 @@ def general_mm_embed_routine(
     else:
         inputs_embeds = embed_tokens(input_ids)
 
-    if is_encoder:
+    if disaggregation_mode == "encode":
         return inputs_embeds
 
     hidden_states = language_model(

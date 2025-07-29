@@ -270,7 +270,6 @@ class TpModelWorker:
             logits_output, can_run_cuda_graph = self.model_runner.forward(
                 forward_batch, pp_proxy_tensors=pp_proxy_tensors
             )
-            print(f"TpModelWorker {logits_output=}")
             if launch_done is not None:
                 launch_done.set()
 

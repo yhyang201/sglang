@@ -238,7 +238,9 @@ class TpModelWorkerClient:
         return logits_output, next_token_ids, can_run_cuda_graph
 
     def forward_batch_generation(
-        self, model_worker_batch: ModelWorkerBatch
+        self,
+        model_worker_batch: ModelWorkerBatch,
+        skip_sample: bool = False,
     ) -> Tuple[None, torch.Tensor, bool]:
         # Create a new copy of sampling_info because it will be updated in-place by the scheduler for the next batch.
         sampling_info = model_worker_batch.sampling_info

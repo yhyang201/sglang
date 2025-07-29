@@ -31,6 +31,7 @@ class DisaggregationMode(Enum):
     ENCODE = "encode"
     PREFILL = "prefill"
     DECODE = "decode"
+    TEXT = "text"
 
 
 #########################

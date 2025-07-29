@@ -20,6 +20,7 @@ Life cycle of a request in the decode server
 from __future__ import annotations
 
 import logging
+import socket
 import threading
 from collections import deque
 from http import HTTPStatus
@@ -491,8 +492,16 @@ class SchedulerDisaggregationEncodeMixin:
         """
         Send a embedding to the prefill server
         """
+        s = socket.socket()
+        ip = "127.0.0.1"
+        port = 60002
+        s.connect((ip, port))
 
-        embeddings = result.logits_output
-        # print(f"{req=}")
+        embeddings: torch.Tensor = result.logits_output
         print(f"{embeddings.shape=}")
+
+        data = embeddings.to(torch.float32).cpu().numpy().tobytes()
+        s.sendall(data)
+        s.close()
+        # print(f"{req=}")
         # req.disagg_kv_sender.send_embedding(embeddings, [0])

@@ -718,6 +718,7 @@ class TokenizerManager:
         tokenized_obj: Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput],
         created_time: Optional[float] = None,
     ):
+        print(f"send to scheduler {tokenized_obj=}")
         self.send_to_scheduler.send_pyobj(tokenized_obj)
         state = ReqState([], False, asyncio.Event(), obj, created_time=created_time)
         self.rid_to_state[obj.rid] = state

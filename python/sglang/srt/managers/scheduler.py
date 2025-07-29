@@ -1164,6 +1164,7 @@ class Scheduler(
     def process_input_requests(self, recv_reqs: List):
         for recv_req in recv_reqs:
             # If it is a health check generation request and there are running requests, ignore it.
+            print(f"{recv_req=}")
             if is_health_check_generate_req(recv_req) and (
                 self.chunked_req is not None or not self.running_batch.is_empty()
             ):
@@ -1182,6 +1183,7 @@ class Scheduler(
         self,
         recv_req: TokenizedGenerateReqInput,
     ):
+        print(f"scheduler handle_generate_request")
         # Create a new request
         if (
             recv_req.session_params is None
@@ -3127,7 +3129,10 @@ def run_scheduler_process(
         )
 
         disaggregation_mode: DisaggregationMode = scheduler.disaggregation_mode
-        if disaggregation_mode == DisaggregationMode.NULL:
+        if (
+            disaggregation_mode == DisaggregationMode.NULL
+            or disaggregation_mode == DisaggregationMode.TEXT
+        ):
             if server_args.pp_size > 1:
                 scheduler.event_loop_pp()
             elif scheduler.enable_overlap:

@@ -1004,7 +1004,10 @@ def _execute_server_warmup(
         json_data["sampling_params"]["max_new_tokens"] = 0
 
     try:
-        if server_args.disaggregation_mode == "null":
+        if (
+            server_args.disaggregation_mode == "null"
+            or server_args.disaggregation_mode == "text"
+        ):
             res = requests.post(
                 url + request_name,
                 json=json_data,

@@ -60,7 +60,7 @@ class ServerRole(IntEnum):
     ENCODE = auto()
     PREFILL = auto()
     DECODE = auto()
-    PREFILL_AND_DECODE = auto()
+    TEXT = auto()
 
 
 class MiniLoadBalancer:
@@ -144,7 +144,7 @@ class MiniLoadBalancer:
                 (ServerRole.PREFILL, prefill_server),
                 (ServerRole.DECODE, decode_server),
                 (ServerRole.ENCODE, encode_server),
-                (ServerRole.PREFILL_AND_DECODE, prefill_and_decode_server),
+                (ServerRole.TEXT, prefill_and_decode_server),
             ]:
                 if server:
                     tasks_mapping[server_role] = session.post(
@@ -161,7 +161,7 @@ class MiniLoadBalancer:
                     (ServerRole.PREFILL, prefill_server),
                     (ServerRole.DECODE, decode_server),
                     (ServerRole.ENCODE, encode_server),
-                    (ServerRole.PREFILL_AND_DECODE, prefill_and_decode_server),
+                    (ServerRole.TEXT, prefill_and_decode_server),
                 ]
             ):
                 if server_role in tasks_mapping:
