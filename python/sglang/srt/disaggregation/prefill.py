@@ -709,10 +709,10 @@ class SchedulerDisaggregationPrefillMixin:
                 result = self.run_batch(batch)
                 self.process_batch_result_disagg_prefill(batch, result)
 
-            if len(self.disagg_encode_inflight_queue) > 0:
+            if len(self.disagg_prefill_inflight_queue) > 0:
                 self.process_disagg_prefill_inflight_queue()
 
-            if batch is None and len(self.disagg_encode_inflight_queue) == 0:
+            if batch is None and len(self.disagg_prefill_inflight_queue) == 0:
                 self.check_memory()
                 self.new_token_ratio = self.init_new_token_ratio
                 self.maybe_sleep_on_idle()
@@ -759,10 +759,10 @@ class SchedulerDisaggregationPrefillMixin:
                 )
                 self.process_batch_result_disagg_prefill(tmp_batch, tmp_result)
 
-            if len(self.disagg_encode_inflight_queue) > 0:
+            if len(self.disagg_prefill_inflight_queue) > 0:
                 self.process_disagg_prefill_inflight_queue()
 
-            if batch is None and len(self.disagg_encode_inflight_queue) == 0:
+            if batch is None and len(self.disagg_prefill_inflight_queue) == 0:
                 self.check_memory()
                 self.new_token_ratio = self.init_new_token_ratio
                 self.maybe_sleep_on_idle()
@@ -822,7 +822,7 @@ class SchedulerDisaggregationPrefillMixin:
                 # There is no output_ids for prefill
                 req.output_ids.append(next_token_id)
                 self.tree_cache.cache_unfinished_req(req)  # update the tree and lock
-                self.disagg_encode_inflight_queue.append(req)
+                self.disagg_prefill_inflight_queue.append(req)
                 if logits_output.hidden_states is not None:
                     last_hidden_index = (
                         hidden_state_offset + extend_input_len_per_req[i] - 1
@@ -1038,74 +1038,7 @@ class SchedulerDisaggregationPrefillMixin:
             self.req_to_metadata_buffer_idx_allocator.free(req.metadata_buffer_index)
             req.metadata_buffer_index = -1
 
-        self.disagg_encode_inflight_queue = undone_reqs
-
-        return done_reqs
-
-    def process_disagg_encode_inflight_queue(
-        self: Scheduler, rids_to_check: Optional[List[str]] = None
-    ) -> List[Req]:
-        """
-        Poll the requests in the middle of transfer. If done, return the request.
-        rids_to_check: For PP, on rank > 0, check the rids from the previous rank has consensus with the current rank.
-        """
-        if len(self.disagg_encode_inflight_queue) == 0:
-            return []
-
-        done_reqs = []
-
-        polls = poll_and_all_reduce(
-            [req.disagg_kv_sender for req in self.disagg_encode_inflight_queue],
-            self.attn_tp_cpu_group,
-        )
-
-        undone_reqs: List[Req] = []
-        # Check .poll() for the reqs in disagg_prefill_inflight_queue. If Success, respond to the client and remove it from the queue
-        for req, poll in zip(self.disagg_encode_inflight_queue, polls):
-
-            if rids_to_check is not None:
-                if req.rid not in rids_to_check:
-                    undone_reqs.append(req)
-                    continue
-
-                assert poll == KVPoll.Success or poll == KVPoll.Failed
-
-            if poll in [KVPoll.WaitingForInput, KVPoll.Transferring]:
-                undone_reqs.append(req)
-            elif poll == KVPoll.Success:  # transfer done
-                self.tree_cache.cache_finished_req(req)  # unlock the tree
-                req.finished_reason = FINISH_LENGTH(length=0)
-                # FIXME: clean up req's data in transfer engine
-                if hasattr(req.disagg_kv_sender, "clear"):
-                    req.disagg_kv_sender.clear()
-                done_reqs.append(req)
-            elif poll == KVPoll.Failed:
-                error_message = f"Prefill transfer failed for request rank={self.tp_rank} {req.rid=} {req.bootstrap_room=}"
-                try:
-                    req.disagg_kv_sender.failure_exception()
-                except Exception as e:
-                    error_message += f" with exception {e}"
-                logger.warning(error_message)
-                self.tree_cache.cache_finished_req(req)  # unlock the tree
-                prepare_abort(
-                    req, error_message, status_code=HTTPStatus.INTERNAL_SERVER_ERROR
-                )
-                done_reqs.append(req)
-            else:
-                assert False, f"Unexpected polling state {poll=}"
-
-        # Stream requests which have finished transfer
-        self.stream_output(
-            done_reqs,
-            any(req.return_logprob for req in done_reqs),
-            None,
-        )
-        for req in done_reqs:
-            req: Req
-            self.req_to_metadata_buffer_idx_allocator.free(req.metadata_buffer_index)
-            req.metadata_buffer_index = -1
-
-        self.disagg_encode_inflight_queue = undone_reqs
+        self.disagg_prefill_inflight_queue = undone_reqs
 
         return done_reqs
 

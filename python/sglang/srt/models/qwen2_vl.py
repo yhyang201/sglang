@@ -30,6 +30,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from transformers import Qwen2VLConfig
 from transformers.models.qwen2_vl.configuration_qwen2_vl import Qwen2VLVisionConfig
 
 from sglang.srt.hf_transformers_utils import get_processor
@@ -53,7 +54,6 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen2 import Qwen2Model
 from sglang.srt.utils import add_prefix
-from transformers import Qwen2VLConfig
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +228,7 @@ class Qwen2VisionPatchMerger(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.hidden_size = context_dim * (spatial_merge_size ** 2)
+        self.hidden_size = context_dim * (spatial_merge_size**2)
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.ln_q = norm_layer(context_dim)
@@ -541,7 +541,6 @@ class Qwen2VLForConditionalGeneration(nn.Module):
                 (Use input_metadata.mrope_positions to replace it)
         """
 
-
         if self.is_encoder:
             pass
         else:
@@ -557,7 +556,6 @@ class Qwen2VLForConditionalGeneration(nn.Module):
                         "multimodal section rotary embedding requires "
                         f"(3, seq_len) positions, but got {positions.size()}"
                     )
-
 
         hidden_states = general_mm_embed_routine(
             input_ids=input_ids,

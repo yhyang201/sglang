@@ -823,7 +823,7 @@ class Scheduler(
                 scheduler=self,
             )
 
-            # The decode requests pending for pre-allocation
+            # The prefill requests pending for pre-allocation, waiting for encoder embeddings
             self.disagg_prefill_prealloc_queue = PrefillPreallocQueue(
                 mm_embedding_pool=self.mm_embedding_pool,
                 token_to_kv_pool_allocator=self.mm_embedding_allocator,
@@ -834,7 +834,7 @@ class Scheduler(
                 gloo_group=self.attn_tp_cpu_group,
                 tp_rank=self.tp_rank,
                 tp_size=self.tp_size,
-                dp_size=self.server_args.disaggregation_encode_dp,
+                dp_size=1,
                 gpu_id=self.gpu_id,
                 bootstrap_port=self.server_args.disaggregation_bootstrap_port,
                 max_total_num_tokens=self.max_total_num_tokens,
@@ -1475,7 +1475,7 @@ class Scheduler(
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             f += f"#unbootstrapped-req: {len(self.disagg_prefill_bootstrap_queue.queue)}, "
             f += f"#queue-req: {len(self.waiting_queue)}, "
-            f += f"#transferring-req: {len(self.disagg_encode_inflight_queue)}, "
+            f += f"#transferring-req: {len(self.disagg_prefill_inflight_queue)}, "
             f += f"input throughput (token/s): {self.last_input_throughput:.2f}, "
         else:
             f += f"#running-req: {running_bs}, "

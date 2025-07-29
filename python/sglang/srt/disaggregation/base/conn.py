@@ -83,14 +83,13 @@ class BaseKVSender(ABC):
         """
         ...
 
-    @abstractmethod
     def send_embedding(
         self, embeddings: torch.Tensor, embedding_start_indices: List[int]
     ):
         """
         Send the concatenated embeddings with each embedding's start token indices
         """
-        ...
+        pass
 
     @abstractmethod
     def poll(self) -> KVPoll:
