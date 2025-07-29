@@ -564,7 +564,7 @@ class Qwen2VLForConditionalGeneration(nn.Module):
             multimodal_model=self,
             positions=positions,
         )
-
+        print(f"{hidden_states=}")
         if self.is_encoder:
             return hidden_states[0]
         elif get_embedding:

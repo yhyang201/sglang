@@ -41,7 +41,6 @@ from sglang.srt.disaggregation.utils import (
     prepare_abort,
 )
 from sglang.srt.managers.schedule_batch import FINISH_LENGTH, Req, ScheduleBatch
-from sglang.srt.mem_cache.multimodal_cache import PagedMultiModalEmbeddingPool
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.utils import require_mlp_sync
 
@@ -394,8 +393,8 @@ class SchedulerDisaggregationEncodeMixin:
         #             logits_output,
         #         )
         #         logprob_pt += num_input_logprobs
-        for i, req in enumerate(batch.reqs):
-            self.send_embedding_chunk(req)
+        # for i, req in enumerate(batch.reqs):
+        self.send_embedding_chunk(result)
 
         # We need to remove the sync in the following function for overlap schedule.
         self.set_next_batch_sampling_info_done(batch)
@@ -486,11 +485,14 @@ class SchedulerDisaggregationEncodeMixin:
 
     def send_embedding_chunk(
         self: Scheduler,
-        req: Req,
+        result: GenerationBatchResult,
+        req: Req = None,
     ) -> None:
         """
         Send a embedding to the prefill server
         """
 
-        embeddings = req.hidden_states_tensor
-        req.disagg_kv_sender.send_embedding(embeddings, [0])
+        embeddings = result.logits_output
+        # print(f"{req=}")
+        print(f"{embeddings.shape=}")
+        # req.disagg_kv_sender.send_embedding(embeddings, [0])

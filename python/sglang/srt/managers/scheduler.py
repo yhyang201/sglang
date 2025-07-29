@@ -2065,6 +2065,8 @@ class Scheduler(
             time.sleep(self.forward_sleep_time)
 
         # Run forward
+        print(f"{self.is_generation=}")
+        print(f"{self.spec_algorithm=}")
         if self.is_generation:
             if self.spec_algorithm.is_none():
                 model_worker_batch = batch.get_model_worker_batch()

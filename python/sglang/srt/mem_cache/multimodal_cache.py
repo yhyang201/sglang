@@ -44,13 +44,13 @@ class MultimodalCache(abc.ABC):
         """
         raise NotImplementedError()
 
-    @abc.abstractmethod
-    def get_pointers_from_locs(self, locs: torch.Tensor) -> torch.Tensor:
-        """
-        Given a tensor of locations (indices), returns a tensor of pointers
-        to these locations in the multimodal buffer.
-        """
-        raise NotImplementedError()
+    # @abc.abstractmethod
+    # def get_pointers_from_locs(self, locs: torch.Tensor) -> torch.Tensor:
+    #     """
+    #     Given a tensor of locations (indices), returns a tensor of pointers
+    #     to these locations in the multimodal buffer.
+    #     """
+    #     raise NotImplementedError()
 
     @abc.abstractmethod
     def has(self, mm_hash: int) -> bool:

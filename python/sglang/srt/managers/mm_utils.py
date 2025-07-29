@@ -288,7 +288,7 @@ class MultiModalityDataPaddingPatternMultimodalTokens(MultiModalityDataPaddingPa
 
 
 embedding_cache: Optional[MultimodalCache] = None
-is_epd = True
+is_epd = False
 
 
 def init_embedding_cache(max_size: int = 0):
@@ -385,6 +385,7 @@ def _get_chunked_prefill_embedding(
     prefix_length: List[int],
     extend_length: List[int],
     items_offset_list: List[List[Tuple[int, int]]],
+    is_encoder: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
     # Calculate embedding for each request, try to get it from cache to avoid repeated calculation
     embedding_list = []
@@ -427,12 +428,15 @@ def _get_chunked_prefill_embedding(
                         "`SGLANG_VLM_CACHE_SIZE_MB` environment variable."
                     )
 
+        if is_encoder:
+            return embedding_per_req
         embedding_per_req_chunk, _, end_index = get_embedding_chunk(
             embedding=embedding_per_req,
             extend_prefix_len=prefix_length[i],
             extend_seq_len=extend_length[i] if i < len(extend_length) else 0,
             items_offset=items_offset,
         )
+        print(f"{embedding_per_req_chunk.shape=}")
         # remove this item from cache if chunk reaches to the end
         embedding_per_req_length = (
             embedding_per_req.shape[0]
@@ -526,7 +530,9 @@ def get_embedding_and_mask(
             prefix_length,
             extend_length,
             items_offset_list,
+            is_encoder,
         )
+        print(f"530 {embedding.shape=}")
         if embedding is None:
             return None, None
     if is_encoder:
@@ -622,6 +628,7 @@ def embed_mm_inputs(
                 items_offset_list=items_offsets,
                 is_encoder=is_encoder,
             )
+            print(f"{embedding.shape=}")
             embeddings += [embedding]
             masks += [mask]
 
@@ -716,6 +723,7 @@ def general_mm_embed_routine(
 
     if is_encoder:
         return inputs_embeds
+
     hidden_states = language_model(
         input_ids=None,
         forward_batch=forward_batch,
