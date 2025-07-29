@@ -455,23 +455,23 @@ class Qwen2VLForConditionalGeneration(nn.Module):
         super().__init__()
 
         self.config = config
-        self.visual = Qwen2VisionTransformer(
-            config.vision_config,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            # NOTE: Qwen2-VL vision encoder currently supports BitsAndBytes 4-bit quantization.
-            # Other quantization methods (e.g., GPTQ, AWQ) are untested and may not be supported.
-            quant_config=quant_config,
-            prefix=add_prefix("visual", prefix),
-        )
-
-        self.model = Qwen2Model(
-            config, quant_config, prefix=add_prefix("model", prefix)
-        )
-
         self.is_encoder = global_server_args_dict["disaggregation_mode"] == "encode"
         self.is_prefill = global_server_args_dict["disaggregation_mode"] == "prefill"
         self.is_text_model_only = (
             global_server_args_dict["disaggregation_mode"] == "text"
+        )
+        if not self.is_text_model_only:
+            self.visual = Qwen2VisionTransformer(
+                config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                # NOTE: Qwen2-VL vision encoder currently supports BitsAndBytes 4-bit quantization.
+                # Other quantization methods (e.g., GPTQ, AWQ) are untested and may not be supported.
+                quant_config=quant_config,
+                prefix=add_prefix("visual", prefix),
+            )
+
+        self.model = Qwen2Model(
+            config, quant_config, prefix=add_prefix("model", prefix)
         )
 
         if config.tie_word_embeddings:
@@ -543,7 +543,6 @@ class Qwen2VLForConditionalGeneration(nn.Module):
                 otherwise it will be `(seq_len,).
                 (Use input_metadata.mrope_positions to replace it)
         """
-        print(f"forwarding...")
         if self.is_encoder:
             pass
         else:
@@ -565,9 +564,9 @@ class Qwen2VLForConditionalGeneration(nn.Module):
             forward_batch=forward_batch,
             language_model=self.model,
             multimodal_model=self,
+            mm_embedding_pool=forward_batch.mm_embedding_pool,
             positions=positions,
         )
-        print(f"{hidden_states=}")
         if self.is_encoder:
             return hidden_states[0]
         elif get_embedding:

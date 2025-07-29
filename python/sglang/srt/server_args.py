@@ -587,8 +587,8 @@ class ServerArgs:
                 self.disable_overlap_schedule = True
                 print(f"Automatically turn off overlap schedule for encoder")
 
-            self.disable_cuda_graph = True
-            print(f"Automatically turn off cuda graph for encoder")
+            # self.disable_cuda_graph = True
+            # print(f"Automatically turn off cuda graph for encoder")
 
             if self.disaggregation_decode_tp is None:
                 self.disaggregation_decode_tp = self.tp_size

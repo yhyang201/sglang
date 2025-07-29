@@ -44,6 +44,7 @@ from sglang.srt.layers.dp_attention import (
     get_attention_tp_size,
 )
 from sglang.srt.layers.rotary_embedding import MRotaryEmbedding
+from sglang.srt.mem_cache.multimodal_cache import PagedMultiModalEmbeddingPool
 from sglang.srt.utils import (
     flatten_nested_list,
     get_compiler_backend,
@@ -260,6 +261,10 @@ class ForwardBatch:
     # Attention backend
     req_to_token_pool: ReqToTokenPool = None
     token_to_kv_pool: KVCache = None
+
+    # encoder disaggregation, prefill node
+    mm_embedding_pool: PagedMultiModalEmbeddingPool = None
+
     attn_backend: AttentionBackend = None
 
     # For DP attention
@@ -329,6 +334,7 @@ class ForwardBatch:
             sampling_info=batch.sampling_info,
             req_to_token_pool=model_runner.req_to_token_pool,
             token_to_kv_pool=model_runner.token_to_kv_pool,
+            mm_embedding_pool=model_runner.mm_embedding_pool,
             attn_backend=model_runner.attn_backend,
             spec_algorithm=batch.spec_algorithm,
             spec_info=batch.spec_info,

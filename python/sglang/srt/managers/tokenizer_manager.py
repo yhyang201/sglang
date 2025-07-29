@@ -530,13 +530,25 @@ class TokenizerManager:
             if not isinstance(obj.audio_data, list):
                 obj.audio_data = [obj.audio_data]
             start = time.time()
-            mm_inputs: Dict = await self.mm_processor.process_mm_data_async(
-                image_data=obj.image_data,
-                audio_data=obj.audio_data,
-                input_text=input_text or input_ids,
-                request_obj=obj,
-                max_req_input_len=self.max_req_input_len,
-            )
+            if (
+                self.server_args.disaggregation_mode == "text"
+                or self.server_args.disaggregation_mode == "null"
+            ):
+                mm_inputs: Dict = await self.mm_processor.process_mm_data_async(
+                    image_data=obj.image_data,
+                    audio_data=obj.audio_data,
+                    input_text=input_text or input_ids,
+                    request_obj=obj,
+                    max_req_input_len=self.max_req_input_len,
+                )
+            else:
+                mm_inputs: Dict = await self.mm_processor.process_mm_data_async(
+                    image_data=obj.image_data,
+                    audio_data=obj.audio_data,
+                    input_text=input_text or input_ids,
+                    request_obj=obj,
+                    max_req_input_len=self.max_req_input_len,
+                )
             print(f"preprocess {time.time() - start}")
             if mm_inputs and "input_ids" in mm_inputs:
                 input_ids = mm_inputs["input_ids"]
@@ -718,7 +730,6 @@ class TokenizerManager:
         tokenized_obj: Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput],
         created_time: Optional[float] = None,
     ):
-        print(f"send to scheduler {tokenized_obj=}")
         self.send_to_scheduler.send_pyobj(tokenized_obj)
         state = ReqState([], False, asyncio.Event(), obj, created_time=created_time)
         self.rid_to_state[obj.rid] = state

@@ -97,7 +97,7 @@ class TpModelWorker:
             is_draft_worker=is_draft_worker,
             req_to_token_pool=req_to_token_pool,
             token_to_kv_pool_allocator=token_to_kv_pool_allocator,
-            mm_item_to_token_pool=mm_item_to_token_pool,
+            mm_embedding_pool=mm_item_to_token_pool,
             mm_embedding_allocator=mm_embedding_allocator,
         )
         if server_args.skip_tokenizer_init:
@@ -244,7 +244,7 @@ class TpModelWorker:
 
     def get_mm_memory_pool(self):
         return (
-            self.model_runner.mm_item_to_token_pool,
+            self.model_runner.mm_embedding_pool,
             self.model_runner.mm_embedding_allocator,
         )
 

@@ -137,7 +137,7 @@ class TpModelWorkerClient:
         self,
     ) -> Tuple[PagedMultiModalEmbeddingPool, BaseTokenToKVPoolAllocator]:
         return (
-            self.worker.model_runner.mm_item_to_token_pool,
+            self.worker.model_runner.mm_embedding_pool,
             self.worker.model_runner.mm_embedding_allocator,
         )
 

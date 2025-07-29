@@ -295,18 +295,7 @@ is_epd = False
 
 def init_embedding_cache(max_size: int = 0):
     global embedding_cache
-    if is_epd:
-        # pass
-        hidden_size = 3584
-        size = 2000
-        page_size = 1
-        dtype = torch.bfloat16
-        device = "cuda:0"
-        embedding_cache = PagedMultiModalEmbeddingPool(
-            size, hidden_size, page_size, dtype, device
-        )
-    else:
-        embedding_cache = MultiModalStaticCache(max_size)
+    embedding_cache = MultiModalStaticCache(max_size)
 
 
 def get_embedding_hash(embedding_items: List[MultimodalDataItem]) -> int:
@@ -389,10 +378,14 @@ def _get_chunked_prefill_embedding(
     extend_length: List[int],
     items_offset_list: List[List[Tuple[int, int]]],
     disaggregation_mode: Optional[str] = "null",
+    mm_embedding_pool: Optional[PagedMultiModalEmbeddingPool] = None,
 ) -> Optional[torch.Tensor]:
+    """
+    :param mm_embedding_pool: If not none, mm embeddings are already presented in this pool
+    """
+
     # Calculate embedding for each request, try to get it from cache to avoid repeated calculation
     embedding_list = []
-    # print(f"{item_token_lens=}")
     # FIXME(Xinyuan): temporary workaround for eagle3, which may have len(items_size) > len(prefix_length)
     max_iterations = min(len(cu_items_size) - 1, len(prefix_length))
     for i in range(max_iterations):
@@ -410,7 +403,7 @@ def _get_chunked_prefill_embedding(
             continue
         embedding_per_req = embedding_cache.get_mm_embedding(embedding_items_hash)
         if embedding_per_req is None:
-            if disaggregation_mode == "text":
+            if mm_embedding_pool is not None:
                 s = socket.socket()
                 ip = "127.0.0.1"
                 port = 60003
@@ -418,49 +411,63 @@ def _get_chunked_prefill_embedding(
                 s.bind((ip, port))
                 s.listen(1)
                 conn, addr = s.accept()
-
                 shape_bytes = conn.recv(8)
                 rows, cols = struct.unpack("2I", shape_bytes)
-                # 再收数据
                 buf = b""
                 expected = rows * cols * 4
                 while len(buf) < expected:
                     buf += conn.recv(4096)
-
-                # arr = np.frombuffer(buf, dtype=np.float32).reshape(rows, cols)
-                # desired_size = (token_length, hidden_size)
-
                 arr = np.frombuffer(buf, dtype=np.float32).reshape(token_length, -1)
-                embedding_per_req = torch.from_numpy(arr)
+                embedding_per_req = torch.from_numpy(arr).to("cuda")
                 print(f"end receiving....")
                 print(f"{embedding_per_req.shape=}")
                 conn.close()
+
+                # TODO: mock the pre-alloc
+                allocator = TokenToKVPoolAllocator(
+                    size=4000,
+                    dtype=torch.bfloat16,
+                    device="cuda",
+                    kvcache=mm_embedding_pool,
+                )
+                locs = allocator.alloc(embedding_per_req.shape[0])
+                # TODO: mocking the `set` op here, in practice, this will done in `EmbeddingReceiver`
+                mm_embedding_pool.set_mm_embedding(
+                    embedding_items_hash, embedding_per_req, loc=locs
+                )
+
+            if mm_embedding_pool is not None:
+                # at this point, the embeddings have already been written into embedding pool
+                embedding_per_req = mm_embedding_pool.get_mm_embedding(
+                    embedding_items_hash
+                )
             else:
                 embedding_per_req = data_embedding_func(embedding_items_per_req)
                 print(f"{embedding_per_req.shape=}")
-                if disaggregation_mode == "prefill":
-                    # TODO: mock the pre-alloc
-                    allocator = TokenToKVPoolAllocator(
-                        size=2000,
-                        dtype=torch.bfloat16,
-                        device="cuda:0",
-                        kvcache=embedding_cache,
+                # if disaggregation_mode == "prefill":
+                #     # TODO: mock the pre-alloc
+                #     allocator = TokenToKVPoolAllocator(
+                #         size=2000,
+                #         dtype=torch.bfloat16,
+                #         device="cuda:0",
+                #         kvcache=mm_embedding_pool,
+                #     )
+                #     locs = allocator.alloc(embedding_per_req.shape[0])
+                #     # TODO: mocking the `set` op here, in practice, this will done in `EmbeddingReceiver`
+                #     mm_embedding_pool.set_mm_embedding(
+                #         embedding_items_hash, embedding_per_req, loc=locs
+                #     )
+                #     # pass
+                # else:
+                if not embedding_cache.set_mm_embedding(
+                    embedding_items_hash, embedding_per_req
+                ):
+                    print_warning_once(
+                        "Multimodal embedding cache is full. Consider increasing the "
+                        "`SGLANG_VLM_CACHE_SIZE_MB` environment variable."
                     )
-                    locs = allocator.alloc(embedding_per_req.shape[0])
-                    # TODO: mocking the `set` op here, in practice, this will done in `EmbeddingReceiver`
-                    embedding_cache.set_mm_embedding(
-                        embedding_items_hash, embedding_per_req, loc=locs
-                    )
-                    # pass
-                else:
-                    if not embedding_cache.set_mm_embedding(
-                        embedding_items_hash, embedding_per_req
-                    ):
-                        print_warning_once(
-                            "Multimodal embedding cache is full. Consider increasing the "
-                            "`SGLANG_VLM_CACHE_SIZE_MB` environment variable."
-                        )
 
+        assert embedding_per_req is not None
         if disaggregation_mode == "encode":
             return embedding_per_req
         embedding_per_req_chunk, _, end_index = get_embedding_chunk(
@@ -469,7 +476,7 @@ def _get_chunked_prefill_embedding(
             extend_seq_len=extend_length[i] if i < len(extend_length) else 0,
             items_offset=items_offset,
         )
-        print(f"{embedding_per_req_chunk.shape=}")
+        # print(f"{embedding_per_req_chunk.shape=}")
         # remove this item from cache if chunk reaches to the end
         embedding_per_req_length = (
             embedding_per_req.shape[0]
@@ -533,6 +540,7 @@ def get_embedding_and_mask(
     extend_length: List[int],
     items_offset_list: List[List[Tuple[int, int]]],
     disaggregation_mode: Optional[str] = "null",
+    **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """
     Generate multimodal embeddings and create a mask for identifying their positions in the input sequence.
@@ -566,6 +574,7 @@ def get_embedding_and_mask(
             extend_length,
             items_offset_list,
             disaggregation_mode,
+            **kwargs,
         )
         if embedding is None:
             return None, None
@@ -588,8 +597,8 @@ def embed_mm_inputs(
     data_embedding_func_mapping: Dict[
         Modality, Callable[[List[MultimodalDataItem]], torch.Tensor]
     ] = None,
-    placeholder_tokens: dict[Modality, List[int]] = None,
     disaggregation_mode: Optional[str] = "null",
+    **kwargs,
 ) -> Union[Optional[torch.Tensor], List[torch.Tensor]]:
     """
     Embed multimodal inputs and integrate them with text token embeddings.
@@ -663,6 +672,7 @@ def embed_mm_inputs(
                 extend_length=extend_seq_lens,
                 items_offset_list=items_offsets,
                 disaggregation_mode=disaggregation_mode,
+                **kwargs,
             )
             # print(f"{embedding.shape=}")
             embeddings += [embedding]
@@ -693,11 +703,12 @@ def general_mm_embed_routine(
     input_ids: torch.Tensor,
     forward_batch: ForwardBatch,
     language_model: nn.Module,
-    multimodal_model: Optional[nn.Module] = None,
-    data_embedding_funcs: Dict[
-        Modality, Callable[[List[MultimodalDataItem]], torch.Tensor]
-    ] = None,
-    placeholder_tokens: Optional[dict[Modality, List[int]]] = None,
+    positions: torch.Tensor,
+    # multimodal_model: Optional[nn.Module] = None,
+    # data_embedding_funcs: Dict[
+    #     Modality, Callable[[List[MultimodalDataItem]], torch.Tensor]
+    # ] = None,
+    # placeholder_tokens: Optional[dict[Modality, List[int]]] = None,
     **kwargs,
 ) -> torch.Tensor:
     """
@@ -746,10 +757,8 @@ def general_mm_embed_routine(
             extend_seq_lens=extend_seq_lens,
             input_ids=input_ids,
             input_embedding=embed_tokens,
-            multimodal_model=multimodal_model,
-            data_embedding_func_mapping=data_embedding_funcs,
-            placeholder_tokens=placeholder_tokens,
             disaggregation_mode=disaggregation_mode,
+            **kwargs,
         )
         # once used, mm_inputs is useless, considering chunked-prefill is disabled for multimodal models
         # just being defensive here
@@ -764,7 +773,8 @@ def general_mm_embed_routine(
         input_ids=None,
         forward_batch=forward_batch,
         input_embeds=inputs_embeds,
-        **kwargs,
+        positions=positions,
+        # **kwargs,
     )
     return hidden_states
 

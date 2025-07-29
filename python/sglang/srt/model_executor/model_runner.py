@@ -165,7 +165,7 @@ class ModelRunner:
         is_draft_worker: bool = False,
         req_to_token_pool: Optional[ReqToTokenPool] = None,
         token_to_kv_pool_allocator: Optional[BaseTokenToKVPoolAllocator] = None,
-        mm_item_to_token_pool: Optional[PagedMultiModalEmbeddingPool] = None,
+        mm_embedding_pool: Optional[PagedMultiModalEmbeddingPool] = None,
         mm_embedding_allocator: Optional[BaseTokenToKVPoolAllocator] = None,
     ):
         # Parse args
@@ -206,7 +206,7 @@ class ModelRunner:
         #     self.server_args.disaggregation_mode == "prefill"
         #     and self.is_encoder_disaggregated()
         # ):
-        self.mm_item_to_token_pool = mm_item_to_token_pool
+        self.mm_embedding_pool = mm_embedding_pool
         self.mm_embedding_allocator = mm_embedding_allocator
         #     print(f"initializing mm_item pools in ModelRunner")
         # else:
@@ -341,24 +341,29 @@ class ModelRunner:
 
         # Init memory pool for mm embedding (only allocated in PDE-disaggregation)
         # TODO: and there's an encoder
-        if self.server_args.disaggregation_mode == "prefill":
+        if (
+            self.server_args.disaggregation_mode == "prefill"
+            or self.server_args.disaggregation_mode == "text"
+        ):
             self.init_mm_memory_pool(
                 min_per_gpu_memory,
                 server_args.max_running_requests,
                 server_args.max_total_tokens,
             )
 
-        if self.server_args.disaggregation_mode != "encode":
-            self.init_attention_backend()
-            self.cuda_graph_runner = None
-        else:
+        if self.server_args.disaggregation_mode == "encode":
             self.attn_backend = None
+            self.cuda_graph_runner = None
+            self.cuda_graph_mem_usage = 0
+        else:
             if self.device == "cuda":
                 self.init_cublas()
+                self.init_attention_backend()
                 self.init_cuda_graphs()
             else:
                 self.cuda_graph_runner = None
                 self.cuda_graph_mem_usage = 0
+                self.init_attention_backend()
 
         # auxiliary hidden capture mode. TODO: expose this to server args?
         if self.spec_algorithm.is_eagle3() and not self.is_draft_worker:
@@ -1097,25 +1102,28 @@ class ModelRunner:
     def init_mm_memory_pool(
         self,
         total_gpu_memory: int,
-        max_num_reqs: Optional[int] = None,
+        MAX_NUM_TOKENS: Optional[int] = None,
         max_total_tokens: Optional[int] = None,
     ):
         # TODO: consider gpu mem usage from normal memory pool when deciding appropriate size
-        if self.server_args.disaggregation_mode == "prefill":
-            MM_PAGE_SIZE = 200
-            max_num_reqs = 20
-            self.mm_item_to_token_pool = PagedMultiModalEmbeddingPool(
-                size=max_num_reqs,
+        if (
+            self.server_args.disaggregation_mode == "text"
+            or self.server_args.disaggregation_mode == "encode"
+        ):
+            MM_PAGE_SIZE = 1
+            MAX_NUM_TOKENS = 4000
+            self.mm_embedding_pool = PagedMultiModalEmbeddingPool(
+                size=MAX_NUM_TOKENS,
                 hidden_size=self.model_config.vision_config.hidden_size,
                 dtype=self.model_config.dtype,
                 page_size=MM_PAGE_SIZE,
                 device=self.device,
             )
             self.mm_embedding_allocator = TokenToKVPoolAllocator(
-                self.max_total_num_tokens,
+                MAX_NUM_TOKENS,
                 dtype=self.kv_cache_dtype,
                 device=self.device,
-                kvcache=self.token_to_kv_pool,
+                kvcache=self.mm_embedding_pool,
             )
 
     def init_memory_pool(

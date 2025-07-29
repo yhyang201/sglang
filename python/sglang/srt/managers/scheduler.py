@@ -1183,7 +1183,6 @@ class Scheduler(
         self,
         recv_req: TokenizedGenerateReqInput,
     ):
-        print(f"scheduler handle_generate_request")
         # Create a new request
         if (
             recv_req.session_params is None
