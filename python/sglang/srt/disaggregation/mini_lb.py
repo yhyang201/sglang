@@ -7,6 +7,7 @@ import dataclasses
 import logging
 import random
 import urllib
+from enum import IntEnum, auto
 from itertools import chain
 from typing import List, Optional
 
@@ -55,17 +56,26 @@ class EncodeConfig:
     bootstrap_port: Optional[int] = None
 
 
+class ServerRole(IntEnum):
+    ENCODE = auto()
+    PREFILL = auto()
+    DECODE = auto()
+    PREFILL_AND_DECODE = auto()
+
+
 class MiniLoadBalancer:
     def __init__(
         self,
         prefill_configs: List[PrefillConfig],
         decode_servers: List[str],
         encode_servers: List[str] = None,
+        prefill_and_decode_addrs: List[str] = None,
     ):
         self.prefill_configs = prefill_configs
         self.prefill_servers = [p.url for p in prefill_configs]
         self.decode_servers = decode_servers
         self.encode_servers = encode_servers
+        self.prefill_and_decode_addrs = prefill_and_decode_addrs
 
     def add_prefill_server(self, new_prefill_config: PrefillConfig):
         self.prefill_configs.append(new_prefill_config)
@@ -77,26 +87,43 @@ class MiniLoadBalancer:
     def add_encode_server(self, new_encode_server: str):
         self.encode_servers.append(new_encode_server)
 
+    def add_prefill_and_decode_server(self, new_encode_server: str):
+        self.prefill_and_decode_addrs.append(new_encode_server)
+
     def select_pair(self):
         # TODO: return some message instead of panic
-        assert len(self.prefill_configs) > 0, "No prefill servers available"
-        assert len(self.decode_servers) > 0, "No decode servers available"
+        if not self.prefill_and_decode_addrs or not self.encode_servers:
+            assert len(self.prefill_configs) > 0, "No prefill servers available"
+            assert len(self.decode_servers) > 0, "No decode servers available"
 
-        prefill_config = random.choice(self.prefill_configs)
-        decode_server = random.choice(self.decode_servers)
+        if self.prefill_configs:
+            prefill_config = random.choice(self.prefill_configs)
+        else:
+            prefill_config = None
+
+        if self.decode_servers:
+            decode_server = random.choice(self.decode_servers)
+        else:
+            decode_server = None
+        if self.prefill_and_decode_addrs:
+            prefill_and_decode = random.choice(self.prefill_and_decode_addrs)
+        else:
+            prefill_and_decode = None
         if self.encode_servers:
             encode_server = random.choice(self.encode_servers)
         else:
             encode_server = None
         return (
-            prefill_config.url,
-            prefill_config.bootstrap_port,
+            prefill_config.url if prefill_config else None,
+            prefill_config.bootstrap_port if prefill_config else None,
             decode_server,
             encode_server,
+            prefill_and_decode
         )
 
     async def generate(
-        self, modified_request, prefill_server, decode_server, encode_server, endpoint
+        self, modified_request, prefill_server, decode_server, endpoint,
+        encode_server=None, prefill_and_decode_server=None
     ) -> ORJSONResponse:
         assert endpoint[0] != "/", f"Endpoint should not start with '/': {endpoint}"
 
@@ -106,36 +133,56 @@ class MiniLoadBalancer:
             )  # Add timeout for request reliability
         ) as session:
             print(f"{modified_request=}")
-            tasks = [
-                session.post(f"{prefill_server}/{endpoint}", json=modified_request),
-                session.post(f"{decode_server}/{endpoint}", json=modified_request),
-                session.post(f"{encode_server}/{endpoint}", json=modified_request),
-            ]
+            tasks_mapping = dict()
+
+            for server_role, server in [(ServerRole.PREFILL, prefill_server),
+                                        (ServerRole.DECODE, decode_server),
+                                        (ServerRole.ENCODE, encode_server),
+                                        (ServerRole.PREFILL_AND_DECODE, prefill_and_decode_server)]:
+                if server:
+                    tasks_mapping[server_role] = session.post(f"{server}/{endpoint}", json=modified_request)
 
             # Wait for both responses to complete. Prefill should end first.
-            prefill_response, decode_response, encode_response = await asyncio.gather(
-                *tasks
+            responses = await asyncio.gather(
+                *tasks_mapping.values()
             )
 
+            # Extract responses based on server roles
+            response_mapping = {}
+            for i, (server_role, _) in enumerate([(ServerRole.PREFILL, prefill_server),
+                                                  (ServerRole.DECODE, decode_server),
+                                                  (ServerRole.ENCODE, encode_server),
+                                                  (ServerRole.PREFILL_AND_DECODE, prefill_and_decode_server)]):
+                if server_role in tasks_mapping:
+                    response_mapping[server_role] = responses[i]
+
             if "return_logprob" in modified_request:
+                prefill_response = response_mapping.get(ServerRole.PREFILL)
+                decode_response = response_mapping.get(ServerRole.DECODE)
 
-                prefill_json = await prefill_response.json()
-                ret_json = await decode_response.json()
-                # encode_json = await encode_response.json()
+                if prefill_response and decode_response:
+                    prefill_json = await prefill_response.json()
+                    ret_json = await decode_response.json()
+                    # encode_json = await encode_response.json()
 
-                # merge `meta_info.input_token_logprobs` from prefill to decode
-                if "meta_info" in ret_json:
-                    if "input_token_logprobs" in ret_json["meta_info"]:
-                        ret_json["meta_info"]["input_token_logprobs"] = (
-                            prefill_json["meta_info"]["input_token_logprobs"]
-                            + ret_json["meta_info"]["input_token_logprobs"]
-                        )
+                    # merge `meta_info.input_token_logprobs` from prefill to decode
+                    if "meta_info" in ret_json:
+                        if "input_token_logprobs" in ret_json["meta_info"]:
+                            ret_json["meta_info"]["input_token_logprobs"] = (
+                                prefill_json["meta_info"]["input_token_logprobs"]
+                                + ret_json["meta_info"]["input_token_logprobs"]
+                            )
+                else:
+                    # Fallback to decode response only if prefill is not available
+                    decode_response = response_mapping.get(ServerRole.DECODE)
+                    ret_json = await decode_response.json() if decode_response else {}
             else:
-                ret_json = await decode_response.json()
+                decode_response = response_mapping.get(ServerRole.DECODE)
+                ret_json = await decode_response.json() if decode_response else {}
 
             return ORJSONResponse(
                 content=ret_json,
-                status_code=decode_response.status,
+                status_code=decode_response.status if decode_response else 200,
             )
 
     async def generate_stream(
@@ -143,7 +190,8 @@ class MiniLoadBalancer:
         modified_request,
         prefill_server,
         decode_server,
-        encode_server,
+        encode_server=None,
+        prefill_and_decode_server=None,
         endpoint="generate",
     ):
         assert endpoint[0] != "/", f"Endpoint should not start with '/': {endpoint}"
@@ -314,7 +362,7 @@ async def get_model_info():
 
 @app.post("/generate")
 async def handle_generate_request(request_data: dict):
-    prefill_server, bootstrap_port, decode_server, encode_server = (
+    prefill_server, bootstrap_port, decode_server, encode_server, prefill_and_decode_server = (
         load_balancer.select_pair()
     )
 
@@ -345,16 +393,17 @@ async def handle_generate_request(request_data: dict):
 
     if request_data.get("stream", False):
         return await load_balancer.generate_stream(
-            modified_request, prefill_server, decode_server, encode_server, "generate"
+            modified_request, prefill_server, decode_server, encode_server, prefill_and_decode_server, "generate"
         )
     else:
         return await load_balancer.generate(
-            modified_request, prefill_server, decode_server, encode_server, "generate"
+            modified_request, prefill_server, decode_server, "generate", encode_server=encode_server,
+            prefill_and_decode_server=prefill_and_decode_server,
         )
 
 
 async def _forward_to_backend(request_data: dict, endpoint_name: str):
-    prefill_server, bootstrap_port, decode_server, encode_server = (
+    prefill_server, bootstrap_port, decode_server, encode_server, prefill_and_decode_server = (
         load_balancer.select_pair()
     )
 
@@ -375,16 +424,18 @@ async def _forward_to_backend(request_data: dict, endpoint_name: str):
             modified_request,
             prefill_server,
             decode_server,
-            encode_server,
             endpoint=endpoint_name,
+            encode_server=encode_server,
+            prefill_and_decode_server=prefill_and_decode_server
         )
     else:
         return await load_balancer.generate(
             modified_request,
             prefill_server,
             decode_server,
-            encode_server,
             endpoint=endpoint_name,
+            encode_server=encode_server,
+            prefill_and_decode_server=prefill_and_decode_server
         )
 
 
@@ -399,7 +450,7 @@ async def handle_completion_request(request_data: dict):
 
 
 def _generate_bootstrap_room():
-    return random.randint(0, 2**63 - 1)
+    return random.randint(0, 2 ** 63 - 1)
 
 
 # We may utilize `GenerateReqInput`'s logic later
@@ -457,9 +508,13 @@ async def register(obj: PDRegistryRequest):
     return Response(status_code=200)
 
 
-def run(prefill_configs, decode_addrs, encode_addrs, host, port):
+def run(
+    prefill_configs, decode_addrs, encode_addrs, prefill_and_decode_addrs, host, port
+):
     global load_balancer
-    load_balancer = MiniLoadBalancer(prefill_configs, decode_addrs, encode_addrs)
+    load_balancer = MiniLoadBalancer(
+        prefill_configs, decode_addrs, encode_addrs, prefill_and_decode_addrs
+    )
     uvicorn.run(app, host=host, port=port)
 
 

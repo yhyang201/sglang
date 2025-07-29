@@ -11,6 +11,7 @@ class LBArgs:
     encode_infos: list = dataclasses.field(default_factory=list)
     prefill_infos: list = dataclasses.field(default_factory=list)
     decode_infos: list = dataclasses.field(default_factory=list)
+    prefill_and_decode_infos: list = dataclasses.field(default_factory=list)
     log_interval: int = 5
     timeout: int = 600
 
@@ -62,6 +63,13 @@ class LBArgs:
             help="URLs for decode servers",
         )
         parser.add_argument(
+            "--prefill-and-decode",
+            type=str,
+            default=[],
+            nargs="+",
+            help="URLs for non-disaggregated prefill-and-decode servers. This only makes sense when encoder is disaggregated",
+        )
+        parser.add_argument(
             "--prefill-bootstrap-ports",
             type=int,
             nargs="+",
@@ -97,8 +105,13 @@ class LBArgs:
             (url, port) for url, port in zip(args.prefill, bootstrap_ports)
         ]
 
-        if args.encode and args.rust_lb:
-            raise RuntimeError("encode disaggregation is not supported in rust lb")
+        if args.encode:
+            assert not args.rust_lb, "encode disaggregation is not supported in rust lb"
+            assert (
+                           args.prefill and args.decode) or args.prefill_and_decode, "Both p and d or p-and-d should be specified under encoder disaggregation"
+
+        if args.prefill_and_decode is not None:
+            assert args.encode is not None, "Non-disaggregated pd must work with encoder disaggregated"
 
         return cls(
             rust_lb=args.rust_lb,
@@ -108,6 +121,7 @@ class LBArgs:
             encode_infos=args.encode,
             prefill_infos=prefill_infos,
             decode_infos=args.decode,
+            prefill_and_decode_infos=args.prefill_and_decode,
             log_interval=args.log_interval,
             timeout=args.timeout,
         )
@@ -149,6 +163,7 @@ def main():
             prefill_configs,
             lb_args.decode_infos,
             lb_args.encode_infos,
+            lb_args.prefill_and_decode_infos,
             lb_args.host,
             lb_args.port,
         )
