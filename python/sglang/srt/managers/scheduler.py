@@ -13,7 +13,6 @@
 # ==============================================================================
 """A scheduler that manages a tensor parallel GPU worker."""
 
-import datetime
 import faulthandler
 import logging
 import os
@@ -1252,12 +1251,13 @@ class Scheduler(
 
         # Handle multimodal inputs
         if recv_req.mm_inputs is not None:
-            image_inputs = MultimodalInputs.from_dict(recv_req.mm_inputs)
+            mm_inputs = MultimodalInputs.from_dict(recv_req.mm_inputs)
             # Expand a single image token into multiple dummy tokens for receiving image embeddings
             req.origin_input_ids = self.pad_input_ids_func(
-                req.origin_input_ids, image_inputs
+                req.origin_input_ids, mm_inputs
             )
-            req.extend_image_inputs(image_inputs)
+            # if self.server_args.disaggregation_mode == "null" or self.server_args.disaggregation_mode == "encode":
+            req.extend_image_inputs(mm_inputs)
 
             if len(req.origin_input_ids) >= self.max_req_input_len:
                 req.set_finish_with_abort(
@@ -1940,7 +1940,7 @@ class Scheduler(
         # Encode policy
         adder = EncodeAdder(
             self.page_size,
-            self.token_to_kv_pool_allocator,
+            self.mm_embedding_allocator,
             self.running_batch,
             self.new_token_ratio,
             self.max_prefill_tokens,
@@ -1954,8 +1954,8 @@ class Scheduler(
                 self.running_batch.batch_is_full = True
                 break
 
-            req.init_next_round_input(self.tree_cache)
-            res = adder.add_one_req(req, has_chunked_req=(self.chunked_req is not None))
+            # req.init_next_round_input(self.tree_cache)
+            res = adder.add_one_req(req)
 
             if res != AddReqResult.CONTINUE:
                 if res == AddReqResult.NO_TOKEN:
@@ -1983,7 +1983,8 @@ class Scheduler(
         ]
 
         # Print stats
-        self.log_prefill_stats(adder, can_run_list, running_bs)
+        # TODO
+        # self.log_prefill_stats(adder, can_run_list, running_bs)
 
         # Create a new batch
         new_batch = ScheduleBatch.init_new(
@@ -1996,6 +1997,7 @@ class Scheduler(
             self.spec_algorithm,
             self.server_args.enable_custom_logit_processor,
             chunked_req=None,
+            device=self.device,
         )
         if self.enable_hierarchical_cache:
             # todo (zhiqiang): disable cuda graph execution if hicache loading triggered
@@ -2003,7 +2005,8 @@ class Scheduler(
                 self.tree_cache.ready_to_load_host_cache()
             )
 
-        new_batch.prepare_for_extend()
+        should_set_req_pool_indices = self.server_args.disaggregation_mode != "encode"
+        new_batch.prepare_for_extend(should_set_req_pool_indices)
 
         new_batch.decoding_reqs = None
 
@@ -2070,13 +2073,18 @@ class Scheduler(
                 self.tp_worker.set_hicache_consumer(
                     model_worker_batch.hicache_consumer_index
                 )
+                skip_sample = self.server_args.disaggregation_mode == "encode"
                 if self.pp_group.is_last_rank:
                     logits_output, next_token_ids, can_run_cuda_graph = (
-                        self.tp_worker.forward_batch_generation(model_worker_batch)
+                        self.tp_worker.forward_batch_generation(
+                            model_worker_batch, skip_sample=skip_sample
+                        )
                     )
                 else:
                     pp_hidden_states_proxy_tensors, _, can_run_cuda_graph = (
-                        self.tp_worker.forward_batch_generation(model_worker_batch)
+                        self.tp_worker.forward_batch_generation(
+                            model_worker_batch, skip_sample=skip_sample
+                        )
                     )
                 bid = model_worker_batch.bid
             else:

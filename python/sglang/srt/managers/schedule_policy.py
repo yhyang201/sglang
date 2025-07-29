@@ -581,6 +581,7 @@ class EncodeAdder:
     ):
         self.page_size = page_size
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
+        print(f"{self.token_to_kv_pool_allocator=}")
         self.running_batch = running_batch
         self.new_token_ratio = new_token_ratio
         self.rem_input_tokens = rem_input_tokens - mixed_with_decode_tokens
@@ -640,9 +641,7 @@ class EncodeAdder:
 
         return AddReqResult.CONTINUE
 
-    def _update_encode_budget(
-        self, prefix_len: int, extend_input_len: int, max_new_tokens: int
-    ):
+    def _update_encode_budget(self, extend_input_len: int, max_new_tokens: int):
         # TODO(lsyin): check this workaround logic, which only ensures the prefill will not out of memory, and may be too conservative
         extend_input_len = self.ceil_paged_tokens(extend_input_len)
 
@@ -652,7 +651,7 @@ class EncodeAdder:
         if self.rem_chunk_tokens is not None:
             self.rem_chunk_tokens -= extend_input_len
 
-        self.log_hit_tokens += prefix_len
+        # self.log_hit_tokens += prefix_len
         self.log_input_tokens += extend_input_len
 
     def add_chunked_req(self, req: Req):
@@ -676,10 +675,11 @@ class EncodeAdder:
     @contextmanager
     def _lock_node(self, last_node: TreeNode):
         try:
-            self.tree_cache.inc_lock_ref(last_node)
+            # self.tree_cache.inc_lock_ref(last_node)
             yield None
         finally:
-            self.tree_cache.dec_lock_ref(last_node)
+            pass
+            # self.tree_cache.dec_lock_ref(last_node)
 
     def add_one_req_ignore_eos(self, req: Req, has_chunked_req: bool):
         # Early exit if no enough tokens for the input tokens
@@ -758,34 +758,30 @@ class EncodeAdder:
 
         return self.budget_state()
 
-    def add_one_req(self, req: Req, has_chunked_req: bool):
-        total_tokens = req.extend_input_len + min(
-            req.sampling_params.max_new_tokens, CLIP_MAX_NEW_TOKENS_ESTIMATION
-        )
+    def add_one_req(self, req: Req):
+        # total_tokens = req.cu_mm_embedding_len
 
         # adjusting the input_tokens based on host_hit_length and page_size
-        real_input_tokens = req.extend_input_len - req.host_hit_length
-        real_input_tokens = self.ceil_paged_tokens(real_input_tokens)
-        prefix_len = len(req.prefix_indices)
+        real_input_tokens = req.cu_mm_embedding_len
 
-        if total_tokens >= self.rem_total_tokens:
-            return AddReqResult.NO_TOKEN
+        # if total_tokens >= self.rem_total_tokens:
+        #     return AddReqResult.NO_TOKEN
 
         if real_input_tokens >= self.rem_input_tokens and len(self.can_run_list) != 0:
             return AddReqResult.OTHER
 
         with self._lock_node(req.last_node):
             # self.rem_total_tokens may decrease after the lock acquisition
-            if total_tokens >= self.rem_total_tokens:
-                return AddReqResult.NO_TOKEN
+            # if total_tokens >= self.rem_total_tokens:
+            #     return AddReqResult.NO_TOKEN
 
-            if req.host_hit_length > 0:
-                new_indices, req.last_node = self.tree_cache.init_load_back(
-                    req.last_host_node, req.host_hit_length
-                )
-                req.prefix_indices = torch.cat([req.prefix_indices, new_indices])
-                req.extend_input_len = len(req.fill_ids) - len(req.prefix_indices)
-                prefix_len = len(req.prefix_indices)
+            # if req.host_hit_length > 0:
+            #     new_indices, req.last_node = self.tree_cache.init_load_back(
+            #         req.last_host_node, req.host_hit_length
+            #     )
+            #     req.prefix_indices = torch.cat([req.prefix_indices, new_indices])
+            #     req.extend_input_len = len(req.fill_ids) - len(req.prefix_indices)
+            #     prefix_len = len(req.prefix_indices)
 
             input_tokens = self.ceil_paged_tokens(req.extend_input_len)
 
@@ -795,9 +791,9 @@ class EncodeAdder:
             if self.rem_chunk_tokens is None or input_tokens <= self.rem_chunk_tokens:
                 # Non-chunked prefill
                 self.can_run_list.append(req)
-                self.tree_cache.inc_lock_ref(req.last_node)
+                # self.tree_cache.inc_lock_ref(req.last_node)
                 self._update_encode_budget(
-                    prefix_len,
+                    # prefix_len,
                     input_tokens,
                     min(
                         req.sampling_params.max_new_tokens,
@@ -816,6 +812,8 @@ class EncodeAdder:
 
                 self.can_run_list.append(req)
                 self.new_chunked_req = req
-                self._update_prefill_budget(prefix_len, trunc_len, 0)
+                self._update_encode_budget(trunc_len, 0)
 
-        return self.budget_state()
+        # FIXME: rem_tokens
+        # return self.budget_state()
+        return AddReqResult.CONTINUE

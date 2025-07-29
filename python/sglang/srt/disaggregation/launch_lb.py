@@ -108,10 +108,13 @@ class LBArgs:
         if args.encode:
             assert not args.rust_lb, "encode disaggregation is not supported in rust lb"
             assert (
-                           args.prefill and args.decode) or args.prefill_and_decode, "Both p and d or p-and-d should be specified under encoder disaggregation"
+                args.prefill and args.decode
+            ) or args.prefill_and_decode, "Both p and d or p-and-d should be specified under encoder disaggregation"
 
         if args.prefill_and_decode is not None:
-            assert args.encode is not None, "Non-disaggregated pd must work with encoder disaggregated"
+            assert (
+                args.encode is not None
+            ), "Non-disaggregated pd must work with encoder disaggregated"
 
         return cls(
             rust_lb=args.rust_lb,

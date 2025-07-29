@@ -675,7 +675,9 @@ def general_mm_embed_routine(
 
     is_encoder = global_server_args_dict["disaggregation_mode"] == "encode"
 
-    if not is_encoder:
+    if is_encoder:
+        embed_tokens = None
+    else:
         assert hasattr(language_model, "get_input_embeddings")
         embed_tokens = language_model.get_input_embeddings()
     if (

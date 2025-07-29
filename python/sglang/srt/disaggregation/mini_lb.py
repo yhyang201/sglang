@@ -118,12 +118,17 @@ class MiniLoadBalancer:
             prefill_config.bootstrap_port if prefill_config else None,
             decode_server,
             encode_server,
-            prefill_and_decode
+            prefill_and_decode,
         )
 
     async def generate(
-        self, modified_request, prefill_server, decode_server, endpoint,
-        encode_server=None, prefill_and_decode_server=None
+        self,
+        modified_request,
+        prefill_server,
+        decode_server,
+        endpoint,
+        encode_server=None,
+        prefill_and_decode_server=None,
     ) -> ORJSONResponse:
         assert endpoint[0] != "/", f"Endpoint should not start with '/': {endpoint}"
 
@@ -135,24 +140,30 @@ class MiniLoadBalancer:
             print(f"{modified_request=}")
             tasks_mapping = dict()
 
-            for server_role, server in [(ServerRole.PREFILL, prefill_server),
-                                        (ServerRole.DECODE, decode_server),
-                                        (ServerRole.ENCODE, encode_server),
-                                        (ServerRole.PREFILL_AND_DECODE, prefill_and_decode_server)]:
+            for server_role, server in [
+                (ServerRole.PREFILL, prefill_server),
+                (ServerRole.DECODE, decode_server),
+                (ServerRole.ENCODE, encode_server),
+                (ServerRole.PREFILL_AND_DECODE, prefill_and_decode_server),
+            ]:
                 if server:
-                    tasks_mapping[server_role] = session.post(f"{server}/{endpoint}", json=modified_request)
+                    tasks_mapping[server_role] = session.post(
+                        f"{server}/{endpoint}", json=modified_request
+                    )
 
             # Wait for both responses to complete. Prefill should end first.
-            responses = await asyncio.gather(
-                *tasks_mapping.values()
-            )
+            responses = await asyncio.gather(*tasks_mapping.values())
 
             # Extract responses based on server roles
             response_mapping = {}
-            for i, (server_role, _) in enumerate([(ServerRole.PREFILL, prefill_server),
-                                                  (ServerRole.DECODE, decode_server),
-                                                  (ServerRole.ENCODE, encode_server),
-                                                  (ServerRole.PREFILL_AND_DECODE, prefill_and_decode_server)]):
+            for i, (server_role, _) in enumerate(
+                [
+                    (ServerRole.PREFILL, prefill_server),
+                    (ServerRole.DECODE, decode_server),
+                    (ServerRole.ENCODE, encode_server),
+                    (ServerRole.PREFILL_AND_DECODE, prefill_and_decode_server),
+                ]
+            ):
                 if server_role in tasks_mapping:
                     response_mapping[server_role] = responses[i]
 
@@ -362,9 +373,13 @@ async def get_model_info():
 
 @app.post("/generate")
 async def handle_generate_request(request_data: dict):
-    prefill_server, bootstrap_port, decode_server, encode_server, prefill_and_decode_server = (
-        load_balancer.select_pair()
-    )
+    (
+        prefill_server,
+        bootstrap_port,
+        decode_server,
+        encode_server,
+        prefill_and_decode_server,
+    ) = load_balancer.select_pair()
 
     # Parse and transform prefill_server for bootstrap data
     parsed_url = urllib.parse.urlparse(prefill_server)
@@ -393,19 +408,32 @@ async def handle_generate_request(request_data: dict):
 
     if request_data.get("stream", False):
         return await load_balancer.generate_stream(
-            modified_request, prefill_server, decode_server, encode_server, prefill_and_decode_server, "generate"
+            modified_request,
+            prefill_server,
+            decode_server,
+            encode_server,
+            prefill_and_decode_server,
+            "generate",
         )
     else:
         return await load_balancer.generate(
-            modified_request, prefill_server, decode_server, "generate", encode_server=encode_server,
+            modified_request,
+            prefill_server,
+            decode_server,
+            "generate",
+            encode_server=encode_server,
             prefill_and_decode_server=prefill_and_decode_server,
         )
 
 
 async def _forward_to_backend(request_data: dict, endpoint_name: str):
-    prefill_server, bootstrap_port, decode_server, encode_server, prefill_and_decode_server = (
-        load_balancer.select_pair()
-    )
+    (
+        prefill_server,
+        bootstrap_port,
+        decode_server,
+        encode_server,
+        prefill_and_decode_server,
+    ) = load_balancer.select_pair()
 
     # Parse and transform prefill_server for bootstrap data
     parsed_url = urllib.parse.urlparse(prefill_server)
@@ -426,7 +454,7 @@ async def _forward_to_backend(request_data: dict, endpoint_name: str):
             decode_server,
             endpoint=endpoint_name,
             encode_server=encode_server,
-            prefill_and_decode_server=prefill_and_decode_server
+            prefill_and_decode_server=prefill_and_decode_server,
         )
     else:
         return await load_balancer.generate(
@@ -435,7 +463,7 @@ async def _forward_to_backend(request_data: dict, endpoint_name: str):
             decode_server,
             endpoint=endpoint_name,
             encode_server=encode_server,
-            prefill_and_decode_server=prefill_and_decode_server
+            prefill_and_decode_server=prefill_and_decode_server,
         )
 
 
@@ -450,7 +478,7 @@ async def handle_completion_request(request_data: dict):
 
 
 def _generate_bootstrap_room():
-    return random.randint(0, 2 ** 63 - 1)
+    return random.randint(0, 2**63 - 1)
 
 
 # We may utilize `GenerateReqInput`'s logic later

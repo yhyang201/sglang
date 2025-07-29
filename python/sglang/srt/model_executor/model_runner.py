@@ -335,6 +335,9 @@ class ModelRunner:
                 server_args.max_running_requests,
                 server_args.max_total_tokens,
             )
+        else:
+            self.token_to_kv_pool = None
+            self.req_to_token_pool = None
 
         # Init memory pool for mm embedding (only allocated in PDE-disaggregation)
         # TODO: and there's an encoder
@@ -348,12 +351,14 @@ class ModelRunner:
         if self.server_args.disaggregation_mode != "encode":
             self.init_attention_backend()
             self.cuda_graph_runner = None
-        elif self.device == "cuda":
-            self.init_cublas()
-            self.init_cuda_graphs()
         else:
-            self.cuda_graph_runner = None
-            self.cuda_graph_mem_usage = 0
+            self.attn_backend = None
+            if self.device == "cuda":
+                self.init_cublas()
+                self.init_cuda_graphs()
+            else:
+                self.cuda_graph_runner = None
+                self.cuda_graph_mem_usage = 0
 
         # auxiliary hidden capture mode. TODO: expose this to server args?
         if self.spec_algorithm.is_eagle3() and not self.is_draft_worker:
@@ -1602,7 +1607,7 @@ class ModelRunner:
         skip_attn_backend_init: bool = False,
         pp_proxy_tensors=None,
     ) -> LogitsProcessorOutput:
-        if not skip_attn_backend_init:
+        if not skip_attn_backend_init and self.attn_backend:
             self.attn_backend.init_forward_metadata(forward_batch)
 
         kwargs = {}

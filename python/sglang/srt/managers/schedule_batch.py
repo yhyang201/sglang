@@ -281,19 +281,10 @@ class MultimodalDataItem:
         return self.is_image() or self.is_video() or self.is_audio()
 
     def validate(self):
+        # print(f"{self.offsets=}")
         self.token_len = sum(e - s + 1 for s, e in self.offsets)
         ...
         # TODO
-
-    @staticmethod
-    def from_dict(obj: dict):
-        kwargs = dict(obj)
-        modality = kwargs.pop("modality")
-        if isinstance(modality, str):
-            modality = Modality[modality]
-        ret = MultimodalDataItem(modality=modality, **kwargs)
-        ret.validate()
-        return ret
 
     def merge(self, other):
         self.feature += other.feature
@@ -629,16 +620,18 @@ class Req:
     def seqlen(self):
         return len(self.origin_input_ids) + len(self.output_ids)
 
-    def extend_image_inputs(self, image_inputs):
+    def extend_image_inputs(self, mm_inputs: MultimodalInputs):
         if self.multimodal_inputs is None:
-            self.multimodal_inputs = image_inputs
+            self.multimodal_inputs = mm_inputs
         else:
-            self.multimodal_inputs.merge(image_inputs)
+            self.multimodal_inputs.merge(mm_inputs)
 
         self.mm_hashes = [mm_item.hash for mm_item in self.multimodal_inputs.mm_items]
         self.mm_embedding_lens = [
             mm_item.token_len for mm_item in self.multimodal_inputs.mm_items
         ]
+        print(f"{self.mm_embedding_lens=}")
+        self.cu_mm_embedding_len = sum(self.mm_embedding_lens)
 
     def finished(self) -> bool:
         # Whether request reached finished condition
@@ -926,6 +919,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         spec_algorithm: SpeculativeAlgorithm,
         enable_custom_logit_processor: bool,
         chunked_req: Optional[Req] = None,
+        device=None,
     ):
         return_logprob = any(req.return_logprob for req in reqs)
 
@@ -947,7 +941,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             return_logprob=return_logprob,
             has_stream=any(req.stream for req in reqs),
             has_grammar=any(req.grammar for req in reqs),
-            device=req_to_token_pool.device,
+            device=device or req_to_token_pool.device,
             spec_algorithm=spec_algorithm,
             enable_custom_logit_processor=enable_custom_logit_processor,
             return_hidden_states=any(req.return_hidden_states for req in reqs),
@@ -1130,12 +1124,13 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             len(self.out_cache_loc) == self.extend_num_tokens
         ), f"Expected {len(self.out_cache_loc)}, got {self.extend_num_tokens}"
 
-    def prepare_for_extend(self):
+    def prepare_for_extend(self, should_set_req_pool_indices=True):
         self.forward_mode = ForwardMode.EXTEND
 
         # Allocate req slots
         bs = len(self.reqs)
-        req_pool_indices = self.alloc_req_slots(bs)
+        if should_set_req_pool_indices:
+            req_pool_indices = self.alloc_req_slots(bs)
 
         # Init tensors
         reqs = self.reqs
@@ -1149,9 +1144,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             r.token_type_ids for r in reqs if r.token_type_ids is not None
         ]
 
-        req_pool_indices_tensor = torch.tensor(req_pool_indices, dtype=torch.int64).to(
-            self.device, non_blocking=True
-        )
+        if should_set_req_pool_indices:
+            req_pool_indices_tensor = torch.tensor(
+                req_pool_indices, dtype=torch.int64
+            ).to(self.device, non_blocking=True)
         input_ids_tensor = torch.tensor(sum(input_ids, []), dtype=torch.int64).to(
             self.device, non_blocking=True
         )
@@ -1176,17 +1172,18 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         multimodal_inputs = []
 
         for i, (req, seq_len, pre_len) in enumerate(zip(reqs, seq_lens, prefix_lens)):
-            req.req_pool_idx = req_pool_indices[i]
-            assert seq_len - pre_len == req.extend_input_len
+            if should_set_req_pool_indices:
+                req.req_pool_idx = req_pool_indices[i]
+                assert seq_len - pre_len == req.extend_input_len
 
-            if pre_len > 0:
-                self.req_to_token_pool.write(
-                    (req.req_pool_idx, slice(0, pre_len)), req.prefix_indices
-                )
-                if isinstance(self.tree_cache, SWAChunkCache):
-                    self.tree_cache.evict_swa(
-                        req, pre_len, self.model_config.attention_chunk_size
+                if pre_len > 0:
+                    self.req_to_token_pool.write(
+                        (req.req_pool_idx, slice(0, pre_len)), req.prefix_indices
                     )
+                    if isinstance(self.tree_cache, SWAChunkCache):
+                        self.tree_cache.evict_swa(
+                            req, pre_len, self.model_config.attention_chunk_size
+                        )
 
             # If input_embeds are available, store them
             if req.input_embeds is not None:
@@ -1255,23 +1252,26 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             extend_input_logprob_token_ids = None
 
         # Allocate memory
-        if self.token_to_kv_pool_allocator.page_size == 1:
-            out_cache_loc = self.alloc_token_slots(extend_num_tokens)
-        else:
-            last_loc = get_last_loc(
-                self.req_to_token_pool.req_to_token,
-                req_pool_indices_tensor,
-                prefix_lens_tensor,
-            )
-            out_cache_loc = self.alloc_paged_token_slots_extend(
-                prefix_lens_tensor, seq_lens_tensor, last_loc, extend_num_tokens
-            )
+        if should_set_req_pool_indices:
+            if self.token_to_kv_pool_allocator.page_size == 1:
+                out_cache_loc = self.alloc_token_slots(extend_num_tokens)
+            else:
+                last_loc = get_last_loc(
+                    self.req_to_token_pool.req_to_token,
+                    req_pool_indices_tensor,
+                    prefix_lens_tensor,
+                )
+                out_cache_loc = self.alloc_paged_token_slots_extend(
+                    prefix_lens_tensor, seq_lens_tensor, last_loc, extend_num_tokens
+                )
 
         # Set fields
         self.input_ids = input_ids_tensor
-        self.req_pool_indices = req_pool_indices_tensor
+        if should_set_req_pool_indices:
+            self.req_pool_indices = req_pool_indices_tensor
         self.seq_lens = seq_lens_tensor
-        self.out_cache_loc = out_cache_loc
+        if should_set_req_pool_indices:
+            self.out_cache_loc = out_cache_loc
         self.input_embeds = (
             torch.tensor(input_embeds).to(self.device, non_blocking=True)
             if input_embeds
@@ -1298,27 +1298,28 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.extend_lens = extend_lens
         self.extend_input_logprob_token_ids = extend_input_logprob_token_ids
 
-        # Write to req_to_token_pool
-        if support_triton(global_server_args_dict.get("attention_backend")):
-            # TODO: some tensors can be reused for ForwardBatchInfo (e.g., extend_lens, cumsum_start)
+        if should_set_req_pool_indices:
+            # Write to req_to_token_pool
+            if support_triton(global_server_args_dict.get("attention_backend")):
+                # TODO: some tensors can be reused for ForwardBatchInfo (e.g., extend_lens, cumsum_start)
 
-            write_req_to_token_pool_triton[(bs,)](
-                self.req_to_token_pool.req_to_token,
-                req_pool_indices_tensor,
-                prefix_lens_tensor,
-                seq_lens_tensor,
-                extend_lens_tensor,
-                out_cache_loc,
-                self.req_to_token_pool.req_to_token.shape[1],
-            )
-        else:
-            pt = 0
-            for i in range(bs):
-                self.req_to_token_pool.write(
-                    (req_pool_indices[i], slice(prefix_lens[i], seq_lens[i])),
-                    out_cache_loc[pt : pt + extend_lens[i]],
+                write_req_to_token_pool_triton[(bs,)](
+                    self.req_to_token_pool.req_to_token,
+                    req_pool_indices_tensor,
+                    prefix_lens_tensor,
+                    seq_lens_tensor,
+                    extend_lens_tensor,
+                    out_cache_loc,
+                    self.req_to_token_pool.req_to_token.shape[1],
                 )
-                pt += extend_lens[i]
+            else:
+                pt = 0
+                for i in range(bs):
+                    self.req_to_token_pool.write(
+                        (req_pool_indices[i], slice(prefix_lens[i], seq_lens[i])),
+                        out_cache_loc[pt : pt + extend_lens[i]],
+                    )
+                    pt += extend_lens[i]
 
         if self.model_config.is_encoder_decoder:
             self.prepare_encoder_info_extend(input_ids, seq_lens)
@@ -1705,27 +1706,35 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             extend_prefix_lens = self.prefix_lens
             extend_logprob_start_lens = self.extend_logprob_start_lens
 
-        if self.forward_mode.is_decode_or_idle():
-            attention_backend_str = global_server_args_dict["decode_attention_backend"]
-        else:
-            attention_backend_str = global_server_args_dict["prefill_attention_backend"]
-        # Create seq_lens_cpu when needed
-        if (
-            attention_backend_str == "fa3"
-            or (
-                global_server_args_dict["use_mla_backend"]
-                and attention_backend_str == "flashinfer"
-            )
-            or attention_backend_str == "flashmla"
-            or attention_backend_str == "cutlass_mla"
-            or attention_backend_str == "ascend"
-            or global_server_args_dict["enable_two_batch_overlap"]
-        ):
-            seq_lens_cpu = (
-                seq_lens_cpu_cache
-                if seq_lens_cpu_cache is not None
-                else self.seq_lens.cpu()
-            )
+        use_causal_attn = global_server_args_dict["disaggregation_mode"] != "encode"
+        if use_causal_attn:
+            if self.forward_mode.is_decode_or_idle():
+                attention_backend_str = global_server_args_dict[
+                    "decode_attention_backend"
+                ]
+            else:
+                attention_backend_str = global_server_args_dict[
+                    "prefill_attention_backend"
+                ]
+            # Create seq_lens_cpu when needed
+            if (
+                attention_backend_str == "fa3"
+                or (
+                    global_server_args_dict["use_mla_backend"]
+                    and attention_backend_str == "flashinfer"
+                )
+                or attention_backend_str == "flashmla"
+                or attention_backend_str == "cutlass_mla"
+                or attention_backend_str == "ascend"
+                or global_server_args_dict["enable_two_batch_overlap"]
+            ):
+                seq_lens_cpu = (
+                    seq_lens_cpu_cache
+                    if seq_lens_cpu_cache is not None
+                    else self.seq_lens.cpu()
+                )
+            else:
+                seq_lens_cpu = None
         else:
             seq_lens_cpu = None
 
