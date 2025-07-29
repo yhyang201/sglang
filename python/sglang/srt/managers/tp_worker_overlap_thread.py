@@ -129,7 +129,7 @@ class TpModelWorkerClient:
 
     def get_memory_pool(self):
         return (
-            self.worker.model_runner.mm_embedding_pool,
+            self.worker.model_runner.req_to_token_pool,
             self.worker.model_runner.token_to_kv_pool_allocator,
         )
 
