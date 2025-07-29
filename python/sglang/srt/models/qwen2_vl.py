@@ -30,7 +30,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import Qwen2VLConfig
 from transformers.models.qwen2_vl.configuration_qwen2_vl import Qwen2VLVisionConfig
 
 from sglang.srt.hf_transformers_utils import get_processor
@@ -54,6 +53,7 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen2 import Qwen2Model
 from sglang.srt.utils import add_prefix
+from transformers import Qwen2VLConfig
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +228,7 @@ class Qwen2VisionPatchMerger(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.hidden_size = context_dim * (spatial_merge_size**2)
+        self.hidden_size = context_dim * (spatial_merge_size ** 2)
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.ln_q = norm_layer(context_dim)
@@ -469,6 +469,7 @@ class Qwen2VLForConditionalGeneration(nn.Module):
         )
 
         self.is_encoder = global_server_args_dict["disaggregation_mode"] == "encode"
+        self.is_prefill = global_server_args_dict["disaggregation_mode"] == "prefill"
 
         if config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
@@ -539,18 +540,25 @@ class Qwen2VLForConditionalGeneration(nn.Module):
                 otherwise it will be `(seq_len,).
                 (Use input_metadata.mrope_positions to replace it)
         """
-        if self.is_mrope_enabled:
-            positions = forward_batch.mrope_positions
 
-        if not (
-            forward_batch.forward_mode.is_decode()
-            or not forward_batch.contains_image_inputs()
-        ):
+
+        if self.is_encoder:
+            pass
+        else:
             if self.is_mrope_enabled:
-                assert positions.ndim == 2 and positions.size(0) == 3, (
-                    "multimodal section rotary embedding requires "
-                    f"(3, seq_len) positions, but got {positions.size()}"
-                )
+                positions = forward_batch.mrope_positions
+
+            if not (
+                forward_batch.forward_mode.is_decode()
+                or not forward_batch.contains_image_inputs()
+            ):
+                if self.is_mrope_enabled:
+                    assert positions.ndim == 2 and positions.size(0) == 3, (
+                        "multimodal section rotary embedding requires "
+                        f"(3, seq_len) positions, but got {positions.size()}"
+                    )
+
+
         hidden_states = general_mm_embed_routine(
             input_ids=input_ids,
             forward_batch=forward_batch,
@@ -559,7 +567,9 @@ class Qwen2VLForConditionalGeneration(nn.Module):
             positions=positions,
         )
 
-        if get_embedding:
+        if self.is_encoder:
+            return hidden_states[0]
+        elif get_embedding:
             return self.pooler(hidden_states, forward_batch)
         else:
             return self.logits_processor(
@@ -584,6 +594,9 @@ class Qwen2VLForConditionalGeneration(nn.Module):
 
             if self.is_encoder:
                 if "visual" not in name:
+                    continue
+            if self.is_prefill:
+                if "visual" in name:
                     continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:

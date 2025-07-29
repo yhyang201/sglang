@@ -5,7 +5,7 @@ Multi-modality utils
 import hashlib
 import pickle
 from abc import abstractmethod
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -494,7 +494,8 @@ def get_embedding_and_mask(
     prefix_length: List[int],
     extend_length: List[int],
     items_offset_list: List[List[Tuple[int, int]]],
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    is_encoder: Optional[bool] = False,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """
     Generate multimodal embeddings and create a mask for identifying their positions in the input sequence.
 
@@ -513,6 +514,8 @@ def get_embedding_and_mask(
         - The generated embeddings tensor
         - A boolean mask tensor indicating where these embeddings should be placed
     """
+    # for encoder, get embedding only
+
     # 1. Get embedding
     embedding = _get_precomputed_embedding(embedding_items)
     if embedding is None:
@@ -526,6 +529,8 @@ def get_embedding_and_mask(
         )
         if embedding is None:
             return None, None
+    if is_encoder:
+        return embedding, None
     # 2. Get mask
     special_multimodal_mask = _get_multimodal_mask(input_ids, placeholder_tensor)
     # 3. Adjust embedding length if needed
@@ -544,7 +549,8 @@ def embed_mm_inputs(
         Modality, Callable[[List[MultimodalDataItem]], torch.Tensor]
     ] = None,
     placeholder_tokens: dict[Modality, List[int]] = None,
-) -> Optional[torch.Tensor]:
+    is_encoder: Optional[bool] = False,
+) -> Union[Optional[torch.Tensor], List[torch.Tensor]]:
     """
     Embed multimodal inputs and integrate them with text token embeddings.
 
@@ -614,10 +620,13 @@ def embed_mm_inputs(
                 prefix_length=extend_prefix_lens,
                 extend_length=extend_seq_lens,
                 items_offset_list=items_offsets,
+                is_encoder=is_encoder,
             )
             embeddings += [embedding]
             masks += [mask]
 
+    if is_encoder:
+        return embeddings
     # 3. Get input embeddings
     vocab_size = input_embedding.num_embeddings
     # Important: clamp after getting original multimodal regions
@@ -663,8 +672,12 @@ def general_mm_embed_routine(
     Returns:
         Hidden states from language model forward pass
     """
-    assert hasattr(language_model, "get_input_embeddings")
-    embed_tokens = language_model.get_input_embeddings()
+
+    is_encoder = global_server_args_dict["disaggregation_mode"] == "encode"
+
+    if not is_encoder:
+        assert hasattr(language_model, "get_input_embeddings")
+        embed_tokens = language_model.get_input_embeddings()
     if (
         not forward_batch.forward_mode.is_decode()
         and forward_batch.contains_mm_inputs()
@@ -691,6 +704,7 @@ def general_mm_embed_routine(
             multimodal_model=multimodal_model,
             data_embedding_func_mapping=data_embedding_funcs,
             placeholder_tokens=placeholder_tokens,
+            is_encoder=is_encoder,
         )
         # once used, mm_inputs is useless, considering chunked-prefill is disabled for multimodal models
         # just being defensive here
@@ -698,6 +712,8 @@ def general_mm_embed_routine(
     else:
         inputs_embeds = embed_tokens(input_ids)
 
+    if is_encoder:
+        return inputs_embeds
     hidden_states = language_model(
         input_ids=None,
         forward_batch=forward_batch,
