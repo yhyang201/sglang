@@ -259,6 +259,7 @@ class ServerArgs:
     disaggregation_encode_dp: Optional[int] = None
     disaggregation_prefill_pp: Optional[int] = 1
     disaggregation_ib_device: Optional[str] = None
+    encoder_disaggregated: Optional[bool] = None
     num_reserved_decode_tokens: int = 512  # used for decode kv cache offload in PD
     pdlb_url: Optional[str] = None
 
@@ -1757,6 +1758,12 @@ class ServerArgs:
             default=ServerArgs.disaggregation_transfer_backend,
             choices=["mooncake", "nixl", "ascend"],
             help="The backend for disaggregation transfer. Default is mooncake.",
+        )
+        parser.add_argument(
+            "--encoder-disaggregated",
+            action="store_true",
+            default=ServerArgs.encoder_disaggregated,
+            help="Indicate the P&D, that this is an EPD Disaggregation",
         )
         parser.add_argument(
             "--disaggregation-bootstrap-port",
