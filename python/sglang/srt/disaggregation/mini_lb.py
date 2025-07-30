@@ -151,7 +151,7 @@ class MiniLoadBalancer:
                         f"{server}/{endpoint}", json=modified_request
                     )
 
-            print(f"{tasks_mapping.values()=}")
+            print(f"requests {tasks_mapping.values()=}")
 
             # Wait for all responses to complete. Prefill should end first.
             responses = await asyncio.gather(*tasks_mapping.values())
