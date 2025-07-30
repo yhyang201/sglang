@@ -109,6 +109,7 @@ GLOBAL_SERVER_ARGS_KEYS = [
     "enable_triton_kernel_moe",
     "enable_multimodal",
     "disaggregation_mode",
+    "encoder_disaggregated",
 ]
 
 # Put some global args for easy access
@@ -620,7 +621,7 @@ class Req:
     def seqlen(self):
         return len(self.origin_input_ids) + len(self.output_ids)
 
-    def extend_image_inputs(self, mm_inputs: MultimodalInputs):
+    def extend_mm_inputs(self, mm_inputs: MultimodalInputs):
         if self.multimodal_inputs is None:
             self.multimodal_inputs = mm_inputs
         else:
@@ -946,6 +947,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             enable_custom_logit_processor=enable_custom_logit_processor,
             return_hidden_states=any(req.return_hidden_states for req in reqs),
             chunked_req=chunked_req,
+            # to work with decode node with VLM
+            # it's going to be set in `prepare_for_extend` later and then be pickled anyway, so this won't introduce overhead
+            multimodal_inputs=[req.multimodal_inputs for req in reqs],
         )
 
     def batch_size(self):
@@ -1189,6 +1193,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             if req.input_embeds is not None:
                 # If req.input_embeds is already a list, append its content directly
                 input_embeds.extend(req.input_embeds)  # Use extend to avoid nesting
+            print(f"{req.multimodal_inputs=}")
 
             multimodal_inputs.append(req.multimodal_inputs)
 
@@ -1277,6 +1282,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             if input_embeds
             else None
         )
+        print(f"{multimodal_inputs=}")
         for mm_input in multimodal_inputs:
             if mm_input is None:
                 continue
@@ -1810,6 +1816,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             global_num_tokens_for_logprob=self.global_num_tokens_for_logprob,
             can_run_dp_cuda_graph=self.can_run_dp_cuda_graph,
             is_extend_in_batch=self.is_extend_in_batch,
+            multimodal_inputs=self.multimodal_inputs,
         )
 
     def _evict_tree_cache_if_needed(

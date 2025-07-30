@@ -1258,7 +1258,7 @@ class Scheduler(
                 req.origin_input_ids, mm_inputs
             )
             # if self.server_args.disaggregation_mode == "null" or self.server_args.disaggregation_mode == "encode":
-            req.extend_image_inputs(mm_inputs)
+            req.extend_mm_inputs(mm_inputs)
 
             if len(req.origin_input_ids) >= self.max_req_input_len:
                 req.set_finish_with_abort(
@@ -1390,7 +1390,7 @@ class Scheduler(
             req.origin_input_ids = self.pad_input_ids_func(
                 req.origin_input_ids, image_inputs
             )
-            req.extend_image_inputs(image_inputs)
+            req.extend_mm_inputs(image_inputs)
 
             if len(req.origin_input_ids) >= self.max_req_input_len:
                 req.set_finish_with_abort(
@@ -1888,7 +1888,7 @@ class Scheduler(
             new_batch.hicache_consumer_index = (
                 self.tree_cache.ready_to_load_host_cache()
             )
-
+        print(f"get_new_batch_prefill")
         new_batch.prepare_for_extend()
 
         # Mixed-style chunked prefill

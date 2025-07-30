@@ -181,6 +181,7 @@ class TpModelWorkerClient:
             # update the consumer index of hicache to the running batch
             self.set_hicache_consumer(model_worker_batch.hicache_consumer_index)
             # Run forward
+            print(f"forward_thread_func_ {model_worker_batch=}")
             logits_output, next_token_ids, can_run_cuda_graph = (
                 self.worker.forward_batch_generation(
                     model_worker_batch, model_worker_batch.launch_done

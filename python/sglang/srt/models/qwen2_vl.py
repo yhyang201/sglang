@@ -460,7 +460,11 @@ class Qwen2VLForConditionalGeneration(nn.Module):
         self.is_text_model_only = (
             global_server_args_dict["disaggregation_mode"] == "text"
         )
-        if not self.is_text_model_only:
+        self.should_load_vision_model = not self.is_text_model_only or (
+            global_server_args_dict["disaggregation_mode"] != "encode"
+            and not global_server_args_dict["encoder_disaggregated"]
+        )
+        if self.should_load_vision_model:
             self.visual = Qwen2VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
@@ -592,12 +596,11 @@ class Qwen2VLForConditionalGeneration(nn.Module):
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
                 continue
 
-            if self.is_encoder:
-                if "visual" not in name:
+            if "visual" in name:
+                if not self.should_load_vision_model:
                     continue
-            if self.is_text_model_only:
-                if "visual" in name:
-                    continue
+            elif self.is_encoder:
+                continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:

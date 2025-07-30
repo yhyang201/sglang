@@ -438,35 +438,36 @@ class PrefillPreallocQueue:
 
     def _init_kv_manager(self) -> BaseKVManager:
         # TODO
-        kv_args_class = get_kv_class(self.transfer_backend, KVClassType.KVARGS)
-        kv_args = kv_args_class()
-
-        attn_tp_size = self.tp_size // self.dp_size
-        kv_args.engine_rank = self.tp_rank % (attn_tp_size)
-        kv_args.decode_tp_size = attn_tp_size
-        kv_args.prefill_pp_size = self.prefill_pp_size
-        kv_data_ptrs, kv_data_lens, kv_item_lens = (
-            self.token_to_kv_pool.get_contiguous_buf_infos()
-        )
-
-        kv_args.kv_data_ptrs = kv_data_ptrs
-        kv_args.kv_data_lens = kv_data_lens
-        kv_args.kv_item_lens = kv_item_lens
-
-        kv_args.aux_data_ptrs, kv_args.aux_data_lens, kv_args.aux_item_lens = (
-            self.metadata_buffers.get_buf_infos()
-        )
-
-        kv_args.ib_device = self.scheduler.server_args.disaggregation_ib_device
-        kv_args.gpu_id = self.scheduler.gpu_id
-        kv_manager_class = get_kv_class(self.transfer_backend, KVClassType.MANAGER)
-        kv_manager = kv_manager_class(
-            kv_args,
-            DisaggregationMode.DECODE,
-            self.scheduler.server_args,
-            self.is_mla_backend,
-        )
-        return kv_manager
+        ...
+        # kv_args_class = get_kv_class(self.transfer_backend, KVClassType.KVARGS)
+        # kv_args = kv_args_class()
+        #
+        # attn_tp_size = self.tp_size // self.dp_size
+        # kv_args.engine_rank = self.tp_rank % (attn_tp_size)
+        # kv_args.decode_tp_size = attn_tp_size
+        # kv_args.prefill_pp_size = self.prefill_pp_size
+        # kv_data_ptrs, kv_data_lens, kv_item_lens = (
+        #     self.token_to_kv_pool.get_contiguous_buf_infos()
+        # )
+        #
+        # kv_args.kv_data_ptrs = kv_data_ptrs
+        # kv_args.kv_data_lens = kv_data_lens
+        # kv_args.kv_item_lens = kv_item_lens
+        #
+        # kv_args.aux_data_ptrs, kv_args.aux_data_lens, kv_args.aux_item_lens = (
+        #     self.metadata_buffers.get_buf_infos()
+        # )
+        #
+        # kv_args.ib_device = self.scheduler.server_args.disaggregation_ib_device
+        # kv_args.gpu_id = self.scheduler.gpu_id
+        # kv_manager_class = get_kv_class(self.transfer_backend, KVClassType.MANAGER)
+        # kv_manager = kv_manager_class(
+        #     kv_args,
+        #     DisaggregationMode.DECODE,
+        #     self.scheduler.server_args,
+        #     self.is_mla_backend,
+        # )
+        # return kv_manager
 
     def add(self, req: Req, is_retracted: bool = False) -> None:
         """Add a request to the pending queue."""
