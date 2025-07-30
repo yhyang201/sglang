@@ -403,10 +403,11 @@ def _get_chunked_prefill_embedding(
             continue
         embedding_per_req = embedding_cache.get_mm_embedding(embedding_items_hash)
         if embedding_per_req is None:
+            print(f"{mm_embedding_pool=}")
             if mm_embedding_pool is not None:
                 s = socket.socket()
                 ip = "127.0.0.1"
-                port = 60003
+                port = 53487
                 print(f"start receiving....")
                 s.bind((ip, port))
                 s.listen(1)

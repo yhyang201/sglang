@@ -500,7 +500,7 @@ class SchedulerDisaggregationEncodeMixin:
         """
         s = socket.socket()
         ip = "127.0.0.1"
-        port = 60003
+        port = 53487
         print(f"connecting...")
         s.connect((ip, port))
         print(f"connected, sending...")

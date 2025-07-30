@@ -1,8 +1,8 @@
 # EPD Disaggregation
 
-## Why and What is PD Disaggregation?
+## Why and What is EPD Disaggregation?
 
-Large Language Model (LLM) inference comprises two distinct phases: **Prefill** and **Decode**. The Prefill phase is computation-intensive, processing the entire input sequence, while the Decode phase is memory-intensive, managing the Key-Value (KV) cache for token generation. Traditionally, these phases are handled within a unified engine, where combined scheduling of prefill and decode batches introduces inefficiencies. To address these challenges, we introduce **Prefill and Decoding (PD) Disaggregation** in SGLang.
+Multimodal Large Language Model (MLLM) inference comprises two distinct phases: **Prefill** and **Decode**. The Prefill phase is computation-intensive, processing the entire input sequence, while the Decode phase is memory-intensive, managing the Key-Value (KV) cache for token generation. Traditionally, these phases are handled within a unified engine, where combined scheduling of prefill and decode batches introduces inefficiencies. To address these challenges, we introduce **Prefill and Decoding (PD) Disaggregation** in SGLang.
 
 ### Issues with Unified Scheduling
 
@@ -16,14 +16,6 @@ PD Disaggregation resolves these by separating the two stages, enabling tailored
 For the design details, please refer to [link](https://docs.google.com/document/d/1rQXJwKd5b9b1aOzLh98mnyMhBMhlxXA5ATZTHoQrwvc/edit?tab=t.0).
 
 Currently, we support Mooncake and NIXL as the transfer engine.
-
-
-## Mooncake
-### Requirements
-
-```bash
-uv pip install mooncake-transfer-engine
-```
 
 ### Usage
 
