@@ -76,6 +76,7 @@ from sglang.srt.managers.schedule_batch import (
 from sglang.srt.mem_cache.allocator import (
     AscendPagedTokenToKVPoolAllocator,
     BaseTokenToKVPoolAllocator,
+    FakeAllocator,
     PagedTokenToKVPoolAllocator,
     SWATokenToKVPoolAllocator,
     TokenToKVPoolAllocator,
@@ -345,9 +346,13 @@ class ModelRunner:
         print(f"{min_per_gpu_memory=}")
         # Init memory pool for mm embedding (only allocated in PDE-disaggregation)
         if (
-            self.server_args.disaggregation_mode == "prefill"
-            and self.server_args.encoder_disaggregated
-        ) or self.server_args.disaggregation_mode == "text":
+            (
+                self.server_args.disaggregation_mode == "prefill"
+                and self.server_args.encoder_disaggregated
+            )
+            or self.server_args.disaggregation_mode == "text"
+            or self.server_args.disaggregation_mode == "encode"
+        ):
             self.init_mm_memory_pool(
                 min_per_gpu_memory * MM_MEM_POOL_FRACTION,
                 server_args.max_running_requests,
@@ -1177,12 +1182,27 @@ class ModelRunner:
             assert mm_page_size == 1
             # if mm_page_size == 1:
             # Use simple allocator for page size 1
-            self.mm_embedding_allocator = TokenToKVPoolAllocator(
-                max_mm_total_num_tokens,
-                dtype=mm_embedding_dtype,
-                device=self.device,
-                kvcache=self.mm_embedding_pool,
-            )
+            if self.server_args.disaggregation_mode == "encode":
+                self.mm_embedding_allocator = FakeAllocator(
+                    max_mm_total_num_tokens,
+                    dtype=mm_embedding_dtype,
+                    device=self.device,
+                    kvcache=None,
+                )
+            else:
+                self.mm_embedding_allocator = TokenToKVPoolAllocator(
+                    max_mm_total_num_tokens,
+                    dtype=mm_embedding_dtype,
+                    device=self.device,
+                    kvcache=self.mm_embedding_pool,
+                )
+                logger.info(
+                    f"Multimodal memory pool initialized. "
+                    f"max_mm_tokens={max_mm_total_num_tokens}, "
+                    f"hidden_size={hidden_size}, "
+                    f"dtype={mm_embedding_dtype}, "
+                    f"avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
+                )
             # else:
             #     # Use paged allocator for larger page sizes
             #     if _is_npu:
@@ -1204,14 +1224,6 @@ class ModelRunner:
         else:
             # Draft worker shares mm_embedding_allocator with the target worker
             assert self.is_draft_worker
-
-        logger.info(
-            f"Multimodal memory pool initialized. "
-            f"max_mm_tokens={max_mm_total_num_tokens}, "
-            f"hidden_size={hidden_size}, "
-            f"dtype={mm_embedding_dtype}, "
-            f"avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
-        )
 
     def init_memory_pool(
         self,

@@ -20,7 +20,7 @@ from sglang.srt.managers.schedule_batch import (
     MultimodalInputs,
     global_server_args_dict,
 )
-from sglang.srt.mem_cache.allocator import TokenToKVPoolAllocator
+from sglang.srt.mem_cache.allocator import FakeAllocator, TokenToKVPoolAllocator
 from sglang.srt.mem_cache.multimodal_cache import (
     MultimodalCache,
     MultiModalStaticCache,
@@ -404,7 +404,7 @@ def _get_chunked_prefill_embedding(
         embedding_per_req = embedding_cache.get_mm_embedding(embedding_items_hash)
         if embedding_per_req is None:
             print(f"{mm_embedding_pool=}")
-            if mm_embedding_pool is not None:
+            if mm_embedding_pool is not None and disaggregation_mode != "encode":
                 s = socket.socket()
                 ip = "127.0.0.1"
                 port = 53487
@@ -437,7 +437,7 @@ def _get_chunked_prefill_embedding(
                     embedding_items_hash, embedding_per_req, loc=locs
                 )
 
-            if mm_embedding_pool is not None:
+            if mm_embedding_pool is not None and disaggregation_mode != "encode":
                 # at this point, the embeddings have already been written into embedding pool
                 embedding_per_req = mm_embedding_pool.get_mm_embedding(
                     embedding_items_hash

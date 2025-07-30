@@ -23,6 +23,7 @@ import logging
 import socket
 import struct
 import threading
+import time
 from collections import deque
 from http import HTTPStatus
 from typing import TYPE_CHECKING, List, Optional
@@ -33,6 +34,7 @@ from sglang.srt.disaggregation.base import BaseKVManager, KVPoll
 from sglang.srt.disaggregation.base.conn import EmbeddingArgs
 from sglang.srt.disaggregation.utils import (
     FAKE_BOOTSTRAP_HOST,
+    DisaggregationMode,
     EncoderMetadataBuffers,
     KVClassType,
     ReqToMetadataIdxAllocator,
@@ -43,6 +45,8 @@ from sglang.srt.disaggregation.utils import (
     prepare_abort,
 )
 from sglang.srt.managers.schedule_batch import FINISH_LENGTH, Req, ScheduleBatch
+from sglang.srt.managers.schedule_policy import AddReqResult
+from sglang.srt.managers.schedule_policy_encode_adder import EncodeAdder
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.utils import require_mlp_sync
 
@@ -235,6 +239,160 @@ class SchedulerDisaggregationEncodeMixin:
     Mixin for Scheduler to handle disaggregation encode
     """
 
+    def get_new_batch_encode(self: Scheduler) -> Optional[ScheduleBatch]:
+        """Get a new batch for encode mode.
+
+        This method builds a batch of requests for encoding multimodal embeddings,
+        ensuring we don't exceed memory limits while maximizing batch size.
+        Encode mode doesn't involve tree_cache, chunked prefill, or speculative algorithms.
+        """
+        assert self.disaggregation_mode == DisaggregationMode.ENCODE
+
+        # Handle the cases where encode is not allowed
+        if self.running_batch.batch_is_full or len(self.waiting_queue) == 0:
+            return None
+
+        running_bs = len(self.running_batch.reqs)
+
+        # Check if we can allocate more requests
+        if self.get_num_allocatable_reqs_encode(running_bs) <= 0:
+            self.running_batch.batch_is_full = True
+            return None
+
+        # Get priority queue
+        self.policy.calc_priority(self.waiting_queue)
+
+        # Encode policy - use mm_embedding_allocator instead of token_to_kv_pool_allocator
+        adder = EncodeAdder(
+            self.page_size,
+            self.mm_embedding_allocator,  # Use multimodal embedding allocator
+            self.running_batch,
+            self.new_token_ratio,
+            self.max_prefill_tokens,
+            # self.chunked_prefill_size,
+            # running_bs if self.is_mixed_chunk else 0,
+        )
+
+        # Get requests from the waiting queue to a new encode batch
+        for req in self.waiting_queue:
+            # Check if we've reached the maximum allocatable requests
+            if len(adder.can_run_list) >= self.get_num_allocatable_reqs_encode(
+                running_bs
+            ):
+                self.running_batch.batch_is_full = True
+                break
+
+            # Check multimodal embedding pool availability for encode mode
+            if self.disaggregation_mode == DisaggregationMode.ENCODE:
+                # In encode mode, we need to check if the multimodal embedding pool has enough space
+                if (
+                    len(adder.can_run_list)
+                    >= self.mm_embedding_allocator.available_size()
+                ):
+                    self.running_batch.batch_is_full = True
+                    break
+
+            # Add the request to the batch
+            res = adder.add_one_req(req)
+
+            if res != AddReqResult.CONTINUE:
+                if res == AddReqResult.NO_TOKEN:
+                    # No more memory available for multimodal embeddings
+                    self.running_batch.batch_is_full = True
+                break
+
+        # Update waiting queue
+        can_run_list: List[Req] = adder.can_run_list
+        if len(can_run_list) == 0:
+            return None
+
+        if self.enable_metrics:
+            # Only record queue time when enable_metrics is True to avoid overhead
+            for req in can_run_list:
+                req.queue_time_end = time.perf_counter()
+
+        self.waiting_queue = [
+            x for x in self.waiting_queue if x not in set(can_run_list)
+        ]
+
+        # Print stats
+        if self.current_scheduler_metrics_enabled():
+            self.log_encode_stats(adder, can_run_list, running_bs)
+
+        # Create a new batch
+        new_batch = ScheduleBatch.init_new(
+            can_run_list,
+            self.req_to_token_pool,
+            self.token_to_kv_pool_allocator,
+            self.tree_cache,
+            self.model_config,
+            self.enable_overlap,
+            self.spec_algorithm,
+            self.server_args.enable_custom_logit_processor,
+            chunked_req=None,  # Encode mode doesn't use chunked requests
+            device=self.device,
+        )
+
+        # Encode mode doesn't use hierarchical cache
+        # if self.enable_hierarchical_cache:
+        #     new_batch.hicache_consumer_index = (
+        #         self.tree_cache.ready_to_load_host_cache()
+        #     )
+
+        # Prepare the batch for extend mode (encode is similar to extend)
+        new_batch.prepare_for_extend(should_set_req_pool_indices=False)
+
+        total_embedding_lens = sum(req.cu_mm_embedding_len for req in new_batch.reqs)
+        self.mm_embedding_allocator.alloc(total_embedding_lens)
+        print(
+            f"mm_embedding_allocator remained size: {self.mm_embedding_allocator.available_size()=}"
+        )
+        # Encode mode doesn't have decoding requests
+        new_batch.decoding_reqs = None
+
+        print(f"get_new_batch_encode: batch_size={len(can_run_list)}")
+        return new_batch
+
+    def log_encode_stats(
+        self: Scheduler,
+        adder: EncodeAdder,
+        can_run_list: List[Req],
+        running_bs: int,
+    ):
+        gap_latency = time.perf_counter() - self.last_encode_stats_tic
+        self.last_encode_stats_tic = time.perf_counter()
+        self.last_input_throughput = self.last_encode_tokens / gap_latency
+        self.last_encode_tokens = adder.log_input_tokens
+
+        # num_used, token_usage, _, _ = self._get_token_info()
+        # token_msg = f"token usage: {token_usage:.2f}, "
+
+        num_new_seq = len(can_run_list)
+        f = (
+            f"Encode batch. "
+            f"#new-seq: {num_new_seq}, "
+            f"#new-token: {adder.log_input_tokens}, "
+            # f"{token_msg}"
+        )
+
+        f += f"#running-req: {running_bs}, "
+        f += f"#queue-req: {len(self.waiting_queue)}, "
+
+        logger.info(f)
+
+        if self.enable_metrics:
+            self.stats.num_running_reqs = running_bs
+            # self.stats.num_used_tokens = num_used
+            # self.stats.token_usage = round(token_usage, 2)
+            self.stats.num_queue_reqs = len(self.waiting_queue)
+
+            total_queue_latency = 0
+            for req in can_run_list:
+                total_queue_latency += req.queue_time_end - req.queue_time_start
+            self.stats.avg_request_queue_latency = total_queue_latency / num_new_seq
+
+            self.metrics_collector.log_stats(self.stats)
+
     @torch.no_grad()
     def event_loop_normal_disagg_encode(self: Scheduler) -> None:
         """A normal scheduler loop for encode worker in disaggregation mode."""
@@ -247,8 +405,8 @@ class SchedulerDisaggregationEncodeMixin:
             )
             batch = self.get_new_batch_encode()
 
-            if require_mlp_sync(self.server_args):
-                batch = self.prepare_mlp_sync_batch(batch)
+            # if require_mlp_sync(self.server_args):
+            #     batch = self.prepare_mlp_sync_batch(batch)
             self.cur_batch = batch
 
             if batch:
@@ -395,12 +553,17 @@ class SchedulerDisaggregationEncodeMixin:
         #         )
         #         logprob_pt += num_input_logprobs
         # FIXME: manually set finish reason to let req response
+
+        print("setting finish reason")
         for i, req in enumerate(batch.reqs):
             req.finished_reason = FINISH_LENGTH(length=0)
 
         self.send_embedding_chunk(result)
+
+        for i, req in enumerate(batch.reqs):
+            self.mm_embedding_allocator.free(req.cu_mm_embedding_len)
         # We need to remove the sync in the following function for overlap schedule.
-        self.set_next_batch_sampling_info_done(batch)
+        # self.set_next_batch_sampling_info_done(batch)
         # print(f"{batch.reqs=}")
         self.stream_output(batch.reqs, batch.return_logprob)
 
@@ -498,22 +661,24 @@ class SchedulerDisaggregationEncodeMixin:
         """
         Send a embedding to the prefill server
         """
-        s = socket.socket()
-        ip = "127.0.0.1"
-        port = 53487
-        print(f"connecting...")
-        s.connect((ip, port))
-        print(f"connected, sending...")
-
-        embeddings: torch.Tensor = result.logits_output
-
-        shape = embeddings.shape
-        s.sendall(struct.pack("2I", *shape))  # 2个无符号int
-        print(f"{embeddings.shape=}")
-
-        data = embeddings.to(torch.float32).cpu().numpy().tobytes()
-        s.sendall(data)
-        print(f"sent")
-        s.close()
+        ...
+        print(f"send_embedding_chunk")
+        # s = socket.socket()
+        # ip = "127.0.0.1"
+        # port = 53487
+        # print(f"connecting...")
+        # s.connect((ip, port))
+        # print(f"connected, sending...")
+        #
+        # embeddings: torch.Tensor = result.logits_output
+        #
+        # shape = embeddings.shape
+        # s.sendall(struct.pack("2I", *shape))  # 2个无符号int
+        # print(f"{embeddings.shape=}")
+        #
+        # data = embeddings.to(torch.float32).cpu().numpy().tobytes()
+        # s.sendall(data)
+        # print(f"sent")
+        # s.close()
         # print(f"{req=}")
         # req.disagg_kv_sender.send_embedding(embeddings, [0])

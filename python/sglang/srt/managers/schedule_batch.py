@@ -1193,7 +1193,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             if req.input_embeds is not None:
                 # If req.input_embeds is already a list, append its content directly
                 input_embeds.extend(req.input_embeds)  # Use extend to avoid nesting
-            print(f"{req.multimodal_inputs=}")
+            # print(f"{req.multimodal_inputs=}")
 
             multimodal_inputs.append(req.multimodal_inputs)
 
@@ -1282,7 +1282,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             if input_embeds
             else None
         )
-        print(f"{multimodal_inputs=}")
+        # print(f"{multimodal_inputs=}")
         for mm_input in multimodal_inputs:
             if mm_input is None:
                 continue
