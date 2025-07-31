@@ -36,7 +36,7 @@ $ python -m sglang.srt.disaggregation.mini_lb --encode http://127.0.0.1:60001 --
 ```bash
 # start an encode server
 $ python -m sglang.launch_server --model-path Qwen/Qwen2-VL-7B-Instruct --host 0.0.0.0  --disaggregation-mode encode --port 60001
-# start a prefill server
+# start a prefill server, make sure to set --encoder-disaggregated
 $ python -m sglang.launch_server --model-path Qwen/Qwen2-VL-7B-Instruct --host 0.0.0.0  --disaggregation-mode prefill --port 60002 --encoder-disaggregated
 # start a decode server
 $ python -m sglang.launch_server --model-path Qwen/Qwen2-VL-7B-Instruct --host 0.0.0.0  --disaggregation-mode decode --port 60003
