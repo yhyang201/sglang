@@ -141,10 +141,10 @@ class MiniLoadBalancer:
             tasks_mapping = dict()
 
             for server_role, server in [
-                # (ServerRole.PREFILL, prefill_server),
-                # (ServerRole.DECODE, decode_server),
+                (ServerRole.PREFILL, prefill_server),
+                (ServerRole.DECODE, decode_server),
                 (ServerRole.ENCODE, encode_server),
-                # (ServerRole.TEXT, text_server),
+                (ServerRole.TEXT, text_server),
             ]:
                 if server:
                     tasks_mapping[server_role] = session.post(

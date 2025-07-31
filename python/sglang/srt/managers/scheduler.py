@@ -814,34 +814,35 @@ class Scheduler(
             self.disagg_prefill_inflight_queue: List[Req] = []
 
             # TODO: only if encode is disaggregated
-            # The prefill requests polling mm embedding cache
-            self.disagg_prefill_transfer_queue = PrefillTransferQueue(
-                gloo_group=self.attn_tp_cpu_group,
-                req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
-                tp_rank=self.tp_rank,
-                metadata_buffers=self.disagg_metadata_buffers,
-                scheduler=self,
-            )
+            if self.server_args.encoder_disaggregated:
+                # The prefill requests polling mm embedding cache
+                self.disagg_prefill_transfer_queue = PrefillTransferQueue(
+                    gloo_group=self.attn_tp_cpu_group,
+                    req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
+                    tp_rank=self.tp_rank,
+                    metadata_buffers=self.disagg_metadata_buffers,
+                    scheduler=self,
+                )
 
-            # The prefill requests pending for pre-allocation, waiting for encoder embeddings
-            self.disagg_prefill_prealloc_queue = PrefillPreallocQueue(
-                mm_embedding_pool=self.mm_embedding_pool,
-                token_to_kv_pool_allocator=self.mm_embedding_allocator,
-                req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
-                metadata_buffers=self.disagg_metadata_buffers,
-                scheduler=self,
-                transfer_queue=self.disagg_prefill_transfer_queue,
-                gloo_group=self.attn_tp_cpu_group,
-                tp_rank=self.tp_rank,
-                tp_size=self.tp_size,
-                dp_size=1,
-                gpu_id=self.gpu_id,
-                bootstrap_port=self.server_args.disaggregation_bootstrap_port,
-                max_total_num_tokens=self.max_total_num_tokens,
-                prefill_pp_size=self.server_args.disaggregation_prefill_pp,
-                # num_reserved_decode_tokens=self.server_args.num_reserved_decode_tokens,
-                transfer_backend=self.transfer_backend,
-            )
+                # The prefill requests pending for pre-allocation, waiting for encoder embeddings
+                self.disagg_prefill_prealloc_queue = PrefillPreallocQueue(
+                    mm_embedding_pool=self.mm_embedding_pool,
+                    token_to_kv_pool_allocator=self.mm_embedding_allocator,
+                    req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
+                    metadata_buffers=self.disagg_metadata_buffers,
+                    scheduler=self,
+                    transfer_queue=self.disagg_prefill_transfer_queue,
+                    gloo_group=self.attn_tp_cpu_group,
+                    tp_rank=self.tp_rank,
+                    tp_size=self.tp_size,
+                    dp_size=1,
+                    gpu_id=self.gpu_id,
+                    bootstrap_port=self.server_args.disaggregation_bootstrap_port,
+                    max_total_num_tokens=self.max_total_num_tokens,
+                    prefill_pp_size=self.server_args.disaggregation_prefill_pp,
+                    # num_reserved_decode_tokens=self.server_args.num_reserved_decode_tokens,
+                    transfer_backend=self.transfer_backend,
+                )
         elif self.disaggregation_mode == DisaggregationMode.ENCODE:
             assert self.model_config.vision_config is not None
             buffer_size = self.max_running_requests * 2
