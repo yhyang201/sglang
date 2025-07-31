@@ -663,22 +663,22 @@ class SchedulerDisaggregationEncodeMixin:
         """
         ...
         print(f"send_embedding_chunk")
-        # s = socket.socket()
-        # ip = "127.0.0.1"
-        # port = 53487
-        # print(f"connecting...")
-        # s.connect((ip, port))
-        # print(f"connected, sending...")
-        #
-        # embeddings: torch.Tensor = result.logits_output
-        #
-        # shape = embeddings.shape
-        # s.sendall(struct.pack("2I", *shape))  # 2个无符号int
-        # print(f"{embeddings.shape=}")
-        #
-        # data = embeddings.to(torch.float32).cpu().numpy().tobytes()
-        # s.sendall(data)
-        # print(f"sent")
-        # s.close()
-        # print(f"{req=}")
+        s = socket.socket()
+        ip = "127.0.0.1"
+        port = 53487
+        print(f"connecting...")
+        s.connect((ip, port))
+        print(f"connected, sending...")
+
+        embeddings: torch.Tensor = result.logits_output
+
+        shape = embeddings.shape
+        s.sendall(struct.pack("2I", *shape))  # 2个无符号int
+        print(f"{embeddings.shape=}")
+
+        data = embeddings.to(torch.float32).cpu().numpy().tobytes()
+        s.sendall(data)
+        print(f"sent")
+        s.close()
+        print(f"{req=}")
         # req.disagg_kv_sender.send_embedding(embeddings, [0])
