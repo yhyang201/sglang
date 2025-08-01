@@ -52,8 +52,8 @@ from sglang.srt.disaggregation.encode import (
 from sglang.srt.disaggregation.kv_events import EventPublisherFactory, KVEventBatch
 from sglang.srt.disaggregation.prefill import (
     PrefillBootstrapQueue,
+    MMEmbeddingTransferQueue,
     PrefillPreallocQueue,
-    PrefillTransferQueue,
     SchedulerDisaggregationPrefillMixin,
 )
 from sglang.srt.disaggregation.utils import (
@@ -816,7 +816,7 @@ class Scheduler(
             # TODO: only if encode is disaggregated
             if self.server_args.encoder_disaggregated:
                 # The prefill requests polling mm embedding cache
-                self.disagg_prefill_transfer_queue = PrefillTransferQueue(
+                self.disagg_prefill_transfer_queue = MMEmbeddingTransferQueue(
                     gloo_group=self.attn_tp_cpu_group,
                     req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
                     tp_rank=self.tp_rank,
