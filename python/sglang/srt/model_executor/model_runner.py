@@ -328,8 +328,12 @@ class ModelRunner:
         # Init lora
         if server_args.enable_lora:
             self.init_lora_manager()
+
+        # assume seq_len = 1k, average image token num ~= 200, 1 image per-req, average layer num = 60
+        # kv_size/embedding_size = 1k * 60 / 200 = 300
+        # fraction = 1 / (300 + 1) = 0.0033
         MM_MEM_POOL_FRACTION = float(
-            os.environ.get("SGLANG_MM_MEM_POOL_FRACTION", "0.2")
+            os.environ.get("SGLANG_MM_MEM_POOL_FRACTION", "0.0033")
         )
 
         # Init memory pool and attention backends
