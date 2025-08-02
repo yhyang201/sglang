@@ -27,6 +27,8 @@ import time
 from http import HTTPStatus
 from typing import TYPE_CHECKING, List, Optional
 
+from sglang.srt.managers.scheduler import EmbeddingBatchResult
+from sglang.srt.mem_cache.multimodal_cache import PagedMultiModalEmbeddingPool
 import torch
 
 from sglang.srt.disaggregation.base import BaseKVManager, KVPoll
@@ -62,10 +64,10 @@ class EncodeBootstrapQueue:
 
     def __init__(
         self,
-        # mm_embedding_pool: PagedMultiModalEmbeddingPool,
+        mm_embedding_pool: PagedMultiModalEmbeddingPool,
         # draft_mm_embedding_pool: Optional[PagedMultiModalCache],
-        req_to_metadata_buffer_idx_allocator: ReqToMetadataIdxAllocator,
-        metadata_buffers: EncoderMetadataBuffers,
+        # req_to_metadata_buffer_idx_allocator: ReqToMetadataIdxAllocator,
+        # metadata_buffers: EncoderMetadataBuffers,
         gpu_id: int,
         bootstrap_port: int,
         gloo_group: ProcessGroup,
@@ -74,10 +76,10 @@ class EncodeBootstrapQueue:
         scheduler: Scheduler,
         transfer_backend: TransferBackend,
     ):
-        # self.mm_embedding_pool = mm_embedding_pool
+        self.mm_embedding_pool = mm_embedding_pool
         # self.draft_mm_embedding_pool = draft_mm_embedding_pool
-        self.metadata_buffers = metadata_buffers
-        self.req_to_metadata_buffer_idx_allocator = req_to_metadata_buffer_idx_allocator
+        # self.metadata_buffers = metadata_buffers
+        # self.req_to_metadata_buffer_idx_allocator = req_to_metadata_buffer_idx_allocator
         self.encode_dp_size = encode_dp_size
         self.gpu_id = gpu_id
         self.bootstrap_port = bootstrap_port
@@ -92,13 +94,16 @@ class EncodeBootstrapQueue:
     def _init_kv_manager(self) -> BaseKVManager:
         print(f"initializing kv manager")
         # TODO
-        embedding_class = EmbeddingArgs()
+        # embedding_class = EmbeddingArgs()
         kv_args_class = get_kv_class(self.transfer_backend, KVClassType.KVARGS)
         kv_args = kv_args_class()
-        # kv_data_ptrs, kv_data_lens, kv_item_lens = (
-        #     self.mm_embedding_pool.get_pointers_from_locs()
-        # )
-        #
+        kv_data_ptrs, kv_data_lens, kv_item_lens = self.mm_embedding_pool.get_mm_buffer_info()
+
+
+        kv_args.kv_data_ptrs = kv_data_ptrs
+        kv_args.kv_data_lens = kv_data_lens
+        kv_args.kv_item_lens = kv_item_lens
+        kv_args.page_size = 1
         # placeholder
         kv_args.engine_rank = -1
         kv_args.kv_data_ptrs = []
@@ -106,11 +111,19 @@ class EncodeBootstrapQueue:
 
         # kv_args.page_size = self.mm_embedding_pool.page_size
         #
-        kv_args.aux_data_ptrs, kv_args.aux_data_lens, kv_args.aux_item_lens = (
-            self.metadata_buffers.get_buf_infos()
-        )
+        # kv_args.aux_data_ptrs, kv_args.aux_data_lens, kv_args.aux_item_lens = (
+        #     self.metadata_buffers.get_buf_infos()
+        # )
         kv_args.ib_device = self.scheduler.server_args.disaggregation_ib_device
         kv_args.gpu_id = self.scheduler.gpu_id
+        #
+        kv_manager_class = get_kv_class(self.transfer_backend, KVClassType.MANAGER)
+        kv_manager = kv_manager_class(
+            kv_args,
+            DisaggregationMode.ENCODE,
+            self.scheduler.server_args,
+        )
+        return kv_manager
 
         kv_manager_class = get_kv_class(self.transfer_backend, KVClassType.MANAGER)
         kv_manager = kv_manager_class(
@@ -144,6 +157,7 @@ class EncodeBootstrapQueue:
             self.add(req)
 
     def _check_if_req_exceed_kv_capacity(self, req: Req) -> bool:
+        # TODO: not accurate check
         if len(req.origin_input_ids) > self.max_total_num_tokens:
             message = f"Request {req.rid} exceeds the maximum number of tokens: {len(req.origin_input_ids)} > {self.max_total_num_tokens}"
             logger.error(message)
@@ -210,12 +224,6 @@ class EncodeBootstrapQueue:
 
             # KV.WaitingForInput - init here
             num_kv_indices = len(req.origin_input_ids)
-            if self.req_to_metadata_buffer_idx_allocator.available_size() == 0:
-                break
-
-            req.metadata_buffer_index = (
-                self.req_to_metadata_buffer_idx_allocator.alloc()
-            )
             assert req.metadata_buffer_index is not None
 
             # num_pages = kv_to_page_num(num_kv_indices, self.mm_embedding_pool.page_size)
@@ -481,33 +489,31 @@ class SchedulerDisaggregationEncodeMixin:
     def process_batch_result_disagg_encode(
         self: Scheduler,
         batch: ScheduleBatch,
-        result: GenerationBatchResult,
+        result: EmbeddingBatchResult,
         launch_done: Optional[threading.Event] = None,
     ) -> None:
         """
         Transfer kv for prefill completed requests and add it into disagg_prefill_inflight_queue
         Adapted from process_batch_result_prefill
         """
-        (
-            logits_output,
-            _next_token_ids,
-            extend_input_len_per_req,
-            extend_logprob_start_len_per_req,
-        ) = (
-            result.logits_output,
-            result.next_token_ids,
-            result.extend_input_len_per_req,
-            result.extend_logprob_start_len_per_req,
-        )
+        # (
+        #     logits_output,
+        #     _next_token_ids,
+        #     extend_input_len_per_req,
+        #     extend_logprob_start_len_per_req,
+        # ) = (
+        #     result.logits_output,
+        #     result.next_token_ids,
+        #     result.extend_input_len_per_req,
+        #     result.extend_logprob_start_len_per_req,
+        # )
 
-        logprob_pt = 0
+        # logprob_pt = 0
         # Transfer kv for prefill completed requests and add it into disagg_prefill_inflight_queue
-        # if self.enable_overlap:
+        if self.enable_overlap:
+            self.tp_worker.resolve_last_batch_result(launch_done)
         #     raise NotImplementedError()
         # wait
-        # logits_output, next_token_ids, _ = self.tp_worker.resolve_last_batch_result(
-        #     launch_done
-        # )
         # else:
         # _next_token_ids = result.next_token_ids.tolist()
         # if batch.return_logprob:
@@ -520,7 +526,7 @@ class SchedulerDisaggregationEncodeMixin:
         #             logits_output.input_token_logprobs.tolist()
         #         )
 
-        hidden_state_offset = 0
+        # hidden_state_offset = 0
         # for i, (req, next_token_id) in enumerate(
         #     zip(batch.reqs, _next_token_ids, strict=True)
         # ):
@@ -560,11 +566,10 @@ class SchedulerDisaggregationEncodeMixin:
         print("setting finish reason")
         for i, req in enumerate(batch.reqs):
             req.finished_reason = FINISH_LENGTH(length=0)
+            self.send_embedding_chunk(req)
 
-        self.send_embedding_chunk(result)
-
-        for i, req in enumerate(batch.reqs):
-            self.mm_embedding_allocator.free(req.cu_mm_embedding_len)
+        # for i, req in enumerate(batch.reqs):
+        #     self.mm_embedding_allocator.free(req.cu_mm_embedding_len)
         # We need to remove the sync in the following function for overlap schedule.
         # self.set_next_batch_sampling_info_done(batch)
         # print(f"{batch.reqs=}")
@@ -602,7 +607,8 @@ class SchedulerDisaggregationEncodeMixin:
             if poll in [KVPoll.WaitingForInput, KVPoll.Transferring]:
                 undone_reqs.append(req)
             elif poll == KVPoll.Success:  # transfer done
-                self.tree_cache.cache_finished_req(req)  # unlock the tree
+                self.mm_embedding_allocator.free(req.cu_mm_embedding_len)
+                # self.tree_cache.cache_finished_req(req)  # unlock the tree
                 req.finished_reason = FINISH_LENGTH(length=0)
                 # FIXME: clean up req's data in transfer engine
                 if hasattr(req.disagg_kv_sender, "clear"):
@@ -615,7 +621,8 @@ class SchedulerDisaggregationEncodeMixin:
                 except Exception as e:
                     error_message += f" with exception {e}"
                 logger.warning(error_message)
-                self.tree_cache.cache_finished_req(req)  # unlock the tree
+                self.mm_embedding_allocator.free(req.cu_mm_embedding_len)
+                # self.tree_cache.cache_finished_req(req)  # unlock the tree
                 prepare_abort(
                     req, error_message, status_code=HTTPStatus.INTERNAL_SERVER_ERROR
                 )
@@ -630,10 +637,10 @@ class SchedulerDisaggregationEncodeMixin:
             any(req.return_logprob for req in done_reqs),
             None,
         )
-        for req in done_reqs:
-            req: Req
-            self.req_to_metadata_buffer_idx_allocator.free(req.metadata_buffer_index)
-            req.metadata_buffer_index = -1
+        # for req in done_reqs:
+        #     req: Req
+            # self.req_to_metadata_buffer_idx_allocator.free(req.metadata_buffer_index)
+            # req.metadata_buffer_index = -1
 
         self.disagg_encode_inflight_queue = undone_reqs
 
@@ -658,8 +665,7 @@ class SchedulerDisaggregationEncodeMixin:
 
     def send_embedding_chunk(
         self: Scheduler,
-        result: GenerationBatchResult,
-        req: Req = None,
+        req: Req
     ) -> None:
         """
         Send a embedding to the prefill server
@@ -685,3 +691,10 @@ class SchedulerDisaggregationEncodeMixin:
         s.close()
         print(f"{req=}")
         # req.disagg_kv_sender.send_embedding(embeddings, [0])
+
+        # TODO:
+        if req.disagg_kv_sender is not None:
+            req.disagg_kv_sender.send_embedding(
+                embeddings=req.embedding, embedding_start_indices=[]
+            )
+
