@@ -343,11 +343,11 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
     async def _handle_route_put(self, request: web.Request):
         data = await request.json()
         role = data["role"]
-        tp_size = data["tp_size"]
-        dp_size = data["dp_size"]
-        rank_ip = data["rank_ip"]
-        rank_port = int(data["rank_port"])
-        engine_rank = int(data["engine_rank"])
+        tp_size = data.get("tp_size", None)
+        dp_size = data.get("dp_size", None)
+        rank_ip = data.get("rank_ip", None)
+        rank_port = data.get("rank_port", None)
+        engine_rank = int(data.get("engine_rank", "-1"))
 
         if self.tp_size is None:
             self.tp_size = tp_size

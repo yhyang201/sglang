@@ -24,7 +24,6 @@ import socket
 import struct
 import threading
 import time
-from collections import deque
 from http import HTTPStatus
 from typing import TYPE_CHECKING, List, Optional
 
@@ -47,8 +46,6 @@ from sglang.srt.disaggregation.utils import (
 from sglang.srt.managers.schedule_batch import FINISH_LENGTH, Req, ScheduleBatch
 from sglang.srt.managers.schedule_policy import AddReqResult
 from sglang.srt.managers.schedule_policy_encode_adder import EncodeAdder
-from sglang.srt.model_executor.forward_batch_info import ForwardMode
-from sglang.srt.utils import require_mlp_sync
 
 if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
@@ -84,7 +81,8 @@ class EncodeBootstrapQueue:
         self.encode_dp_size = encode_dp_size
         self.gpu_id = gpu_id
         self.bootstrap_port = bootstrap_port
-        self.queue: List[Req] = []
+        # reqs waiting to be bootstrapped
+        self.waiting_reqs: List[Req] = []
         self.gloo_group = gloo_group
         self.max_total_num_tokens = max_total_num_tokens
         self.scheduler = scheduler
@@ -92,6 +90,7 @@ class EncodeBootstrapQueue:
         self.kv_manager = self._init_kv_manager()
 
     def _init_kv_manager(self) -> BaseKVManager:
+        print(f"initializing kv manager")
         # TODO
         embedding_class = EmbeddingArgs()
         kv_args_class = get_kv_class(self.transfer_backend, KVClassType.KVARGS)
@@ -100,28 +99,29 @@ class EncodeBootstrapQueue:
         #     self.mm_embedding_pool.get_pointers_from_locs()
         # )
         #
-        #
-        # kv_args.kv_data_ptrs = kv_data_ptrs
-        # kv_args.kv_data_lens = kv_data_lens
-        # kv_args.kv_item_lens = kv_item_lens
+        # placeholder
+        kv_args.engine_rank = -1
+        kv_args.kv_data_ptrs = []
+        kv_args.kv_data_lens = []
 
         # kv_args.page_size = self.mm_embedding_pool.page_size
         #
         kv_args.aux_data_ptrs, kv_args.aux_data_lens, kv_args.aux_item_lens = (
             self.metadata_buffers.get_buf_infos()
         )
-        # kv_args.ib_device = self.scheduler.server_args.disaggregation_ib_device
-        # kv_args.gpu_id = self.scheduler.gpu_id
-        #
-        # kv_manager_class = get_kv_class(self.transfer_backend, KVClassType.MANAGER)
-        # kv_manager = kv_manager_class(
-        #     kv_args,
-        #     DisaggregationMode.PREFILL,
-        #     self.scheduler.server_args,
-        # )
-        # return kv_manager
+        kv_args.ib_device = self.scheduler.server_args.disaggregation_ib_device
+        kv_args.gpu_id = self.scheduler.gpu_id
 
-    def add(self, req: Req, num_kv_heads: int) -> None:
+        kv_manager_class = get_kv_class(self.transfer_backend, KVClassType.MANAGER)
+        kv_manager = kv_manager_class(
+            kv_args,
+            DisaggregationMode.ENCODE,
+            self.scheduler.server_args,
+        )
+        return kv_manager
+
+    def add(self, req: Req) -> None:
+        print(f"adding req to EncodeBootstrapQueue, waiting to be bootstrapped")
         if self._check_if_req_exceed_kv_capacity(req):
             return
 
@@ -137,11 +137,11 @@ class EncodeBootstrapQueue:
             bootstrap_room=req.bootstrap_room,
         )
         self._process_req(req)
-        self.queue.append(req)
+        self.waiting_reqs.append(req)
 
-    def extend(self, reqs: List[Req], num_kv_heads: int) -> None:
+    def extend(self, reqs: List[Req]) -> None:
         for req in reqs:
-            self.add(req, num_kv_heads)
+            self.add(req)
 
     def _check_if_req_exceed_kv_capacity(self, req: Req) -> bool:
         if len(req.origin_input_ids) > self.max_total_num_tokens:
@@ -174,17 +174,16 @@ class EncodeBootstrapQueue:
         failed_reqs = []
         indices_to_remove = set()
 
-        if len(self.queue) == 0:
+        if len(self.waiting_reqs) == 0:
             if not return_failed_reqs:
                 return []
             else:
                 return [], []
 
         polls = poll_and_all_reduce(
-            [req.disagg_kv_sender for req in self.queue], self.gloo_group
+            [req.disagg_kv_sender for req in self.waiting_reqs], self.gloo_group
         )
-        for i, (req, poll) in enumerate(zip(self.queue, polls)):
-
+        for i, (req, poll) in enumerate(zip(self.waiting_reqs, polls)):
             if rids_to_check is not None:
                 # if req not in reqs_info_to_check, skip
                 if req.rid not in rids_to_check:
@@ -219,16 +218,20 @@ class EncodeBootstrapQueue:
             )
             assert req.metadata_buffer_index is not None
 
-            num_pages = kv_to_page_num(num_kv_indices, self.mm_embedding_pool.page_size)
+            # num_pages = kv_to_page_num(num_kv_indices, self.mm_embedding_pool.page_size)
+            num_pages = -1
             req.disagg_kv_sender.init(num_pages, req.metadata_buffer_index)
             bootstrapped_reqs.append(req)
             indices_to_remove.add(i)
 
-        self.queue = [
-            entry for i, entry in enumerate(self.queue) if i not in indices_to_remove
+        self.waiting_reqs = [
+            entry
+            for i, entry in enumerate(self.waiting_reqs)
+            if i not in indices_to_remove
         ]
 
-        if return_failed_reqs is False:
+        print(f"{len(bootstrapped_reqs)=}")
+        if not return_failed_reqs:
             return bootstrapped_reqs
         else:
             return bootstrapped_reqs, failed_reqs
@@ -425,55 +428,55 @@ class SchedulerDisaggregationEncodeMixin:
             # Otherwise, it hangs under high concurrency
             self.running_batch.batch_is_full = False
 
-    @torch.no_grad()
-    def event_loop_overlap_disagg_encode(self: Scheduler) -> None:
-        self.result_queue = deque()
-
-        while True:
-            recv_reqs = self.recv_requests()
-            self.process_input_requests(recv_reqs)
-            self.waiting_queue.extend(
-                self.disagg_encode_bootstrap_queue.pop_bootstrapped()
-            )
-            # self.process_prefill_chunk()
-            batch = self.get_new_batch_encode()
-
-            if require_mlp_sync(self.server_args):
-                batch = self.prepare_mlp_sync_batch(batch)
-            self.cur_batch = batch
-            if batch:
-                result = self.run_batch(batch)
-                self.result_queue.append((batch.copy(), result))
-
-                if self.last_batch is None:
-                    # Create a dummy first batch to start the pipeline for overlap schedule.
-                    # It is now used for triggering the sampling_info_done event.
-                    tmp_batch = ScheduleBatch(
-                        reqs=None,
-                        forward_mode=ForwardMode.DUMMY_FIRST,
-                        next_batch_sampling_info=self.tp_worker.cur_sampling_info,
-                    )
-                    self.set_next_batch_sampling_info_done(tmp_batch)
-
-            if self.last_batch:
-                tmp_batch, tmp_result = self.result_queue.popleft()
-                tmp_batch.next_batch_sampling_info = (
-                    self.tp_worker.cur_sampling_info if batch else None
-                )
-                self.process_batch_result_disagg_encode(tmp_batch, tmp_result)
-
-            if len(self.disagg_encode_inflight_queue) > 0:
-                self.process_disagg_encode_inflight_queue()
-
-            if batch is None and len(self.disagg_encode_inflight_queue) == 0:
-                self.check_memory()
-                self.new_token_ratio = self.init_new_token_ratio
-                self.maybe_sleep_on_idle()
-
-            self.last_batch = batch
-            # HACK (byronhsu): reset the batch_is_full flag because we never enter update_running_batch which resets it
-            # Otherwise, it hangs under high concurrency
-            self.running_batch.batch_is_full = False
+    # @torch.no_grad()
+    # def event_loop_overlap_disagg_encode(self: Scheduler) -> None:
+    #     self.result_queue = deque()
+    #
+    #     while True:
+    #         recv_reqs = self.recv_requests()
+    #         self.process_input_requests(recv_reqs)
+    #         self.waiting_queue.extend(
+    #             self.disagg_encode_bootstrap_queue.pop_bootstrapped()
+    #         )
+    #         # self.process_prefill_chunk()
+    #         batch = self.get_new_batch_encode()
+    #
+    #         if require_mlp_sync(self.server_args):
+    #             batch = self.prepare_mlp_sync_batch(batch)
+    #         self.cur_batch = batch
+    #         if batch:
+    #             result = self.run_batch(batch)
+    #             self.result_queue.append((batch.copy(), result))
+    #
+    #             if self.last_batch is None:
+    #                 # Create a dummy first batch to start the pipeline for overlap schedule.
+    #                 # It is now used for triggering the sampling_info_done event.
+    #                 tmp_batch = ScheduleBatch(
+    #                     reqs=None,
+    #                     forward_mode=ForwardMode.DUMMY_FIRST,
+    #                     next_batch_sampling_info=self.tp_worker.cur_sampling_info,
+    #                 )
+    #                 self.set_next_batch_sampling_info_done(tmp_batch)
+    #
+    #         if self.last_batch:
+    #             tmp_batch, tmp_result = self.result_queue.popleft()
+    #             tmp_batch.next_batch_sampling_info = (
+    #                 self.tp_worker.cur_sampling_info if batch else None
+    #             )
+    #             self.process_batch_result_disagg_encode(tmp_batch, tmp_result)
+    #
+    #         if len(self.disagg_encode_inflight_queue) > 0:
+    #             self.process_disagg_encode_inflight_queue()
+    #
+    #         if batch is None and len(self.disagg_encode_inflight_queue) == 0:
+    #             self.check_memory()
+    #             self.new_token_ratio = self.init_new_token_ratio
+    #             self.maybe_sleep_on_idle()
+    #
+    #         self.last_batch = batch
+    #         # HACK (byronhsu): reset the batch_is_full flag because we never enter update_running_batch which resets it
+    #         # Otherwise, it hangs under high concurrency
+    #         self.running_batch.batch_is_full = False
 
     def process_batch_result_disagg_encode(
         self: Scheduler,

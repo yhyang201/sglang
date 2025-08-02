@@ -39,6 +39,7 @@ class KVArgs:
 class KVPoll:
     Failed = 0
     Bootstrapping = 1
+    # waiting for sender-side to finish computing
     WaitingForInput = 2
     Transferring = 3
     Success = 4

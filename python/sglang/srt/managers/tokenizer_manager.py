@@ -303,6 +303,7 @@ class TokenizerManager:
             self.bootstrap_server = kv_bootstrap_server_class(
                 self.server_args.disaggregation_bootstrap_port
             )
+            print(f"{self.bootstrap_server=}")
             is_create_store = (
                 self.server_args.node_rank == 0
                 and self.server_args.disaggregation_transfer_backend == "ascend"

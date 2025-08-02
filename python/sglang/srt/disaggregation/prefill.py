@@ -1031,3 +1031,21 @@ class SchedulerDisaggregationPrefillMixin:
             )
             return
         req.disagg_kv_sender.send(page_indices)
+
+    def process_prefill_queue_with_encoder_disaggregated(self: Scheduler):
+        """
+        process text-model prefill queue when encoder if disaggregated
+        """
+        # try to resume retracted requests if there are enough space for another `num_reserved_decode_tokens` decode steps
+        resumed_reqs = self.disagg_prefill_prealloc_queue.resume_retracted_reqs()
+        self.waiting_queue.extend(resumed_reqs)
+        if len(self.disagg_prefill_prealloc_queue.retracted_queue) > 0:
+            # if there are still retracted requests, we do not allocate new requests
+            return
+
+        req_conns = self.disagg_prefill_prealloc_queue.pop_preallocated()
+        self.disagg_prefill_transfer_queue.extend(req_conns)
+        alloc_reqs = (
+            self.disagg_prefill_transfer_queue.pop_transferred()
+        )  # the requests which kv has arrived
+        self.waiting_queue.extend(alloc_reqs)

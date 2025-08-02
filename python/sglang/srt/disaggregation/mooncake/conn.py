@@ -5,14 +5,13 @@ import concurrent.futures
 import dataclasses
 import logging
 import os
-import queue
 import socket
 import struct
 import threading
 import time
 from collections import defaultdict
 from functools import cache
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -122,8 +121,8 @@ class KVArgsRegisterInfo:
             endpoint=msg[1].decode("ascii"),
             dst_port=int(msg[2].decode("ascii")),
             mooncake_session_id=msg[3].decode("ascii"),
-            dst_kv_ptrs=list(struct.unpack(f"{len(msg[4])//8}Q", msg[4])),
-            dst_aux_ptrs=list(struct.unpack(f"{len(msg[5])//8}Q", msg[5])),
+            dst_kv_ptrs=list(struct.unpack(f"{len(msg[4]) // 8}Q", msg[4])),
+            dst_aux_ptrs=list(struct.unpack(f"{len(msg[5]) // 8}Q", msg[5])),
             dst_tp_rank=int(msg[6].decode("ascii")),
             dst_tp_size=int(msg[7].decode("ascii")),
             dst_kv_item_len=int(msg[8].decode("ascii")),
@@ -160,69 +159,16 @@ class MooncakeKVManager(BaseKVManager):
             self.server_socket.setsockopt(zmq.IPV6, 1)
 
         self.register_buffer_to_engine()
+
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            self.transfer_infos: Dict[int, Dict[str, TransferInfo]] = {}
-            self.decode_kv_args_table: Dict[str, KVArgsRegisterInfo] = {}
-            self.start_prefill_thread()
-            self._register_to_bootstrap()
-            self.session_failures = defaultdict(int)
-            self.failed_sessions = set()
-            self.session_lock = threading.Lock()
-            # Determine the number of threads to use for kv sender
-            cpu_count = os.cpu_count()
-            transfer_thread_pool_size = get_int_env_var(
-                "SGLANG_DISAGGREGATION_THREAD_POOL_SIZE",
-                min(max(4, int(0.75 * cpu_count) // 8), 12),
-            )
-            transfer_queue_size = get_int_env_var("SGLANG_DISAGGREGATION_QUEUE_SIZE", 4)
-            self.transfer_queues: List[FastQueue] = [
-                FastQueue() for _ in range(transfer_queue_size)
-            ]
-            assert transfer_thread_pool_size >= transfer_queue_size, (
-                f"The environment variable SGLANG_DISAGGREGATION_THREAD_POOL_SIZE={transfer_thread_pool_size} must be "
-                f"greater than or equal to SGLANG_DISAGGREGATION_QUEUE_SIZE={transfer_queue_size}."
-            )
-            self.executors = [
-                concurrent.futures.ThreadPoolExecutor(
-                    transfer_thread_pool_size // transfer_queue_size
-                )
-                for _ in range(transfer_queue_size)
-            ]
-            for queue, executor in zip(self.transfer_queues, self.executors):
-                threading.Thread(
-                    target=self.transfer_worker, args=(queue, executor), daemon=True
-                ).start()
-            # If a timeout happens on the prefill side, it means prefill instances
-            # fail to receive the KV indices from the decode instance of this request.
-            # These timeout requests should be aborted to release the tree cache.
-            self.bootstrap_timeout = get_int_env_var(
-                "SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT", 300
-            )
+            self.init_prefill()
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
-            self.heartbeat_failures = {}
-            self.session_pool = defaultdict(requests.Session)
-            self.session_pool_lock = threading.Lock()
-            self.addr_to_rooms_tracker = defaultdict(set)
-            self.connection_lock = threading.Lock()
-            self.required_prefill_response_num_table: Dict[int, int] = {}
-            self.prefill_response_tracker: Dict[int, Set[int]] = defaultdict(set)
-            # Heartbeat interval should be at least 2 seconds
-            self.heartbeat_interval = max(
-                float(os.getenv("SGLANG_DISAGGREGATION_HEARTBEAT_INTERVAL", 5.0)), 2.0
-            )
-            # Heartbeat failure should be at least 1
-            self.max_failures = max(
-                get_int_env_var("SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE", 2), 1
-            )
-            self.start_decode_thread()
-            self.connection_pool: Dict[str, Dict[str, Union[str, int]]] = {}
-            self.prefill_tp_size_table: Dict[str, int] = {}
-            self.prefill_dp_size_table: Dict[str, int] = {}
-            # If a timeout happens on the decode side, it means decode instances
-            # fail to receive the KV Cache transfer done signal after bootstrapping.
-            # These timeout requests should be aborted to release the tree cache.
-            self.waiting_timeout = get_int_env_var(
-                "SGLANG_DISAGGREGATION_WAITING_TIMEOUT", 300
+            self.init_decode()
+        elif self.disaggregation_mode == DisaggregationMode.ENCODE:
+            self._register_to_bootstrap(role="Encode")
+            self.start_encode_thread()
+            self.bootstrap_timeout = get_int_env_var(
+                "SGLANG_DISAGGREGATION_ENCODER_BOOTSTRAP_TIMEOUT", 300
             )
         else:
             raise ValueError(
@@ -231,6 +177,72 @@ class MooncakeKVManager(BaseKVManager):
 
         self.failure_records: Dict[int, str] = {}
         self.failure_lock = threading.Lock()
+
+    def init_prefill(self):
+        self.transfer_infos: Dict[int, Dict[str, TransferInfo]] = {}
+        self.decode_kv_args_table: Dict[str, KVArgsRegisterInfo] = {}
+        self.start_prefill_thread()
+        self._register_to_bootstrap(role="Prefill")
+        self.session_failures = defaultdict(int)
+        self.failed_sessions = set()
+        self.session_lock = threading.Lock()
+        # Determine the number of threads to use for kv sender
+        cpu_count = os.cpu_count()
+        transfer_thread_pool_size = get_int_env_var(
+            "SGLANG_DISAGGREGATION_THREAD_POOL_SIZE",
+            min(max(4, int(0.75 * cpu_count) // 8), 12),
+        )
+        transfer_queue_size = get_int_env_var("SGLANG_DISAGGREGATION_QUEUE_SIZE", 4)
+        self.transfer_queues: List[FastQueue] = [
+            FastQueue() for _ in range(transfer_queue_size)
+        ]
+        assert transfer_thread_pool_size >= transfer_queue_size, (
+            f"The environment variable SGLANG_DISAGGREGATION_THREAD_POOL_SIZE={transfer_thread_pool_size} must be "
+            f"greater than or equal to SGLANG_DISAGGREGATION_QUEUE_SIZE={transfer_queue_size}."
+        )
+        self.executors = [
+            concurrent.futures.ThreadPoolExecutor(
+                transfer_thread_pool_size // transfer_queue_size
+            )
+            for _ in range(transfer_queue_size)
+        ]
+        for queue, executor in zip(self.transfer_queues, self.executors):
+            threading.Thread(
+                target=self.transfer_worker, args=(queue, executor), daemon=True
+            ).start()
+        # If a timeout happens on the prefill side, it means prefill instances
+        # fail to receive the KV indices from the decode instance of this request.
+        # These timeout requests should be aborted to release the tree cache.
+        self.bootstrap_timeout = get_int_env_var(
+            "SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT", 300
+        )
+
+    def init_decode(self):
+        self.heartbeat_failures = {}
+        self.session_pool = defaultdict(requests.Session)
+        self.session_pool_lock = threading.Lock()
+        self.addr_to_rooms_tracker = defaultdict(set)
+        self.connection_lock = threading.Lock()
+        self.required_prefill_response_num_table: Dict[int, int] = {}
+        self.prefill_response_tracker: Dict[int, Set[int]] = defaultdict(set)
+        # Heartbeat interval should be at least 2 seconds
+        self.heartbeat_interval = max(
+            float(os.getenv("SGLANG_DISAGGREGATION_HEARTBEAT_INTERVAL", 5.0)), 2.0
+        )
+        # Heartbeat failure should be at least 1
+        self.max_failures = max(
+            get_int_env_var("SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE", 2), 1
+        )
+        self.start_decode_thread()
+        self.connection_pool: Dict[str, Dict[str, Union[str, int]]] = {}
+        self.prefill_tp_size_table: Dict[str, int] = {}
+        self.prefill_dp_size_table: Dict[str, int] = {}
+        # If a timeout happens on the decode side, it means decode instances
+        # fail to receive the KV Cache transfer done signal after bootstrapping.
+        # These timeout requests should be aborted to release the tree cache.
+        self.waiting_timeout = get_int_env_var(
+            "SGLANG_DISAGGREGATION_WAITING_TIMEOUT", 300
+        )
 
     def init_engine(self):
         self.engine = MooncakeTransferEngine(
@@ -702,6 +714,45 @@ class MooncakeKVManager(BaseKVManager):
 
         threading.Thread(target=bootstrap_thread).start()
 
+    def start_encode_thread(self):
+        self.rank_port = get_free_port()
+        self._bind_server_socket()
+
+        def bootstrap_thread():
+            """This thread recvs pre-alloc notification from the decode engine"""
+            # KVPoll.Bootstrapping -> KVPoll.WaitingForInput
+            while True:
+                waiting_req_bytes = self.server_socket.recv_multipart()
+                room = waiting_req_bytes[0].decode("ascii")
+                mooncake_session_id = waiting_req_bytes[3].decode("ascii")
+                if room == "None":
+                    self.decode_kv_args_table[mooncake_session_id] = (
+                        KVArgsRegisterInfo.from_zmq(waiting_req_bytes)
+                    )
+                    with self.session_lock:
+                        if mooncake_session_id in self.failed_sessions:
+                            self.failed_sessions.remove(mooncake_session_id)
+                        if mooncake_session_id in self.session_failures:
+                            del self.session_failures[mooncake_session_id]
+                    logger.debug(
+                        f"Register KVArgs from {mooncake_session_id} successfully"
+                    )
+                    continue
+                else:
+                    required_dst_info_num = int(waiting_req_bytes[6].decode("ascii"))
+                    room = int(room)
+                    if room not in self.transfer_infos:
+                        self.transfer_infos[room] = {}
+
+                    self.transfer_infos[room][mooncake_session_id] = (
+                        TransferInfo.from_zmq(waiting_req_bytes)
+                    )
+                    # NOTE: after bootstrapping we can mark the req as waiting for input
+                    if len(self.transfer_infos[room]) == required_dst_info_num:
+                        self.update_status(room, KVPoll.WaitingForInput)
+
+        threading.Thread(target=bootstrap_thread).start()
+
     def start_decode_thread(self):
         self.rank_port = get_free_port()
         self._bind_server_socket()
@@ -858,7 +909,7 @@ class MooncakeKVManager(BaseKVManager):
     def get_session_id(self):
         return self.engine.get_session_id()
 
-    def _register_to_bootstrap(self):
+    def _register_to_bootstrap(self, role: str):
         """Register KVSender to bootstrap server via HTTP POST."""
         if self.dist_init_addr:
             if self.dist_init_addr.startswith("["):  # [ipv6]:port or [ipv6]
@@ -874,27 +925,34 @@ class MooncakeKVManager(BaseKVManager):
 
         bootstrap_server_url = f"{host}:{self.bootstrap_port}"
         url = f"http://{bootstrap_server_url}/route"
+
         payload = {
-            "role": "Prefill",
-            "tp_size": self.tp_size,
+            "role": role,
             "dp_size": self.dp_size,
-            "rank_ip": self.local_ip,
-            "rank_port": self.rank_port,
-            "engine_rank": self.kv_args.engine_rank,
         }
 
+        if role == "Prefill":
+            payload.update(
+                {
+                    "tp_size": self.tp_size,
+                    "dp_size": self.dp_size,
+                    "rank_ip": self.local_ip,
+                    "rank_port": self.rank_port,
+                    "engine_rank": self.kv_args.engine_rank,
+                }
+            )
+
         try:
+            print(f"bootstrapping: {url=}")
             response = requests.put(url, json=payload, timeout=5)
             if response.status_code == 200:
-                logger.debug("Prefill successfully registered to bootstrap server.")
+                logger.debug(f"{role} successfully registered to bootstrap server.")
             else:
                 logger.error(
-                    f"Prefill instance failed to connect to bootstrap server: {response.status_code}, {response.text}"
+                    f"{role} instance failed to connect to bootstrap server: {response.status_code}, {response.text}"
                 )
         except Exception as e:
-            logger.error(
-                f"Prefill instance failed to register to bootstrap server: {e}"
-            )
+            logger.error(f"{role} instance failed to register to bootstrap server: {e}")
 
     def _handle_node_failure(self, failed_bootstrap_addr):
         with self.connection_lock:
@@ -939,8 +997,8 @@ class MooncakeKVSender(BaseKVSender):
         mgr: MooncakeKVManager,
         bootstrap_addr: str,
         bootstrap_room: int,
-        dest_tp_ranks: List[int],
-        pp_rank: int,
+        dest_tp_ranks: List[int] = None,
+        pp_rank: int = None,
     ):
         self.kv_mgr = mgr
         self.bootstrap_room = bootstrap_room
@@ -1358,6 +1416,7 @@ class MooncakeKVBootstrapServer(BaseKVBootstrapServer):
         self.dp_size = None
         self.tp_size_per_dp_rank = None
         self.prefill_port_table: Dict[int, Dict[int, Dict[str, Union[str, int]]]] = {}
+        self.encode_port_table: Dict[int, Dict[int, Dict[str, Union[str, int]]]] = {}
 
         # Start bootstrap server
         self.thread = threading.Thread(target=self._run_server, daemon=True)
@@ -1387,23 +1446,24 @@ class MooncakeKVBootstrapServer(BaseKVBootstrapServer):
     async def _handle_route_put(self, request: web.Request):
         data = await request.json()
         role = data["role"]
-        tp_size = data["tp_size"]
-        dp_size = data["dp_size"]
-        rank_ip = data["rank_ip"]
-        rank_port = int(data["rank_port"])
-        engine_rank = int(data["engine_rank"])
-
-        if self.tp_size is None:
-            self.tp_size = tp_size
-
-        if self.dp_size is None:
-            self.dp_size = dp_size
-
-        tp_size_per_dp_rank = tp_size // dp_size
-        if self.tp_size_per_dp_rank is None:
-            self.tp_size_per_dp_rank = tp_size_per_dp_rank
 
         if role == "Prefill":
+            tp_size = data["tp_size"]
+            dp_size = data["dp_size"]
+            rank_ip = data["rank_ip"]
+            rank_port = int(data["rank_port"])
+            engine_rank = int(data["engine_rank"])
+
+            if self.tp_size is None:
+                self.tp_size = tp_size
+
+            if self.dp_size is None:
+                self.dp_size = dp_size
+
+            tp_size_per_dp_rank = tp_size // dp_size
+            if self.tp_size_per_dp_rank is None:
+                self.tp_size_per_dp_rank = tp_size_per_dp_rank
+
             dp_group = engine_rank // tp_size_per_dp_rank
             tp_rank_in_dp_group = engine_rank % tp_size_per_dp_rank
 
@@ -1419,6 +1479,12 @@ class MooncakeKVBootstrapServer(BaseKVBootstrapServer):
             logger.debug(
                 f"Register prefill bootstrap: {engine_rank} with rank_ip: {rank_ip} and rank_port: {rank_port}"
             )
+        elif role == "Encode":
+            pass
+            # self.encode_port_table[dp_group][tp_rank_in_dp_group] = {
+            #     "rank_ip": rank_ip,
+            #     "rank_port": rank_port,
+            # }
 
         return web.Response(text="OK", status=200)
 
