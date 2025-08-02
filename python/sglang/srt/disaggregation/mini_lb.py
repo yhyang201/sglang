@@ -378,6 +378,15 @@ async def get_model_info():
     return ORJSONResponse(content=model_info)
 
 
+def parse_url_as_host(server_addr) -> str:
+    """
+    Parse and transform prefill_server for bootstrap data
+    """
+    parsed_url = urllib.parse.urlparse(server_addr)
+    hostname = maybe_wrap_ipv6_address(parsed_url.hostname)
+    return hostname
+
+
 @app.post("/generate")
 async def handle_generate_request(request_data: dict):
     (
@@ -388,16 +397,20 @@ async def handle_generate_request(request_data: dict):
         text_server,
     ) = load_balancer.select_pair()
 
-    # Parse and transform prefill_server for bootstrap data
-    parsed_url = urllib.parse.urlparse(prefill_server)
-    hostname = maybe_wrap_ipv6_address(parsed_url.hostname)
+    prefill_hostname = parse_url_as_host(prefill_server)
+
+    if encode_server:
+        encode_hostname = parse_url_as_host(encode_server)
+    else:
+        encode_hostname = None
+
     modified_request = request_data.copy()
 
     batch_size = _get_request_batch_size(modified_request)
     if batch_size is not None:
         modified_request.update(
             {
-                "bootstrap_host": [hostname] * batch_size,
+                "bootstrap_host_prefill": [prefill_hostname] * batch_size,
                 "bootstrap_port": [bootstrap_port] * batch_size,
                 "bootstrap_room": [
                     _generate_bootstrap_room() for _ in range(batch_size)
@@ -407,7 +420,7 @@ async def handle_generate_request(request_data: dict):
     else:
         modified_request.update(
             {
-                "bootstrap_host": hostname,
+                "bootstrap_host_prefill": prefill_hostname,
                 "bootstrap_port": bootstrap_port,
                 "bootstrap_room": _generate_bootstrap_room(),
             }
@@ -442,17 +455,24 @@ async def _forward_to_backend(request_data: dict, endpoint_name: str):
         text_server,
     ) = load_balancer.select_pair()
 
-    # Parse and transform prefill_server for bootstrap data
-    parsed_url = urllib.parse.urlparse(prefill_server)
-    hostname = maybe_wrap_ipv6_address(parsed_url.hostname)
+    prefill_hostname = parse_url_as_host(prefill_server)
+
     modified_request = request_data.copy()
     modified_request.update(
         {
-            "bootstrap_host": hostname,
+            "bootstrap_host_prefill": prefill_hostname,
             "bootstrap_port": bootstrap_port,
             "bootstrap_room": _generate_bootstrap_room(),
         }
     )
+
+    if encode_server:
+        encode_hostname = parse_url_as_host(encode_server)
+        modified_request.update(
+            {
+                "bootstrap_host_encode": encode_hostname,
+            }
+        )
 
     if request_data.get("stream", False):
         return await load_balancer.generate_stream(
