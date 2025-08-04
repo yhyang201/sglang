@@ -832,8 +832,6 @@ class MooncakeKVManager(BaseKVManager):
                     continue
                 else:
                     required_dst_info_num = int(waiting_req_bytes[6].decode("ascii"))
-                    print(f"{required_dst_info_num=}")
-                    print(f"{len(self.transfer_infos[room])=}")
                     room = int(room)
                     if room not in self.transfer_infos:
                         self.transfer_infos[room] = {}
@@ -1020,6 +1018,7 @@ class MooncakeKVManager(BaseKVManager):
         return self.request_status[bootstrap_room]
 
     def update_status(self, bootstrap_room: int, status: KVPoll):
+        print(f"update status of {bootstrap_room=} with {status=}")
         if bootstrap_room not in self.request_status:
             self.request_status[bootstrap_room] = status
         else:
@@ -1131,6 +1130,7 @@ class MooncakeKVSender(BaseKVSender):
     ):
         self.kv_mgr = mgr
         self.bootstrap_room = bootstrap_room
+        print(f"sender {bootstrap_room=}")
         self.kv_mgr.update_status(bootstrap_room, KVPoll.Bootstrapping)
         self.aux_index = None
         self.bootstrap_server_url = bootstrap_addr
@@ -1170,6 +1170,7 @@ class MooncakeKVSender(BaseKVSender):
     def poll(self) -> KVPoll:
         if self.conclude_state is None:
             status = self.kv_mgr.check_status(self.bootstrap_room)
+            # print(f"checked status of {self.bootstrap_room=} with result {status=}, {self.kv_mgr.request_status=}")
             if status in (KVPoll.Success, KVPoll.Failed):
                 self.conclude_state = status
             elif status == KVPoll.Bootstrapping:

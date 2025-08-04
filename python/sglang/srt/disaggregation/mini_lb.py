@@ -418,17 +418,24 @@ def modify_bootstrap_info_in_request(
             {
                 "bootstrap_host": [hostname] * batch_size,
                 "bootstrap_port": [bootstrap_port] * batch_size,
-                "bootstrap_room": [
-                    _generate_bootstrap_room() for _ in range(batch_size)
-                ],
             }
         )
+
     else:
         modified_request.update(
             {
                 "bootstrap_host": hostname,
                 "bootstrap_port": bootstrap_port,
-                "bootstrap_room": _generate_bootstrap_room(),
+            }
+        )
+    if "bootstrap_room" not in modified_request:
+        modified_request.update(
+            {
+                "bootstrap_room": (
+                    [_generate_bootstrap_room() for _ in range(batch_size)]
+                    if batch_size is not None
+                    else _generate_bootstrap_room()
+                )
             }
         )
     return modified_request
@@ -451,7 +458,7 @@ async def handle_generate_request(request_data: dict):
 
     if encode_server:
         modified_request_for_prefill = modify_bootstrap_info_in_request(
-            request_data, encode_server, bootstrap_port_encode
+            modified_request, encode_server, bootstrap_port_encode
         )
     else:
         modified_request_for_prefill = modified_request
@@ -496,7 +503,7 @@ async def _forward_to_backend(request_data: dict, endpoint_name: str):
     print(f"{bootstrap_port_encode=}")
     if encode_server:
         modified_request_for_prefill = modify_bootstrap_info_in_request(
-            request_data, encode_server, bootstrap_port_encode
+            modified_request, encode_server, bootstrap_port_encode
         )
     else:
         modified_request_for_prefill = modified_request
