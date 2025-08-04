@@ -44,7 +44,7 @@ class CommonKVManager(BaseKVManager):
         self.is_mla_backend = is_mla_backend
         self.disaggregation_mode = disaggregation_mode
         # for p/d multi node infer
-        self.bootstrap_port = server_args.disaggregation_bootstrap_port
+        self.bootstrap_port = server_args.get_bootstrap_sending_port()
         self.dist_init_addr = server_args.dist_init_addr
         self.tp_size = server_args.tp_size
         self.dp_size = server_args.dp_size

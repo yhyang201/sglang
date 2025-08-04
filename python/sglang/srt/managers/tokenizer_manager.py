@@ -303,11 +303,7 @@ class TokenizerManager:
             kv_bootstrap_server_class = get_kv_class(
                 self.disaggregation_transfer_backend, KVClassType.BOOTSTRAP_SERVER
             )
-            bootstrap_port = (
-                self.server_args.disaggregation_bootstrap_port_encode
-                if self.server_args.disaggregation_mode == "encode"
-                else self.server_args.disaggregation_bootstrap_port
-            )
+            bootstrap_port = self.server_args.get_bootstrap_sending_port()
             self.bootstrap_server = kv_bootstrap_server_class(bootstrap_port)
             print(f"{self.bootstrap_server=}")
             is_create_store = (

@@ -1087,7 +1087,7 @@ def _wait_and_warmup(
         register_disaggregation_server(
             server_args.disaggregation_mode,
             server_args.port,
-            server_args.disaggregation_bootstrap_port,
+            server_args.get_bootstrap_sending_port(),
             server_args.pdlb_url,
         )
 

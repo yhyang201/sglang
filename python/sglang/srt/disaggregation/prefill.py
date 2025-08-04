@@ -86,6 +86,7 @@ class PrefillBootstrapQueue:
         pp_rank: int,
         pp_size: int,
         transfer_backend: TransferBackend,
+        # bootstrap_host: str,
         # disagg encode
         mm_embedding_pool: Optional[PagedMultiModalEmbeddingPool] = None,
     ):
@@ -631,6 +632,7 @@ class MMEmbeddingPreallocQueue:
             allocatable_tokens -= required_tokens_for_request
             self._pre_alloc(prefill_req.req)
 
+            print(f"{prefill_req.req.mm_hashes=}")
             mm_embedding_indices = self.mm_embedding_pool.get_embedding_locs_from_hash(
                 prefill_req.req.mm_hashes
             )
