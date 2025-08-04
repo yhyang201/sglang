@@ -1028,8 +1028,7 @@ def _execute_server_warmup(
                         "max_new_tokens": 8,
                         "ignore_eos": True,
                     },
-                    "bootstrap_host_prefill": [FAKE_BOOTSTRAP_HOST]
-                    * server_args.dp_size,
+                    "bootstrap_host": [FAKE_BOOTSTRAP_HOST] * server_args.dp_size,
                     # This is a hack to ensure fake transfer is enabled during prefill warmup
                     # ensure each dp rank has a unique bootstrap_room during prefill warmup
                     "bootstrap_room": [

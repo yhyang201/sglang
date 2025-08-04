@@ -261,7 +261,7 @@ impl Bootstrap for CompletionRequest {
     ) {
         // Insert bootstrap_host - it serializes correctly whether Single or Batch
         if let Ok(host_value) = serde_json::to_value(&bootstrap_host) {
-            self.other.insert("bootstrap_host_prefill".to_string(), host_value);
+            self.other.insert("bootstrap_host".to_string(), host_value);
         }
 
         // Insert bootstrap_port - it serializes correctly whether Single or Batch
@@ -398,12 +398,12 @@ mod bootstrap_tests {
         );
 
         // Verify single values were created
-        assert!(req.other.get("bootstrap_host_prefill").unwrap().is_string());
+        assert!(req.other.get("bootstrap_host").unwrap().is_string());
         assert!(req.other.get("bootstrap_port").unwrap().is_number());
         assert!(req.other.get("bootstrap_room").unwrap().is_number());
 
         assert_eq!(
-            req.other.get("bootstrap_host_prefill").unwrap().as_str().unwrap(),
+            req.other.get("bootstrap_host").unwrap().as_str().unwrap(),
             "test-server"
         );
         assert_eq!(
@@ -448,11 +448,11 @@ mod bootstrap_tests {
         );
 
         // Verify arrays were created correctly
-        assert!(req.other.get("bootstrap_host_prefill").unwrap().is_array());
+        assert!(req.other.get("bootstrap_host").unwrap().is_array());
         assert!(req.other.get("bootstrap_port").unwrap().is_array());
         assert!(req.other.get("bootstrap_room").unwrap().is_array());
 
-        let hosts = req.other.get("bootstrap_host_prefill").unwrap().as_array().unwrap();
+        let hosts = req.other.get("bootstrap_host").unwrap().as_array().unwrap();
         assert_eq!(hosts.len(), 2);
         assert_eq!(hosts[0].as_str().unwrap(), "test-server");
 

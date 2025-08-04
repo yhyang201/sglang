@@ -68,13 +68,15 @@ class MiniLoadBalancer:
         self,
         prefill_configs: List[PrefillConfig],
         decode_servers: List[str],
-        encode_servers: List[str] = None,
+        encode_configs: List[PrefillConfig] = None,
         text_servers: List[str] = None,
     ):
         self.prefill_configs = prefill_configs
         self.prefill_servers = [p.url for p in prefill_configs]
         self.decode_servers = decode_servers
-        self.encode_servers = encode_servers
+        print(f"{encode_configs=}")
+        self.encode_configs = encode_configs
+        self.encode_servers = [p.url for p in encode_configs]
         self.text_addrs = text_servers
 
     def add_prefill_server(self, new_prefill_config: PrefillConfig):
@@ -84,15 +86,15 @@ class MiniLoadBalancer:
     def add_decode_server(self, new_decode_server: str):
         self.decode_servers.append(new_decode_server)
 
-    def add_encode_server(self, new_encode_server: str):
-        self.encode_servers.append(new_encode_server)
+    def add_encode_server(self, new_encode_server: PrefillConfig):
+        self.encode_configs.append(new_encode_server)
 
     def add_text_server(self, new_encode_server: str):
         self.text_addrs.append(new_encode_server)
 
     def select_pair(self):
         # TODO: return some message instead of panic
-        if not self.text_addrs or not self.encode_servers:
+        if not self.text_addrs or not self.encode_configs:
             assert len(self.prefill_configs) > 0, "No prefill servers available"
             assert len(self.decode_servers) > 0, "No decode servers available"
 
@@ -105,19 +107,23 @@ class MiniLoadBalancer:
             decode_server = random.choice(self.decode_servers)
         else:
             decode_server = None
+
         if self.text_addrs:
             text = random.choice(self.text_addrs)
         else:
             text = None
-        if self.encode_servers:
-            encode_server = random.choice(self.encode_servers)
+
+        if self.encode_configs:
+            encode_config = random.choice(self.encode_configs)
         else:
-            encode_server = None
+            encode_config = None
+
         return (
             prefill_config.url if prefill_config else None,
             prefill_config.bootstrap_port if prefill_config else None,
             decode_server,
-            encode_server,
+            encode_config.url if encode_config else None,
+            encode_config.bootstrap_port if encode_config else None,
             text,
         )
 
@@ -129,6 +135,7 @@ class MiniLoadBalancer:
         endpoint,
         encode_server=None,
         text_server=None,
+        modified_request_for_prefill=None,
     ) -> ORJSONResponse:
         assert endpoint[0] != "/", f"Endpoint should not start with '/': {endpoint}"
 
@@ -137,7 +144,6 @@ class MiniLoadBalancer:
                 total=3600
             )  # Add timeout for request reliability
         ) as session:
-            print(f"{modified_request=}")
             tasks_mapping = dict()
 
             for server_role, server in [
@@ -147,8 +153,16 @@ class MiniLoadBalancer:
                 (ServerRole.TEXT, text_server),
             ]:
                 if server:
+                    if (
+                        server_role == ServerRole.PREFILL
+                        or server_role == ServerRole.TEXT
+                    ):
+                        req = modified_request_for_prefill
+                    else:
+                        req = modified_request
+                    print(f"req for {server_role}: {req=}")
                     tasks_mapping[server_role] = session.post(
-                        f"{server}/{endpoint}", json=modified_request
+                        f"{server}/{endpoint}", json=req
                     )
 
             print(f"requests {tasks_mapping.values()=}")
@@ -210,6 +224,7 @@ class MiniLoadBalancer:
         decode_server,
         encode_server=None,
         text_server=None,
+        modified_request_for_prefill=None,
         endpoint="generate",
     ):
         assert endpoint[0] != "/", f"Endpoint should not start with '/': {endpoint}"
@@ -318,8 +333,8 @@ async def flush_cache():
 
 @app.get("/get_server_info")
 async def get_server_info():
-    encode_servers, prefill_servers, decode_servers = (
-        load_balancer.encode_servers,
+    encode_configs, prefill_servers, decode_servers = (
+        load_balancer.encode_configs,
         load_balancer.prefill_servers,
         load_balancer.decode_servers,
     )
@@ -329,7 +344,7 @@ async def get_server_info():
     all_internal_states = []
 
     async with aiohttp.ClientSession() as session:
-        for server in chain(encode_servers):
+        for server in chain(encode_configs):
             server_info = await session.get(f"{server}/get_server_info")
             encode_infos.append(await server_info.json())
         for server in chain(prefill_servers):
@@ -387,22 +402,13 @@ def parse_url_as_host(server_addr) -> str:
     return hostname
 
 
-@app.post("/generate")
-async def handle_generate_request(request_data: dict):
-    (
-        prefill_server,
-        bootstrap_port,
-        decode_server,
-        encode_server,
-        text_server,
-    ) = load_balancer.select_pair()
-
-    prefill_hostname = parse_url_as_host(prefill_server)
-
-    if encode_server:
-        encode_hostname = parse_url_as_host(encode_server)
-    else:
-        encode_hostname = None
+def mofidy_bootstrap_info_in_request(
+    request_data, bootstrap_server: PrefillConfig, bootstrap_port
+):
+    """
+    Since in EPD, we have 2 bootstrap servers on encdoe & prefill
+    """
+    hostname = parse_url_as_host(bootstrap_server)
 
     modified_request = request_data.copy()
 
@@ -410,7 +416,7 @@ async def handle_generate_request(request_data: dict):
     if batch_size is not None:
         modified_request.update(
             {
-                "bootstrap_host_prefill": [prefill_hostname] * batch_size,
+                "bootstrap_host": [hostname] * batch_size,
                 "bootstrap_port": [bootstrap_port] * batch_size,
                 "bootstrap_room": [
                     _generate_bootstrap_room() for _ in range(batch_size)
@@ -420,11 +426,35 @@ async def handle_generate_request(request_data: dict):
     else:
         modified_request.update(
             {
-                "bootstrap_host_prefill": prefill_hostname,
+                "bootstrap_host": hostname,
                 "bootstrap_port": bootstrap_port,
                 "bootstrap_room": _generate_bootstrap_room(),
             }
         )
+    return modified_request
+
+
+@app.post("/generate")
+async def handle_generate_request(request_data: dict):
+    (
+        prefill_server,
+        bootstrap_port,
+        decode_server,
+        encode_server,
+        bootstrap_port_encode,
+        text_server,
+    ) = load_balancer.select_pair()
+
+    modified_request = mofidy_bootstrap_info_in_request(
+        request_data, prefill_server, bootstrap_port
+    )
+
+    if encode_server:
+        modified_request_for_prefill = mofidy_bootstrap_info_in_request(
+            request_data, encode_server, bootstrap_port_encode
+        )
+    else:
+        modified_request_for_prefill = modified_request
 
     if request_data.get("stream", False):
         return await load_balancer.generate_stream(
@@ -433,6 +463,7 @@ async def handle_generate_request(request_data: dict):
             decode_server,
             encode_server,
             text_server,
+            modified_request_for_prefill,
             "generate",
         )
     else:
@@ -443,6 +474,7 @@ async def handle_generate_request(request_data: dict):
             "generate",
             encode_server=encode_server,
             text_server=text_server,
+            modified_request_for_prefill=modified_request_for_prefill,
         )
 
 
@@ -452,28 +484,25 @@ async def _forward_to_backend(request_data: dict, endpoint_name: str):
         bootstrap_port,
         decode_server,
         encode_server,
+        bootstrap_port_encode,
         text_server,
     ) = load_balancer.select_pair()
 
-    prefill_hostname = parse_url_as_host(prefill_server)
-
-    modified_request = request_data.copy()
-    modified_request.update(
-        {
-            "bootstrap_host_prefill": prefill_hostname,
-            "bootstrap_port": bootstrap_port,
-            "bootstrap_room": _generate_bootstrap_room(),
-        }
+    modified_request = mofidy_bootstrap_info_in_request(
+        request_data, prefill_server, bootstrap_port
     )
 
+    print(f"{encode_server=}")
+    print(f"{bootstrap_port_encode=}")
     if encode_server:
-        encode_hostname = parse_url_as_host(encode_server)
-        modified_request.update(
-            {
-                "bootstrap_host_encode": encode_hostname,
-            }
+        modified_request_for_prefill = mofidy_bootstrap_info_in_request(
+            request_data, encode_server, bootstrap_port_encode
         )
+    else:
+        modified_request_for_prefill = modified_request
 
+    print(f"{modified_request=}")
+    print(f"{modified_request_for_prefill=}")
     if request_data.get("stream", False):
         return await load_balancer.generate_stream(
             modified_request,
@@ -482,6 +511,7 @@ async def _forward_to_backend(request_data: dict, endpoint_name: str):
             endpoint=endpoint_name,
             encode_server=encode_server,
             text_server=text_server,
+            modified_request_for_prefill=modified_request_for_prefill,
         )
     else:
         return await load_balancer.generate(
@@ -491,6 +521,7 @@ async def _forward_to_backend(request_data: dict, endpoint_name: str):
             endpoint=endpoint_name,
             encode_server=encode_server,
             text_server=text_server,
+            modified_request_for_prefill=modified_request_for_prefill,
         )
 
 
@@ -555,7 +586,7 @@ async def register(obj: PDRegistryRequest):
         )
 
     logger.info(
-        f"#Encode servers: {len(load_balancer.encode_servers)}, "
+        f"#Encode servers: {len(load_balancer.encode_configs)}, "
         f"#Prefill servers: {len(load_balancer.prefill_configs)}, "
         f"#Decode servers: {len(load_balancer.decode_servers)}"
     )
@@ -563,10 +594,10 @@ async def register(obj: PDRegistryRequest):
     return Response(status_code=200)
 
 
-def run(prefill_configs, decode_addrs, encode_addrs, text_addrs, host, port):
+def run(prefill_configs, decode_addrs, encode_configs, text_addrs, host, port):
     global load_balancer
     load_balancer = MiniLoadBalancer(
-        prefill_configs, decode_addrs, encode_addrs, text_addrs
+        prefill_configs, decode_addrs, encode_configs, text_addrs
     )
     uvicorn.run(app, host=host, port=port)
 

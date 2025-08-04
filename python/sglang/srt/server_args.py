@@ -22,6 +22,7 @@ import random
 import tempfile
 from typing import List, Literal, Optional, Union
 
+from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.hf_transformers_utils import check_gguf_file, get_config
 from sglang.srt.lora.lora_registry import LoRARef
 from sglang.srt.reasoning_parser import ReasoningParser
@@ -254,6 +255,7 @@ class ServerArgs:
     disaggregation_mode: str = "null"
     disaggregation_transfer_backend: str = "mooncake"
     disaggregation_bootstrap_port: int = 8998
+    disaggregation_bootstrap_port_encode: int = 8999
     disaggregation_decode_tp: Optional[int] = None
     disaggregation_decode_dp: Optional[int] = None
     disaggregation_encode_dp: Optional[int] = None
@@ -341,7 +343,7 @@ class ServerArgs:
             from sglang.srt.configs.model_config import ModelConfig
 
             model_config = ModelConfig.from_server_args(self)
-            if model_config.is_multimodal:
+            if model_config.is_multimodal and self.disaggregation_mode != "encode":
                 self.adjust_mem_fraction_for_vlm(model_config)
 
         # Set chunked prefill size, which depends on the gpu memory capacity
@@ -1772,6 +1774,12 @@ class ServerArgs:
             help="Bootstrap server port on the prefill server. Default is 8998.",
         )
         parser.add_argument(
+            "--disaggregation-bootstrap-port-encode",
+            type=int,
+            default=ServerArgs.disaggregation_bootstrap_port_encode,
+            help="Bootstrap server port on the prefill server. Default is 8998.",
+        )
+        parser.add_argument(
             "--disaggregation-decode-tp",
             type=int,
             default=ServerArgs.disaggregation_decode_tp,
@@ -2029,7 +2037,7 @@ def prepare_server_args(argv: List[str]) -> ServerArgs:
     Prepare the server arguments from the command line arguments.
 
     Args:
-        args: The command line arguments. Typically, it should be `sys.argv[1:]`
+        argv: The command line arguments. Typically, it should be `sys.argv[1:]`
             to ensure compatibility with `parse_args` when no arguments are passed.
 
     Returns:

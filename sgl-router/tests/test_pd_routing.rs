@@ -265,12 +265,12 @@ mod test_pd_routing {
         };
 
         // Simulate what inject_bootstrap_fields would do
-        single_json["bootstrap_host_prefill"] = json!(get_hostname(prefill_worker.url()));
+        single_json["bootstrap_host"] = json!(get_hostname(prefill_worker.url()));
         single_json["bootstrap_port"] = json!(bootstrap_port);
         single_json["bootstrap_room"] = json!(12345u64); // Random room ID
 
         // Verify bootstrap fields are added correctly
-        assert_eq!(single_json["bootstrap_host_prefill"], "prefill1");
+        assert_eq!(single_json["bootstrap_host"], "prefill1");
         assert_eq!(single_json["bootstrap_port"], json!(Some(9000)));
         assert!(single_json["bootstrap_room"].is_u64());
         assert_eq!(single_json["temperature"], 0.7); // Original field preserved
@@ -283,14 +283,14 @@ mod test_pd_routing {
 
         let batch_size = 3;
         let hostname = get_hostname(prefill_worker.url());
-        batch_json["bootstrap_host_prefill"] = json!(vec![hostname; batch_size]);
+        batch_json["bootstrap_host"] = json!(vec![hostname; batch_size]);
         batch_json["bootstrap_port"] = json!(vec![bootstrap_port; batch_size]);
         batch_json["bootstrap_room"] = json!(vec![111u64, 222u64, 333u64]);
 
         // Verify batch bootstrap fields
-        assert!(batch_json["bootstrap_host_prefill"].is_array());
+        assert!(batch_json["bootstrap_host"].is_array());
         assert_eq!(
-            batch_json["bootstrap_host_prefill"].as_array().unwrap().len(),
+            batch_json["bootstrap_host"].as_array().unwrap().len(),
             batch_size
         );
         assert!(batch_json["bootstrap_port"].is_array());
@@ -308,7 +308,7 @@ mod test_pd_routing {
             "max_tokens": 100,
             "top_p": 0.9,
             "frequency_penalty": 0.5,
-            "bootstrap_host_prefill": "prefill1",
+            "bootstrap_host": "prefill1",
             "bootstrap_port": 9000,
             "bootstrap_room": 12345u64
         });
@@ -324,7 +324,7 @@ mod test_pd_routing {
         assert_eq!(parsed["stream"], false);
         assert_eq!(parsed["temperature"], 0.7);
         assert_eq!(parsed["max_tokens"], 100);
-        assert_eq!(parsed["bootstrap_host_prefill"], "prefill1");
+        assert_eq!(parsed["bootstrap_host"], "prefill1");
         assert_eq!(parsed["bootstrap_port"], 9000);
         assert_eq!(parsed["bootstrap_room"], 12345);
     }
@@ -701,14 +701,14 @@ mod test_pd_routing {
         let batch_size = 16;
         let hostname = get_hostname(prefill_worker.url());
 
-        benchmark_request["bootstrap_host_prefill"] = json!(vec![hostname; batch_size]);
+        benchmark_request["bootstrap_host"] = json!(vec![hostname; batch_size]);
         benchmark_request["bootstrap_port"] = json!(vec![bootstrap_port; batch_size]);
         benchmark_request["bootstrap_room"] =
             json!((0..batch_size).map(|_| 12345u64).collect::<Vec<_>>());
 
         // Verify bootstrap fields match batch size
         assert_eq!(
-            benchmark_request["bootstrap_host_prefill"]
+            benchmark_request["bootstrap_host"]
                 .as_array()
                 .unwrap()
                 .len(),
@@ -831,7 +831,7 @@ mod test_pd_routing {
             };
             let hostname = get_hostname(prefill_worker.url());
 
-            large_batch_request["bootstrap_host_prefill"] = json!(vec![hostname; batch_size]);
+            large_batch_request["bootstrap_host"] = json!(vec![hostname; batch_size]);
             large_batch_request["bootstrap_port"] = json!(vec![bootstrap_port; batch_size]);
             large_batch_request["bootstrap_room"] = json!((0..batch_size)
                 .map(|_| rand::thread_rng().gen::<u64>())
@@ -841,7 +841,7 @@ mod test_pd_routing {
 
             // Verify bootstrap fields are correctly sized
             assert_eq!(
-                large_batch_request["bootstrap_host_prefill"]
+                large_batch_request["bootstrap_host"]
                     .as_array()
                     .unwrap()
                     .len(),

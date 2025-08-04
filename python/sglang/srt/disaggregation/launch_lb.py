@@ -76,6 +76,13 @@ class LBArgs:
             help="Bootstrap ports for prefill servers",
         )
         parser.add_argument(
+            "--encode-bootstrap-ports",
+            type=int,
+            nargs="+",
+            help="Bootstrap ports for encode servers",
+        )
+
+        parser.add_argument(
             "--log-interval",
             type=int,
             default=LBArgs.log_interval,
@@ -90,19 +97,33 @@ class LBArgs:
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace) -> "LBArgs":
-        bootstrap_ports = args.prefill_bootstrap_ports
-        if bootstrap_ports is None:
-            bootstrap_ports = [None] * len(args.prefill)
-        elif len(bootstrap_ports) == 1:
-            bootstrap_ports = bootstrap_ports * len(args.prefill)
+        prefill_bootstrap_ports = args.prefill_bootstrap_ports
+        if prefill_bootstrap_ports is None:
+            prefill_bootstrap_ports = [None] * len(args.prefill)
+        elif len(prefill_bootstrap_ports) == 1:
+            prefill_bootstrap_ports = prefill_bootstrap_ports * len(args.prefill)
         else:
-            if len(bootstrap_ports) != len(args.prefill):
+            if len(prefill_bootstrap_ports) != len(args.prefill):
                 raise ValueError(
                     "Number of prefill URLs must match number of bootstrap ports"
                 )
 
+        encode_bootstrap_ports = args.encode_bootstrap_ports
+        if encode_bootstrap_ports is None:
+            encode_bootstrap_ports = [None] * len(args.encode)
+        elif len(encode_bootstrap_ports) == 1:
+            encode_bootstrap_ports = encode_bootstrap_ports * len(args.encode)
+        else:
+            if len(encode_bootstrap_ports) != len(args.encode):
+                raise ValueError(
+                    "Number of encode URLs must match number of bootstrap ports"
+                )
+
         prefill_infos = [
-            (url, port) for url, port in zip(args.prefill, bootstrap_ports)
+            (url, port) for url, port in zip(args.prefill, prefill_bootstrap_ports)
+        ]
+        encode_infos = [
+            (url, port) for url, port in zip(args.encode, encode_bootstrap_ports)
         ]
 
         if args.encode:
@@ -121,7 +142,7 @@ class LBArgs:
             host=args.host,
             port=args.port,
             policy=args.policy,
-            encode_infos=args.encode,
+            encode_infos=encode_infos,
             prefill_infos=prefill_infos,
             decode_infos=args.decode,
             text_infos=args.text,
@@ -162,10 +183,14 @@ def main():
         prefill_configs = [
             PrefillConfig(url, port) for url, port in lb_args.prefill_infos
         ]
+        encode_configs = [
+            PrefillConfig(url, port) for url, port in lb_args.encode_infos
+        ]
+
         run(
             prefill_configs,
             lb_args.decode_infos,
-            lb_args.encode_infos,
+            encode_configs,
             lb_args.text_infos,
             lb_args.host,
             lb_args.port,

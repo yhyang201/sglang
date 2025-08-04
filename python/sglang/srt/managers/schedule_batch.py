@@ -594,6 +594,11 @@ class Req:
         self.bootstrap_host: str = bootstrap_host
         self.bootstrap_port: Optional[int] = bootstrap_port
         self.bootstrap_room: Optional[int] = bootstrap_room
+
+        self.bootstrap_host_encode: str = bootstrap_host
+        self.bootstrap_port_encode: Optional[int] = bootstrap_port
+        self.bootstrap_room: Optional[int] = bootstrap_room
+
         self.disagg_kv_sender: Optional[BaseKVSender] = None
 
         # For data parallel rank routing

@@ -295,14 +295,20 @@ class TokenizerManager:
             self.server_args.disaggregation_transfer_backend
         )
         # Start kv boostrap server on prefill
-        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+        if (
+            self.disaggregation_mode == DisaggregationMode.PREFILL
+            or self.disaggregation_mode == DisaggregationMode.ENCODE
+        ):
             # only start bootstrap server on prefill tm
             kv_bootstrap_server_class = get_kv_class(
                 self.disaggregation_transfer_backend, KVClassType.BOOTSTRAP_SERVER
             )
-            self.bootstrap_server = kv_bootstrap_server_class(
-                self.server_args.disaggregation_bootstrap_port
+            bootstrap_port = (
+                self.server_args.disaggregation_bootstrap_port_encode
+                if self.server_args.disaggregation_mode == "encode"
+                else self.server_args.disaggregation_bootstrap_port
             )
+            self.bootstrap_server = kv_bootstrap_server_class(bootstrap_port)
             print(f"{self.bootstrap_server=}")
             is_create_store = (
                 self.server_args.node_rank == 0
@@ -641,7 +647,7 @@ class TokenizerManager:
         sampling_params = SamplingParams(**sampling_kwargs)
         sampling_params.normalize(self.tokenizer)
         sampling_params.verify(self.model_config.vocab_size)
-
+        # print(f"{obj=}")
         # Build return object
         if isinstance(obj, GenerateReqInput):
             session_params = (
