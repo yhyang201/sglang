@@ -5,10 +5,8 @@ import logging
 import socket
 import threading
 from functools import cache
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Optional, Union
 
-import numpy as np
-import numpy.typing as npt
 import requests
 import zmq
 from aiohttp import web
@@ -17,7 +15,6 @@ from sglang.srt.disaggregation.base.conn import (
     BaseKVBootstrapServer,
     BaseKVManager,
     BaseKVReceiver,
-    BaseKVSender,
     KVArgs,
     KVPoll,
 )
@@ -86,7 +83,7 @@ class CommonKVManager(BaseKVManager):
         bootstrap_server_url = f"{host}:{self.bootstrap_port}"
         url = f"http://{bootstrap_server_url}/route"
         payload = {
-            "role": "Prefill",
+            "role": self.disaggregation_mode.role_str,
             "tp_size": self.tp_size,
             "dp_size": self.dp_size,
             "rank_ip": get_local_ip_by_remote(),
@@ -360,7 +357,7 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
             self.tp_size_per_dp_rank = tp_size_per_dp_rank
 
         # Add lock to make sure thread-safe
-        if role == "Prefill":
+        if role == DisaggregationMode.PREFILL.role_str:
             dp_group = engine_rank // tp_size_per_dp_rank
             tp_rank_in_dp_group = engine_rank % tp_size_per_dp_rank
 
