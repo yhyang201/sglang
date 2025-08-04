@@ -1052,17 +1052,15 @@ class MooncakeKVManager(BaseKVManager):
             "role": role_str,
             "dp_size": self.dp_size,
         }
-
-        if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            payload.update(
-                {
-                    "tp_size": self.tp_size,
-                    "dp_size": self.dp_size,
-                    "rank_ip": self.local_ip,
-                    "rank_port": self.rank_port,
-                    "engine_rank": self.kv_args.engine_rank,
-                }
-            )
+        payload.update(
+            {
+                "tp_size": self.tp_size,
+                "dp_size": self.dp_size,
+                "rank_ip": self.local_ip,
+                "rank_port": self.rank_port,
+                "engine_rank": self.kv_args.engine_rank,
+            }
+        )
 
         try:
             print(f"bootstrapping: {url=}")
@@ -1395,7 +1393,7 @@ class MooncakeKVReceiver(BaseKVReceiver):
         try:
             url = f"http://{self.bootstrap_addr}/route?engine_rank={-1}&target_dp_group={-1}"
             response = requests.get(url)
-            print(f"{response=}")
+            print(f"{response.json()=}")
             if response.status_code == 200:
                 prefill_parallel_info = response.json()
                 return int(prefill_parallel_info["prefill_tp_size"]), int(
@@ -1609,11 +1607,37 @@ class MooncakeKVBootstrapServer(BaseKVBootstrapServer):
                 f"Register prefill bootstrap: {engine_rank} with rank_ip: {rank_ip} and rank_port: {rank_port}"
             )
         elif role == DisaggregationMode.ENCODE.role_str:
-            pass
-            # self.encode_port_table[dp_group][tp_rank_in_dp_group] = {
-            #     "rank_ip": rank_ip,
-            #     "rank_port": rank_port,
-            # }
+            tp_size = data["tp_size"]
+            dp_size = data["dp_size"]
+            rank_ip = data["rank_ip"]
+            rank_port = int(data["rank_port"])
+            engine_rank = int(data["engine_rank"])
+
+            if self.tp_size is None:
+                self.tp_size = tp_size
+
+            if self.dp_size is None:
+                self.dp_size = dp_size
+
+            tp_size_per_dp_rank = tp_size // dp_size
+            if self.tp_size_per_dp_rank is None:
+                self.tp_size_per_dp_rank = tp_size_per_dp_rank
+
+            dp_group = engine_rank // tp_size_per_dp_rank
+            tp_rank_in_dp_group = engine_rank % tp_size_per_dp_rank
+
+            # Add lock to make sure thread-safe
+            async with self.lock:
+                if dp_group not in self.encode_port_table:
+                    self.encode_port_table[dp_group] = {}
+
+            self.encode_port_table[dp_group][tp_rank_in_dp_group] = {
+                "rank_ip": rank_ip,
+                "rank_port": rank_port,
+            }
+            logger.debug(
+                f"Register prefill bootstrap: {engine_rank} with rank_ip: {rank_ip} and rank_port: {rank_port}"
+            )
 
         return web.Response(text="OK", status=200)
 
@@ -1621,6 +1645,8 @@ class MooncakeKVBootstrapServer(BaseKVBootstrapServer):
         print("_handle_route_get")
         engine_rank = request.query.get("engine_rank")
         target_dp_group = request.query.get("target_dp_group")
+        print(f"{engine_rank=}")
+        print(f"{target_dp_group=}")
         if not engine_rank or not target_dp_group:
             return web.Response(text="Missing inputs for bootstrap server.", status=400)
 
