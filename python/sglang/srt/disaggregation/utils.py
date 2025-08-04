@@ -33,6 +33,10 @@ class DisaggregationMode(Enum):
     DECODE = "decode"
     TEXT = "text"
 
+    @property
+    def role_str(self) -> str:
+        return self.value.capitalize()
+
 
 #########################
 # Synchronization

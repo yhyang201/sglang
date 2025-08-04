@@ -12,11 +12,11 @@ import time
 from collections import defaultdict
 from functools import cache
 from typing import Dict, List, Optional, Set, Tuple, Union
-import torch
 
 import numpy as np
 import numpy.typing as npt
 import requests
+import torch
 import zmq
 from aiohttp import web
 
@@ -67,10 +67,12 @@ class TransferKVChunk:
     is_last: bool
     prefill_aux_index: Optional[int]
 
+
 @dataclasses.dataclass
 class TransferEmbeddingChunk:
     room: int
     embedding: torch.Tensor
+
 
 # decode
 @dataclasses.dataclass
@@ -164,8 +166,10 @@ class MooncakeKVManager(BaseKVManager):
             self.server_socket.setsockopt(zmq.IPV6, 1)
 
         self.register_buffer_to_engine()
-        if self.disaggregation_mode == DisaggregationMode.PREFILL or \
-           self.disaggregation_mode == DisaggregationMode.ENCODE:
+        if (
+            self.disaggregation_mode == DisaggregationMode.PREFILL
+            or self.disaggregation_mode == DisaggregationMode.ENCODE
+        ):
             self.transfer_infos: Dict[int, Dict[str, TransferInfo]] = {}
             self.decode_kv_args_table: Dict[str, KVArgsRegisterInfo] = {}
             self.start_prefill_thread()
@@ -212,8 +216,10 @@ class MooncakeKVManager(BaseKVManager):
             self.bootstrap_timeout = get_int_env_var(
                 "SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT", 300
             )
-        elif self.disaggregation_mode == DisaggregationMode.DECODE or \
-             self.disaggregation_mode == DisaggregationMode.TEXT:
+        elif (
+            self.disaggregation_mode == DisaggregationMode.DECODE
+            or self.disaggregation_mode == DisaggregationMode.TEXT
+        ):
             self.heartbeat_failures = {}
             self.session_pool = defaultdict(requests.Session)
             self.session_pool_lock = threading.Lock()
@@ -260,10 +266,11 @@ class MooncakeKVManager(BaseKVManager):
         ):
             self.engine.register(kv_data_ptr, kv_data_len)
 
-        for aux_data_ptr, aux_data_len in zip(
-            self.kv_args.aux_data_ptrs, self.kv_args.aux_data_lens
-        ):
-            self.engine.register(aux_data_ptr, aux_data_len)
+        if self.disaggregation_mode == "prefill":
+            for aux_data_ptr, aux_data_len in zip(
+                self.kv_args.aux_data_ptrs, self.kv_args.aux_data_lens
+            ):
+                self.engine.register(aux_data_ptr, aux_data_len)
 
     @cache
     def _connect(self, endpoint: str, is_ipv6: bool = False):
@@ -600,9 +607,7 @@ class MooncakeKVManager(BaseKVManager):
                         )
                         break
                     polls.append(True if ret == 0 else False)
-                    dst_ranks_infos.append(
-                        (req.endpoint, req.dst_port, req.room)
-                    )
+                    dst_ranks_infos.append((req.endpoint, req.dst_port, req.room))
 
                     # Only sync status when all the dst ranks have received the kvcache
                     if len(polls) == req.required_dst_info_num:
@@ -1026,7 +1031,7 @@ class MooncakeKVManager(BaseKVManager):
     def get_session_id(self):
         return self.engine.get_session_id()
 
-    def _register_to_bootstrap(self, role: str):
+    def _register_to_bootstrap(self):
         """Register KVSender to bootstrap server via HTTP POST."""
         if self.dist_init_addr:
             if self.dist_init_addr.startswith("["):  # [ipv6]:port or [ipv6]
@@ -1042,13 +1047,13 @@ class MooncakeKVManager(BaseKVManager):
 
         bootstrap_server_url = f"{host}:{self.bootstrap_port}"
         url = f"http://{bootstrap_server_url}/route"
-
+        role_str = self.disaggregation_mode.role_str
         payload = {
-            "role": role,
+            "role": role_str,
             "dp_size": self.dp_size,
         }
 
-        if role == "Prefill":
+        if self.disaggregation_mode == DisaggregationMode.PREFILL:
             payload.update(
                 {
                     "tp_size": self.tp_size,
@@ -1063,13 +1068,13 @@ class MooncakeKVManager(BaseKVManager):
             print(f"bootstrapping: {url=}")
             response = requests.put(url, json=payload, timeout=5)
             if response.status_code == 200:
-                logger.debug(f"{role} successfully registered to bootstrap server.")
+                logger.debug(f"{role_str} successfully registered to bootstrap server.")
             else:
                 logger.error(
-                    f"{role} instance failed to connect to bootstrap server: {response.status_code}, {response.text}"
+                    f"{role_str} instance failed to connect to bootstrap server: {response.status_code}, {response.text}"
                 )
         except Exception as e:
-            logger.error(f"{role} instance failed to register to bootstrap server: {e}")
+            logger.error(f"{role_str} instance failed to register to bootstrap server: {e}")
 
     def _handle_node_failure(self, failed_bootstrap_addr):
         with self.connection_lock:
