@@ -1357,17 +1357,25 @@ class Scheduler(
     def _add_request_to_queue(self, req: Req):
         req.queue_time_start = time.perf_counter()
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            self.disagg_prefill_bootstrap_queue.add(
-                req, self.model_config.num_key_value_heads
-            )
-            if self.server_args.encoder_disaggregated:
-                self.disagg_prefill_prealloc_queue.add(req)
+            if req.contains_mm_input():
+                self.disagg_prefill_bootstrap_queue.add(
+                    req, self.model_config.num_key_value_heads
+                )
+                if self.server_args.encoder_disaggregated:
+                    self.disagg_prefill_prealloc_queue.add(req)
+            else:
+                self.waiting_queue.append(req)
         elif self.disaggregation_mode == DisaggregationMode.TEXT:
-            self.disagg_prefill_prealloc_queue.add(req)
+            if req.contains_mm_input():
+                self.disagg_prefill_prealloc_queue.add(req)
+            else:
+                self.waiting_queue.append(req)
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
             self.disagg_decode_prealloc_queue.add(req)
         elif self.disaggregation_mode == DisaggregationMode.ENCODE:
-            self.disagg_encode_bootstrap_queue.add(req)
+            # TODO: should we skip this req at lb-side?
+            if req.contains_mm_input():
+                self.disagg_encode_bootstrap_queue.add(req)
         else:
             if self.enable_hicache_storage:
                 req.init_next_round_input(self.tree_cache)

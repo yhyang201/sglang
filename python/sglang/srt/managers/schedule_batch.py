@@ -595,8 +595,6 @@ class Req:
         self.bootstrap_port: Optional[int] = bootstrap_port
         self.bootstrap_room: Optional[int] = bootstrap_room
 
-        self.bootstrap_host_encode: str = bootstrap_host
-        self.bootstrap_port_encode: Optional[int] = bootstrap_port
         self.bootstrap_room: Optional[int] = bootstrap_room
 
         self.disagg_kv_sender: Optional[BaseKVSender] = None
@@ -798,6 +796,12 @@ class Req:
         self.return_logprob = False
         self.finished_reason = FINISH_ABORT(
             error_msg, HTTPStatus.BAD_REQUEST, "BadRequestError"
+        )
+
+    def contains_mm_input(self) -> bool:
+        return (
+            self.multimodal_inputs is not None
+            and self.multimodal_inputs.contains_mm_input()
         )
 
     def __repr__(self):
