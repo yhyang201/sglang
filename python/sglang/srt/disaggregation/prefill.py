@@ -25,6 +25,7 @@ from collections import deque
 from http import HTTPStatus
 from typing import TYPE_CHECKING, List, Optional
 
+import numpy as np
 import torch
 
 from sglang.srt.disaggregation.base import BaseKVManager, KVPoll
@@ -416,7 +417,7 @@ class MMEmbeddingPreallocQueue:
         # prefill_pp_size: int,
         # num_reserved_decode_tokens: int,
         transfer_backend: TransferBackend,
-        tp_rank: Optional[int] = -1,
+        tp_rank: Optional[int] = 0,
     ):
         self.mm_embedding_pool = mm_embedding_pool
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
@@ -427,7 +428,7 @@ class MMEmbeddingPreallocQueue:
         self.scheduler = scheduler
         self.transfer_queue = transfer_queue
         self.gloo_group = gloo_group
-        # self.tp_rank = tp_rank
+        self.tp_rank = tp_rank
         # self.tp_size = tp_size
         # self.dp_size = dp_size
         self.gpu_id = gpu_id
@@ -439,7 +440,6 @@ class MMEmbeddingPreallocQueue:
         self.queue: List[EmbeddingRequest] = []
         self.retracted_queue: List[Req] = []
         self.kv_manager = self._init_kv_manager()
-        self.tp_rank = tp_rank
 
     def _init_kv_manager(self) -> BaseKVManager:
         # TODO
@@ -448,7 +448,7 @@ class MMEmbeddingPreallocQueue:
         kv_args = kv_args_class()
         #
         # attn_tp_size = self.tp_size // self.dp_size
-        # kv_args.engine_rank = self.tp_rank % (attn_tp_size)
+        kv_args.engine_rank = self.tp_rank
         # kv_args.decode_tp_size = attn_tp_size
         # kv_args.prefill_pp_size = self.prefill_pp_size
         # kv_data_ptrs, kv_data_lens, kv_item_lens = (
@@ -460,7 +460,12 @@ class MMEmbeddingPreallocQueue:
         )
         kv_args.kv_data_ptrs = kv_data_ptrs
         kv_args.kv_data_lens = kv_data_lens
-        kv_args.kv_item_lens = kv_item_lens
+        kv_args.kv_item_lens = None
+
+        kv_args.aux_data_ptrs = None
+        kv_args.aux_data_lens = None
+        kv_args.aux_item_lens = None
+
         #
         # kv_args.aux_data_ptrs, kv_args.aux_data_lens, kv_args.aux_item_lens = (
         #     self.metadata_buffers.get_buf_infos()
@@ -483,7 +488,7 @@ class MMEmbeddingPreallocQueue:
         )
         if self._check_if_req_exceed_mm_pool_capacity(req):
             return
-        print(f"{req=}")
+        # print(f"{req=}")
         if is_retracted:
             self.retracted_queue.append(req)
         else:
@@ -502,6 +507,7 @@ class MMEmbeddingPreallocQueue:
                 bootstrap_addr=f"{req.bootstrap_host_encode}:{req.bootstrap_port_encode}",
                 bootstrap_room=req.bootstrap_room,
                 data_parallel_rank=req.data_parallel_rank,
+                disaggregation_mode=DisaggregationMode.PREFILL
             )
             print(f"EmbeddingRequest added")
             self.queue.append(
@@ -537,7 +543,7 @@ class MMEmbeddingPreallocQueue:
             if self.mm_embedding_pool.available_size() <= 0:
                 break
 
-            print(f"{req=}")
+            # print(f"{req=}")
 
             required_tokens_for_request = sum(req.mm_embedding_lens)
             if required_tokens_for_request > allocatable_tokens:
@@ -573,6 +579,7 @@ class MMEmbeddingPreallocQueue:
         )
 
         for i, (decode_req, poll) in enumerate(zip(self.queue, polls)):
+            print(f"{poll=}")
             if poll == KVPoll.Bootstrapping:
                 pass
             elif poll == KVPoll.WaitingForInput:
@@ -601,19 +608,21 @@ class MMEmbeddingPreallocQueue:
 
         allocatable_tokens = self._allocatable_tokens()
         # First, remove all failed requests from the queue
-        for i, prefill_req in enumerate(self.queue):
-            if isinstance(prefill_req.req.finished_reason, FINISH_ABORT):
+        for i, encode_req in enumerate(self.queue):
+            if isinstance(encode_req.req.finished_reason, FINISH_ABORT):
                 self.scheduler.stream_output(
-                    [prefill_req.req], prefill_req.req.return_logprob
+                    [encode_req.req], encode_req.req.return_logprob
                 )
                 indices_to_remove.add(i)
 
         # Then, preallocate the remaining requests if possible
-        for i, prefill_req in enumerate(self.queue):
+        for i, encode_req in enumerate(self.queue):
             if i in indices_to_remove:
                 continue
 
-            if not prefill_req.waiting_for_input:
+            print(f"{encode_req.waiting_for_input=}")
+
+            if not encode_req.waiting_for_input:
                 continue
 
             if self.mm_embedding_pool.available_size() <= 0:
@@ -624,26 +633,28 @@ class MMEmbeddingPreallocQueue:
 
             # Memory estimation: don't add if the projected memory cannot be met
             # TODO: add new_token ratio
-            required_tokens_for_request = sum(prefill_req.req.mm_embedding_lens)
+            required_tokens_for_request = sum(encode_req.req.mm_embedding_lens)
 
             if required_tokens_for_request > allocatable_tokens:
                 break
 
             allocatable_tokens -= required_tokens_for_request
-            self._pre_alloc(prefill_req.req)
+            mm_embedding_indices = torch.cat(self._pre_alloc(encode_req.req)).cpu().numpy()
 
-            print(f"{prefill_req.req.mm_hashes=}")
-            mm_embedding_indices = self.mm_embedding_pool.get_embedding_locs_from_hash(
-                prefill_req.req.mm_hashes
-            )
+            print(f"{encode_req.req.mm_hashes=}")
+
+            # mm_embedding_indices = [self.mm_embedding_pool.get_embedding_locs_from_hash(mm_hash) for mm_hash in
+            #                         encode_req.req.mm_hashes]
+
+            print(f"{mm_embedding_indices=}")
 
             # prefill_req.metadata_buffer_index = (
             #     self.req_to_metadata_buffer_idx_allocator.alloc()
             # )
             # assert prefill_req.metadata_buffer_index is not None
             page_indices = kv_to_page_indices(mm_embedding_indices, page_size=1)
-            prefill_req.embedding_receiver.init(page_indices, -1)
-            preallocated_reqs.append(prefill_req)
+            encode_req.embedding_receiver.init(page_indices, -1)
+            preallocated_reqs.append(encode_req)
             indices_to_remove.add(i)
 
         self.queue = [
@@ -661,7 +672,7 @@ class MMEmbeddingPreallocQueue:
     def _allocatable_tokens(self) -> int:
         return self.mm_embedding_pool.available_size()
 
-    def _pre_alloc(self, req: Req) -> torch.Tensor:
+    def _pre_alloc(self, req: Req) -> List[torch.Tensor]:
         """Pre-allocate the memory for req_to_token and token_kv_pool"""
         print(f"pre_allocating...")
         # req_pool_indices = self.mm_embedding_pool.alloc(1)
@@ -718,7 +729,7 @@ class SchedulerDisaggregationPrefillMixin:
             req.bootstrap_room
             for req in self.waiting_visual_queue
             if req.bootstrap_room
-            in [req.bootstrap_room for req in self.waiting_preallocate_queue]
+               in [req.bootstrap_room for req in self.waiting_preallocate_queue]
         ]
 
         self.waiting_visual_queue = [

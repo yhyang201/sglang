@@ -167,12 +167,12 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
         # self.cpu_offloading_chunk_size = 8192
 
     # for disaggregation, aligned with get_contiguous_buf_infos
-    def get_mm_buffer_info(self) -> Tuple[int, int, int]:
+    def get_mm_buffer_info(self) -> Tuple[List[int], int, List[int]]:
         """Returns the pointer, size, and item length of the multimodal buffer."""
         return (
-            self.mm_buffer.data_ptr(),
+            [self.mm_buffer.data_ptr()],
             self.mm_buffer.nbytes,
-            self.hidden_size * self.mm_buffer.element_size(),
+            [self.hidden_size * self.mm_buffer.element_size()],
         )
 
     def get_pointers_from_locs(self, locs: torch.Tensor) -> torch.Tensor:
@@ -190,7 +190,7 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
         pointers = base_ptr + locs_gpu * item_size
         return pointers
 
-    def get_embedding_locs_from_hash(self, mm_hash) -> torch.Tensor:
+    def get_embedding_locs_from_hash(self, mm_hash: int) -> torch.Tensor:
         return self.mm_hash_to_indices[mm_hash]
 
     def get_embedding_locs_from_hashes(

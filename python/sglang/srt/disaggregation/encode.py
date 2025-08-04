@@ -30,16 +30,12 @@ from typing import TYPE_CHECKING, Any, List, Optional
 import torch
 
 from sglang.srt.disaggregation.base import BaseKVManager, KVPoll
-from sglang.srt.disaggregation.base.conn import EmbeddingArgs
 from sglang.srt.disaggregation.utils import (
     FAKE_BOOTSTRAP_HOST,
     DisaggregationMode,
-    EncoderMetadataBuffers,
     KVClassType,
-    ReqToMetadataIdxAllocator,
     TransferBackend,
     get_kv_class,
-    kv_to_page_num,
     poll_and_all_reduce,
     prepare_abort,
 )
@@ -48,13 +44,12 @@ from sglang.srt.managers.schedule_policy import AddReqResult
 from sglang.srt.managers.schedule_policy_encode_adder import EncodeAdder
 
 if TYPE_CHECKING:
-    from sglang.srt.managers.scheduler import EmbeddingBatchResult
-    from sglang.srt.mem_cache.multimodal_cache import PagedMultiModalEmbeddingPool
+    pass
 
 if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
 
-    from sglang.srt.managers.scheduler import GenerationBatchResult, Scheduler
+    from sglang.srt.managers.scheduler import Scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +103,7 @@ class EncodeBootstrapQueue:
         # kv_args.kv_item_lens = kv_item_lens
         kv_args.page_size = 1
         # placeholder
-        kv_args.engine_rank = -1
+        kv_args.engine_rank = 0
         kv_args.kv_data_ptrs = []
         kv_args.kv_data_lens = []
 
@@ -120,14 +115,6 @@ class EncodeBootstrapQueue:
         kv_args.ib_device = self.scheduler.server_args.disaggregation_ib_device
         kv_args.gpu_id = self.scheduler.gpu_id
         #
-        kv_manager_class = get_kv_class(self.transfer_backend, KVClassType.MANAGER)
-        kv_manager = kv_manager_class(
-            kv_args,
-            DisaggregationMode.ENCODE,
-            self.scheduler.server_args,
-        )
-        return kv_manager
-
         kv_manager_class = get_kv_class(self.transfer_backend, KVClassType.MANAGER)
         kv_manager = kv_manager_class(
             kv_args,
