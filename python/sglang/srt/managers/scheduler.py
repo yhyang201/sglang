@@ -1219,7 +1219,6 @@ class Scheduler(
                     )
                     else self.server_args.disaggregation_bootstrap_port
                 )
-                print(f"{recv_req.bootstrap_port=}")
 
             req = Req(
                 recv_req.rid,

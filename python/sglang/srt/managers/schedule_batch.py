@@ -595,7 +595,6 @@ class Req:
         self.bootstrap_port: Optional[int] = bootstrap_port
         self.bootstrap_room: Optional[int] = bootstrap_room
 
-        print(f"{bootstrap_port=}")
         self.bootstrap_host_encode: str = bootstrap_host
         self.bootstrap_port_encode: Optional[int] = bootstrap_port
         self.bootstrap_room: Optional[int] = bootstrap_room

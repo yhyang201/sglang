@@ -172,7 +172,10 @@ class MooncakeKVManager(BaseKVManager):
         ):
             self.transfer_infos: Dict[int, Dict[str, TransferInfo]] = {}
             self.decode_kv_args_table: Dict[str, KVArgsRegisterInfo] = {}
-            self.start_prefill_thread()
+            if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                self.start_prefill_thread()
+            else:
+                self.start_encode_thread()
             self._register_to_bootstrap()
             self.session_failures = defaultdict(int)
             self.failed_sessions = set()
@@ -760,6 +763,7 @@ class MooncakeKVManager(BaseKVManager):
                 )
 
     def _bind_server_socket(self):
+        print(f"_bind_server_socket {self.local_ip=} {self.rank_port=}")
         self.server_socket.bind(format_tcp_address(self.local_ip, self.rank_port))
 
     def start_prefill_thread(self):
@@ -811,6 +815,7 @@ class MooncakeKVManager(BaseKVManager):
             while True:
                 waiting_req_bytes = self.server_socket.recv_multipart()
                 room = waiting_req_bytes[0].decode("ascii")
+                print(f"encode thread received waiting_req_bytes {room=}")
                 mooncake_session_id = waiting_req_bytes[3].decode("ascii")
                 if room == "None":
                     self.decode_kv_args_table[mooncake_session_id] = (
@@ -827,6 +832,8 @@ class MooncakeKVManager(BaseKVManager):
                     continue
                 else:
                     required_dst_info_num = int(waiting_req_bytes[6].decode("ascii"))
+                    print(f"{required_dst_info_num=}")
+                    print(f"{len(self.transfer_infos[room])=}")
                     room = int(room)
                     if room not in self.transfer_infos:
                         self.transfer_infos[room] = {}
@@ -1445,7 +1452,10 @@ class MooncakeKVReceiver(BaseKVReceiver):
                             dst_kv_item_len,
                         ]
                     )
-            elif self.disaggregation_mode == DisaggregationMode.PREFILL or self.disaggregation_mode == DisaggregationMode.TEXT:
+            elif (
+                self.disaggregation_mode == DisaggregationMode.PREFILL
+                or self.disaggregation_mode == DisaggregationMode.TEXT
+            ):
                 sock, lock = self._connect_to_bootstrap_server(bootstrap_info)
                 sock.send_multipart(
                     [
@@ -1460,8 +1470,6 @@ class MooncakeKVReceiver(BaseKVReceiver):
                         "-1".encode("ascii"),
                     ]
                 )
-
-
 
     @classmethod
     def _connect(cls, endpoint: str, is_ipv6: bool = False):
@@ -1489,7 +1497,9 @@ class MooncakeKVReceiver(BaseKVReceiver):
         for bootstrap_info in self.bootstrap_infos:
             sock, lock = self._connect_to_bootstrap_server(bootstrap_info)
             is_dummy = bootstrap_info["is_dummy"]
-
+            print(
+                f"kv receiver init sending: {bootstrap_info=} {self.bootstrap_room=} "
+            )
             with lock:
                 sock.send_multipart(
                     [
@@ -1683,9 +1693,7 @@ class MooncakeKVBootstrapServer(BaseKVBootstrapServer):
 
         # Find corresponding prefill info
         async with self.lock:
-            bootstrap_info = self.port_table[int(target_dp_group)][
-                int(engine_rank)
-            ]
+            bootstrap_info = self.port_table[int(target_dp_group)][int(engine_rank)]
 
         if bootstrap_info is not None:
             return web.json_response(bootstrap_info, status=200)

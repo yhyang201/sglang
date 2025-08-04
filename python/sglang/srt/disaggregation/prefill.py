@@ -507,7 +507,7 @@ class MMEmbeddingPreallocQueue:
                 bootstrap_addr=f"{req.bootstrap_host_encode}:{req.bootstrap_port_encode}",
                 bootstrap_room=req.bootstrap_room,
                 data_parallel_rank=req.data_parallel_rank,
-                disaggregation_mode=DisaggregationMode.PREFILL
+                disaggregation_mode=DisaggregationMode.PREFILL,
             )
             print(f"EmbeddingRequest added")
             self.queue.append(
@@ -639,7 +639,9 @@ class MMEmbeddingPreallocQueue:
                 break
 
             allocatable_tokens -= required_tokens_for_request
-            mm_embedding_indices = torch.cat(self._pre_alloc(encode_req.req)).cpu().numpy()
+            mm_embedding_indices = (
+                torch.cat(self._pre_alloc(encode_req.req)).cpu().numpy()
+            )
 
             print(f"{encode_req.req.mm_hashes=}")
 
@@ -729,7 +731,7 @@ class SchedulerDisaggregationPrefillMixin:
             req.bootstrap_room
             for req in self.waiting_visual_queue
             if req.bootstrap_room
-               in [req.bootstrap_room for req in self.waiting_preallocate_queue]
+            in [req.bootstrap_room for req in self.waiting_preallocate_queue]
         ]
 
         self.waiting_visual_queue = [

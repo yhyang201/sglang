@@ -342,7 +342,9 @@ class ServerArgs:
             from sglang.srt.configs.model_config import ModelConfig
 
             model_config = ModelConfig.from_server_args(self)
-            if model_config.is_multimodal and not (self.disaggregation_mode == "encode" or self.encoder_disaggregated):
+            if model_config.is_multimodal and not (
+                self.disaggregation_mode == "encode" or self.encoder_disaggregated
+            ):
                 self.adjust_mem_fraction_for_vlm(model_config)
 
         # Set chunked prefill size, which depends on the gpu memory capacity
