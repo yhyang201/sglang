@@ -25,10 +25,8 @@ import struct
 import threading
 import time
 from http import HTTPStatus
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
-from sglang.srt.managers.scheduler import EmbeddingBatchResult
-from sglang.srt.mem_cache.multimodal_cache import PagedMultiModalEmbeddingPool
 import torch
 
 from sglang.srt.disaggregation.base import BaseKVManager, KVPoll
@@ -50,6 +48,10 @@ from sglang.srt.managers.schedule_policy import AddReqResult
 from sglang.srt.managers.schedule_policy_encode_adder import EncodeAdder
 
 if TYPE_CHECKING:
+    from sglang.srt.managers.scheduler import EmbeddingBatchResult
+    from sglang.srt.mem_cache.multimodal_cache import PagedMultiModalEmbeddingPool
+
+if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
 
     from sglang.srt.managers.scheduler import GenerationBatchResult, Scheduler
@@ -59,12 +61,12 @@ logger = logging.getLogger(__name__)
 
 class EncodeBootstrapQueue:
     """
-    Store the requests in bootstrapping
+    Store the requests bootstrapping
     """
 
     def __init__(
         self,
-        mm_embedding_pool: PagedMultiModalEmbeddingPool,
+        # mm_embedding_pool: PagedMultiModalEmbeddingPool,
         # draft_mm_embedding_pool: Optional[PagedMultiModalCache],
         # req_to_metadata_buffer_idx_allocator: ReqToMetadataIdxAllocator,
         # metadata_buffers: EncoderMetadataBuffers,
@@ -76,7 +78,7 @@ class EncodeBootstrapQueue:
         scheduler: Scheduler,
         transfer_backend: TransferBackend,
     ):
-        self.mm_embedding_pool = mm_embedding_pool
+        # self.mm_embedding_pool = mm_embedding_pool
         # self.draft_mm_embedding_pool = draft_mm_embedding_pool
         # self.metadata_buffers = metadata_buffers
         # self.req_to_metadata_buffer_idx_allocator = req_to_metadata_buffer_idx_allocator
@@ -97,12 +99,13 @@ class EncodeBootstrapQueue:
         # embedding_class = EmbeddingArgs()
         kv_args_class = get_kv_class(self.transfer_backend, KVClassType.KVARGS)
         kv_args = kv_args_class()
-        kv_data_ptrs, kv_data_lens, kv_item_lens = self.mm_embedding_pool.get_mm_buffer_info()
+        # kv_data_ptrs, kv_data_lens, kv_item_lens = (
+        #     self.mm_embedding_pool.get_mm_buffer_info()
+        # )
 
-
-        kv_args.kv_data_ptrs = kv_data_ptrs
-        kv_args.kv_data_lens = kv_data_lens
-        kv_args.kv_item_lens = kv_item_lens
+        # kv_args.kv_data_ptrs = kv_data_ptrs
+        # kv_args.kv_data_lens = kv_data_lens
+        # kv_args.kv_item_lens = kv_item_lens
         kv_args.page_size = 1
         # placeholder
         kv_args.engine_rank = -1
@@ -238,7 +241,7 @@ class EncodeBootstrapQueue:
             if i not in indices_to_remove
         ]
 
-        print(f"{len(bootstrapped_reqs)=}")
+        # print(f"{len(bootstrapped_reqs)=}")
         if not return_failed_reqs:
             return bootstrapped_reqs
         else:
@@ -489,7 +492,7 @@ class SchedulerDisaggregationEncodeMixin:
     def process_batch_result_disagg_encode(
         self: Scheduler,
         batch: ScheduleBatch,
-        result: EmbeddingBatchResult,
+        result: Any,
         launch_done: Optional[threading.Event] = None,
     ) -> None:
         """
@@ -639,8 +642,8 @@ class SchedulerDisaggregationEncodeMixin:
         )
         # for req in done_reqs:
         #     req: Req
-            # self.req_to_metadata_buffer_idx_allocator.free(req.metadata_buffer_index)
-            # req.metadata_buffer_index = -1
+        # self.req_to_metadata_buffer_idx_allocator.free(req.metadata_buffer_index)
+        # req.metadata_buffer_index = -1
 
         self.disagg_encode_inflight_queue = undone_reqs
 
@@ -663,10 +666,7 @@ class SchedulerDisaggregationEncodeMixin:
 
         return transferred_rids
 
-    def send_embedding_chunk(
-        self: Scheduler,
-        req: Req
-    ) -> None:
+    def send_embedding_chunk(self: Scheduler, req: Req) -> None:
         """
         Send a embedding to the prefill server
         """
@@ -697,4 +697,3 @@ class SchedulerDisaggregationEncodeMixin:
             req.disagg_kv_sender.send_embedding(
                 embeddings=req.embedding, embedding_start_indices=[]
             )
-

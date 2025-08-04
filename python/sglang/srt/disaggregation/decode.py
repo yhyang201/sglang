@@ -134,6 +134,7 @@ class EmbeddingRequest:
     embedding_receiver: BaseKVReceiver
     waiting_for_input: bool = False
 
+
 class DecodePreallocQueue:
     """
     Store the requests that are preallocating.

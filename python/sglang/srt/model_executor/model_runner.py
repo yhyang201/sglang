@@ -31,6 +31,7 @@ from sglang.srt.configs.load_config import LoadConfig
 from sglang.srt.configs.model_config import AttentionArch, ModelConfig
 from sglang.srt.configs.update_config import adjust_config_with_unaligned_cpu_tp
 from sglang.srt.constants import GPU_MEMORY_TYPE_WEIGHTS
+from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.distributed import (
     get_tp_group,
     get_world_group,
@@ -361,7 +362,6 @@ class ModelRunner:
                 min_per_gpu_memory * MM_MEM_POOL_FRACTION,
                 server_args.max_running_requests,
                 # server_args.max_total_tokens,
-                int(1e8),
             )
 
         if self.server_args.disaggregation_mode == "encode":
@@ -1135,10 +1135,6 @@ class ModelRunner:
         # Calculate memory per multimodal token
         mm_token_size = hidden_size * torch._utils._element_size(mm_embedding_dtype)
 
-        # Reserve some memory for multimodal embeddings
-        # Use a fraction of the total GPU memory allocated for multimodal cache
-        mm_memory_fraction = 0.1  # 10% of total memory for multimodal cache
-
         # Calculate maximum number of multimodal tokens
         max_mm_total_num_tokens = int(mm_available_memory * (1 << 30) // mm_token_size)
 
@@ -1148,7 +1144,10 @@ class ModelRunner:
 
         # Apply user-specified constraints
         if max_total_tokens is not None:
-            if max_total_tokens > max_mm_total_num_tokens:
+            if (
+                max_total_tokens > max_mm_total_num_tokens
+                and self.server_args.disaggregation_mode != DisaggregationMode.ENCODE
+            ):
                 logging.warning(
                     f"max_total_tokens={max_total_tokens} is larger than the profiled value "
                     f"{max_mm_total_num_tokens} for multimodal cache. "
