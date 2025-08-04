@@ -402,11 +402,11 @@ def parse_url_as_host(server_addr) -> str:
     return hostname
 
 
-def mofidy_bootstrap_info_in_request(
+def modify_bootstrap_info_in_request(
     request_data, bootstrap_server: PrefillConfig, bootstrap_port
 ):
     """
-    Since in EPD, we have 2 bootstrap servers on encdoe & prefill
+    In EPD, we have 2 bootstrap servers on encode & prefill
     """
     hostname = parse_url_as_host(bootstrap_server)
 
@@ -445,12 +445,12 @@ async def handle_generate_request(request_data: dict):
         text_server,
     ) = load_balancer.select_pair()
 
-    modified_request = mofidy_bootstrap_info_in_request(
+    modified_request = modify_bootstrap_info_in_request(
         request_data, prefill_server, bootstrap_port
     )
 
     if encode_server:
-        modified_request_for_prefill = mofidy_bootstrap_info_in_request(
+        modified_request_for_prefill = modify_bootstrap_info_in_request(
             request_data, encode_server, bootstrap_port_encode
         )
     else:
@@ -488,14 +488,14 @@ async def _forward_to_backend(request_data: dict, endpoint_name: str):
         text_server,
     ) = load_balancer.select_pair()
 
-    modified_request = mofidy_bootstrap_info_in_request(
+    modified_request = modify_bootstrap_info_in_request(
         request_data, prefill_server, bootstrap_port
     )
 
     print(f"{encode_server=}")
     print(f"{bootstrap_port_encode=}")
     if encode_server:
-        modified_request_for_prefill = mofidy_bootstrap_info_in_request(
+        modified_request_for_prefill = modify_bootstrap_info_in_request(
             request_data, encode_server, bootstrap_port_encode
         )
     else:
