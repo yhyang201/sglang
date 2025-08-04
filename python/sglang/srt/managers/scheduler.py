@@ -51,9 +51,9 @@ from sglang.srt.disaggregation.encode import (
 )
 from sglang.srt.disaggregation.kv_events import EventPublisherFactory, KVEventBatch
 from sglang.srt.disaggregation.prefill import (
+    MMEmbeddingPreallocQueue,
     MMEmbeddingTransferQueue,
     PrefillBootstrapQueue,
-    PrefillPreallocQueue,
     SchedulerDisaggregationPrefillMixin,
 )
 from sglang.srt.disaggregation.utils import (
@@ -128,7 +128,6 @@ from sglang.srt.managers.schedule_policy import (
     PrefillAdder,
     SchedulePolicy,
 )
-from sglang.srt.managers.schedule_policy_encode_adder import EncodeAdder
 from sglang.srt.managers.scheduler_output_processor_mixin import (
     SchedulerOutputProcessorMixin,
 )
@@ -558,7 +557,6 @@ class Scheduler(
         # vision disaggregation related
         self.waiting_preallocate_queue: List[Req] = []
         self.waiting_visual_queue: List[Req] = []
-        self.enable_disagg_vision = False
 
     def current_scheduler_metrics_enabled(self):
         return self.attn_tp_rank == 0 or self.enable_metrics_for_all_schedulers
@@ -780,71 +778,76 @@ class Scheduler(
                 transfer_backend=self.transfer_backend,
             )
 
-        elif self.disaggregation_mode == DisaggregationMode.PREFILL:
+        elif (
+            self.disaggregation_mode == DisaggregationMode.PREFILL
+            or self.disaggregation_mode == DisaggregationMode.TEXT
+        ):
             # *2 for the headroom.
-            buffer_size = self.max_running_requests * 2
-            self.req_to_metadata_buffer_idx_allocator = ReqToMetadataIdxAllocator(
-                buffer_size
-            )
-            self.disagg_metadata_buffers = MetadataBuffers(
-                buffer_size,
-                hidden_size=self.model_config.hf_text_config.hidden_size,
-                dtype=self.model_config.dtype,
-                custom_mem_pool=self.token_to_kv_pool_allocator.get_kvcache().maybe_get_custom_mem_pool(),
-            )
+            if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                buffer_size = self.max_running_requests * 2
+                self.req_to_metadata_buffer_idx_allocator = ReqToMetadataIdxAllocator(
+                    buffer_size
+                )
+                self.disagg_metadata_buffers = MetadataBuffers(
+                    buffer_size,
+                    hidden_size=self.model_config.hf_text_config.hidden_size,
+                    dtype=self.model_config.dtype,
+                    custom_mem_pool=self.token_to_kv_pool_allocator.get_kvcache().maybe_get_custom_mem_pool(),
+                )
 
-            self.disagg_prefill_bootstrap_queue = PrefillBootstrapQueue(
-                token_to_kv_pool=self.token_to_kv_pool_allocator.get_kvcache(),
-                draft_token_to_kv_pool=(
-                    None
-                    if self.draft_worker is None
-                    else self.draft_worker.model_runner.mm_embedding_pool
-                ),
-                req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
-                metadata_buffers=self.disagg_metadata_buffers,
-                tp_rank=self.tp_rank,
-                tp_size=self.tp_size,
-                gpu_id=self.gpu_id,
-                bootstrap_port=self.server_args.disaggregation_bootstrap_port,
-                gloo_group=self.attn_tp_cpu_group,
-                max_total_num_tokens=self.max_total_num_tokens,
-                decode_tp_size=self.server_args.disaggregation_decode_tp,
-                decode_dp_size=self.server_args.disaggregation_decode_dp,
-                scheduler=self,
-                pp_rank=self.pp_rank,
-                pp_size=self.pp_size,
-                transfer_backend=self.transfer_backend,
-            )
-            # The prefill requests that are in the middle of kv sending
-            self.disagg_prefill_inflight_queue: List[Req] = []
+                self.disagg_prefill_bootstrap_queue = PrefillBootstrapQueue(
+                    token_to_kv_pool=self.token_to_kv_pool_allocator.get_kvcache(),
+                    draft_token_to_kv_pool=(
+                        None
+                        if self.draft_worker is None
+                        else self.draft_worker.model_runner.mm_embedding_pool
+                    ),
+                    req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
+                    metadata_buffers=self.disagg_metadata_buffers,
+                    tp_rank=self.tp_rank,
+                    tp_size=self.tp_size,
+                    gpu_id=self.gpu_id,
+                    bootstrap_port=self.server_args.disaggregation_bootstrap_port,
+                    gloo_group=self.attn_tp_cpu_group,
+                    max_total_num_tokens=self.max_total_num_tokens,
+                    decode_tp_size=self.server_args.disaggregation_decode_tp,
+                    decode_dp_size=self.server_args.disaggregation_decode_dp,
+                    scheduler=self,
+                    pp_rank=self.pp_rank,
+                    pp_size=self.pp_size,
+                    transfer_backend=self.transfer_backend,
+                )
+                # The prefill requests that are in the middle of kv sending
+                self.disagg_prefill_inflight_queue: List[Req] = []
 
             # TODO: only if encode is disaggregated
             if self.server_args.encoder_disaggregated:
                 # The prefill requests polling mm embedding cache
                 self.disagg_prefill_transfer_queue = MMEmbeddingTransferQueue(
                     gloo_group=self.attn_tp_cpu_group,
-                    req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
+                    # req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
                     tp_rank=self.tp_rank,
-                    metadata_buffers=self.disagg_metadata_buffers,
+                    # metadata_buffers=self.disagg_metadata_buffers,
                     scheduler=self,
                 )
 
                 # The prefill requests pending for pre-allocation, waiting for encoder embeddings
-                self.disagg_prefill_prealloc_queue = PrefillPreallocQueue(
+                self.disagg_prefill_prealloc_queue = MMEmbeddingPreallocQueue(
                     mm_embedding_pool=self.mm_embedding_pool,
                     token_to_kv_pool_allocator=self.mm_embedding_allocator,
-                    req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
-                    metadata_buffers=self.disagg_metadata_buffers,
+                    # req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
+                    # metadata_buffers=self.disagg_metadata_buffers,
                     scheduler=self,
                     transfer_queue=self.disagg_prefill_transfer_queue,
                     gloo_group=self.attn_tp_cpu_group,
-                    tp_rank=self.tp_rank,
-                    tp_size=self.tp_size,
-                    dp_size=1,
+                    # tp_rank=self.tp_rank,
+                    # scheduler=self
+                    # tp_size=self.tp_size,
+                    # dp_size=1,
                     gpu_id=self.gpu_id,
                     bootstrap_port=self.server_args.disaggregation_bootstrap_port,
                     max_total_num_tokens=self.max_total_num_tokens,
-                    prefill_pp_size=self.server_args.disaggregation_prefill_pp,
+                    # prefill_pp_size=self.server_args.disaggregation_prefill_pp,
                     # num_reserved_decode_tokens=self.server_args.num_reserved_decode_tokens,
                     transfer_backend=self.transfer_backend,
                 )
@@ -870,8 +873,8 @@ class Scheduler(
                 #     if self.draft_worker is None
                 #     else self.draft_worker.model_runner.mm_embedding_pool
                 # ),
-                req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
-                metadata_buffers=self.disagg_metadata_buffers,
+                # req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
+                # metadata_buffers=self.disagg_metadata_buffers,
                 # tp_rank=self.tp_rank,
                 # tp_size=self.tp_size,
                 gpu_id=self.gpu_id,
@@ -1186,10 +1189,15 @@ class Scheduler(
                 else:
                     self.send_to_tokenizer.send_pyobj(output)
 
+        if self.server_args.encoder_disaggregated:
+            # TEXT mode
+            self.process_prefill_queue_with_encoder_disaggregated()
+
     def handle_generate_request(
         self,
         recv_req: TokenizedGenerateReqInput,
     ):
+        print(f"{recv_req=}")
         # Create a new request
         if (
             recv_req.session_params is None
@@ -1352,6 +1360,10 @@ class Scheduler(
             self.disagg_prefill_bootstrap_queue.add(
                 req, self.model_config.num_key_value_heads
             )
+            if self.server_args.encoder_disaggregated:
+                self.disagg_prefill_prealloc_queue.add(req)
+        elif self.disaggregation_mode == DisaggregationMode.TEXT:
+            self.disagg_prefill_prealloc_queue.add(req)
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
             self.disagg_decode_prealloc_queue.add(req)
         elif self.disaggregation_mode == DisaggregationMode.ENCODE:
