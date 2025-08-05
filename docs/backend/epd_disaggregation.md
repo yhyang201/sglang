@@ -1,5 +1,32 @@
 # EPD Disaggregation
 
+## Debug Command
+
+You can try developing with the following commands.
+
+```
+docker run -it \
+--name h100_{your_name} \
+--gpus all  \
+--shm-size 32g  \
+--privileged  \
+--network host  \
+--ipc=host  \
+-v ~/.cache:/root/.cache  \
+-v /dev/infiniband:/dev/infiniband  \
+-v /sys/class/infiniband:/sys/class/infiniband  \
+-v /usr/sbin/show_gids:/usr/sbin/show_gids:ro  \
+lmsysorg/sglang:latest /bin/bash 
+
+
+python -m sglang.launch_server --model-path Qwen/Qwen2.5-VL-7B-Instruct --host 0.0.0.0  --disaggregation-mode encode --port 60001 --disaggregation-ib-device  mlx5_0
+
+
+python -m sglang.launch_server --model-path Qwen/Qwen2.5-VL-7B-Instruct --host 0.0.0.0  --disaggregation-mode text --port 60002 --encoder-disaggregated --disaggregation-ib-device  mlx5_0 --disable-cuda-graph
+
+
+python -m sglang.srt.disaggregation.mini_lb --encode http://127.0.0.1:60001 --text http://127.0.0.1:60002 --host 0.0.0.0 --port 9080
+```
 ## Why and What is EPD Disaggregation?
 
 Multimodal Large Language Model (MLLM) inference comprises two distinct phases: **Prefill** and **Decode**. The Prefill phase is computation-intensive, processing the entire input sequence, while the Decode phase is memory-intensive, managing the Key-Value (KV) cache for token generation. Traditionally, these phases are handled within a unified engine, where combined scheduling of prefill and decode batches introduces inefficiencies. To address these challenges, we introduce **Prefill and Decoding (PD) Disaggregation** in SGLang.
