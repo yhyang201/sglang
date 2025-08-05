@@ -26,6 +26,8 @@ python -m sglang.launch_server --model-path Qwen/Qwen2.5-VL-7B-Instruct --host 0
 
 
 python -m sglang.srt.disaggregation.mini_lb --encode http://127.0.0.1:60001 --text http://127.0.0.1:60002 --host 0.0.0.0 --port 9080
+
+wget https://gist.github.com/yhyang201/1dc8143c1476b58aad3ab0ea613741e2 -o send.py && python send.py
 ```
 ## Why and What is EPD Disaggregation?
 
