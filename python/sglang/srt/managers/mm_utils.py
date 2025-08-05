@@ -20,7 +20,7 @@ from sglang.srt.managers.schedule_batch import (
     MultimodalInputs,
     global_server_args_dict,
 )
-from sglang.srt.mem_cache.allocator import FakeAllocator, TokenToKVPoolAllocator
+from sglang.srt.mem_cache.allocator import TokenToKVPoolAllocator
 from sglang.srt.mem_cache.multimodal_cache import (
     MultimodalCache,
     MultiModalStaticCache,
@@ -298,7 +298,7 @@ def init_embedding_cache(max_size: int = 0):
     embedding_cache = MultiModalStaticCache(max_size)
 
 
-def get_embedding_hash(embedding_items: List[MultimodalDataItem]) -> int:
+def combine_hashes(embedding_items: List[MultimodalDataItem]) -> int:
     hash_list = [item.hash for item in embedding_items]
     return hash(tuple(hash_list))
 
@@ -398,7 +398,7 @@ def _get_chunked_prefill_embedding(
         ]
         items_offset = items_offset_list[i]
         assert items_offset is not None, items_offset
-        embedding_items_hash = get_embedding_hash(embedding_items_per_req)
+        embedding_items_hash = combine_hashes(embedding_items_per_req)
         # if all items has been prefixed, we do not need to calculate embedding
         if all([offset_end < prefix_length[i] for _, offset_end in items_offset]):
             continue
@@ -475,8 +475,12 @@ def _get_chunked_prefill_embedding(
             num_token = embedding_per_req.shape[0]
             mm_embedding_pool = mm_embedding_allocator.get_kvcache()
             loc = mm_embedding_allocator.alloc(num_token)
-            mm_embedding_pool.set_mm_embedding(embedding_items_hash, embedding_per_req, loc)
-            embedding_list.append(embedding_per_req) #FIXME(encode's model should early exit)
+            mm_embedding_pool.set_mm_embedding(
+                embedding_items_hash, embedding_per_req, loc
+            )
+            embedding_list.append(
+                embedding_per_req
+            )  # FIXME(encode's model should early exit)
             continue
         embedding_per_req_chunk, _, end_index = get_embedding_chunk(
             embedding=embedding_per_req,
@@ -548,7 +552,7 @@ def get_embedding_and_mask(
     extend_length: List[int],
     items_offset_list: List[List[Tuple[int, int]]],
     disaggregation_mode: Optional[str] = "null",
-    mm_embedding_allocator = None,
+    mm_embedding_allocator=None,
     **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """
@@ -608,7 +612,7 @@ def embed_mm_inputs(
         Modality, Callable[[List[MultimodalDataItem]], torch.Tensor]
     ] = None,
     disaggregation_mode: Optional[str] = "null",
-    mm_embedding_allocator = None,
+    mm_embedding_allocator=None,
     **kwargs,
 ) -> Union[Optional[torch.Tensor], List[torch.Tensor]]:
     """

@@ -1184,11 +1184,11 @@ class ModelRunner:
         if self.mm_embedding_allocator is None:
             assert mm_page_size == 1
             self.mm_embedding_allocator = TokenToKVPoolAllocator(
-                    max_mm_total_num_tokens,
-                    dtype=mm_embedding_dtype,
-                    device=self.device,
-                    kvcache=self.mm_embedding_pool,
-                )
+                max_mm_total_num_tokens,
+                dtype=mm_embedding_dtype,
+                device=self.device,
+                kvcache=self.mm_embedding_pool,
+            )
             # if mm_page_size == 1:
             # Use simple allocator for page size 1
             # if self.server_args.disaggregation_mode == "encode":

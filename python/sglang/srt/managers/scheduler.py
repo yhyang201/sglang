@@ -842,8 +842,8 @@ class Scheduler(
                     gloo_group=self.attn_tp_cpu_group,
                     # tp_rank=self.tp_rank,
                     # scheduler=self
-                    # tp_size=self.tp_size,
-                    # dp_size=1,
+                    tp_size=self.tp_size,
+                    dp_size=1,
                     gpu_id=self.gpu_id,
                     bootstrap_port=self.server_args.disaggregation_bootstrap_port_encode,
                     max_total_num_tokens=self.max_total_num_tokens,

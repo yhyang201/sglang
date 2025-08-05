@@ -409,8 +409,8 @@ class MMEmbeddingPreallocQueue:
         scheduler: Scheduler,
         transfer_queue: MMEmbeddingTransferQueue,
         gloo_group: ProcessGroup,
-        # tp_size: int,
-        # dp_size: int,
+        tp_size: int,
+        dp_size: int,
         gpu_id: int,
         bootstrap_port: int,
         max_total_num_tokens: int,
@@ -429,8 +429,8 @@ class MMEmbeddingPreallocQueue:
         self.transfer_queue = transfer_queue
         self.gloo_group = gloo_group
         self.tp_rank = tp_rank
-        # self.tp_size = tp_size
-        # self.dp_size = dp_size
+        self.tp_size = tp_size
+        self.dp_size = dp_size
         self.gpu_id = gpu_id
         self.bootstrap_port = bootstrap_port
         self.max_total_num_tokens = max_total_num_tokens
@@ -578,21 +578,21 @@ class MMEmbeddingPreallocQueue:
             self.gloo_group,
         )
 
-        for i, (decode_req, poll) in enumerate(zip(self.queue, polls)):
+        for i, (encode_req, poll) in enumerate(zip(self.queue, polls)):
             print(f"{poll=}")
             if poll == KVPoll.Bootstrapping:
                 pass
             elif poll == KVPoll.WaitingForInput:
-                decode_req.waiting_for_input = True
+                encode_req.waiting_for_input = True
             elif poll == KVPoll.Failed:
-                error_message = f"Language handshake failed for request rank={self.tp_rank} {decode_req.req.rid=} {decode_req.req.bootstrap_room=}"
+                error_message = f"Language handshake failed for request rank={self.tp_rank} {encode_req.req.rid=} {encode_req.req.bootstrap_room=}"
                 try:
-                    decode_req.embedding_receiver.failure_exception()
+                    encode_req.embedding_receiver.failure_exception()
                 except Exception as e:
                     error_message += f" with exception {e}"
                 logger.error(error_message)
                 prepare_abort(
-                    decode_req.req,
+                    encode_req.req,
                     error_message,
                     status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
@@ -641,7 +641,7 @@ class MMEmbeddingPreallocQueue:
             allocatable_tokens -= required_tokens_for_request
             mm_embedding_indices = (
                 torch.cat(self._pre_alloc(encode_req.req)).to(torch.int32).cpu().numpy()
-            ) # it's type should be int32
+            )  # it's type should be int32
 
             print(f"{encode_req.req.mm_hashes=}")
 

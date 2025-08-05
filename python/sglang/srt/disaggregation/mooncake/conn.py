@@ -514,18 +514,18 @@ class MooncakeKVManager(BaseKVManager):
     ):
         mm_indices
         item_len = self.kv_args.kv_item_lens[0]
-        
+
         src_addr = self.kv_args.kv_data_ptrs[0] + int(mm_indices[0]) * item_len
-        print(f"{type(dst_mm_ptrs)=}, {dst_mm_ptrs=}" )
+        print(f"{type(dst_mm_ptrs)=}, {dst_mm_ptrs=}")
         print(f"{type(dst_mm_indices)=}, {dst_mm_indices=}")
         print(f"{type(item_len)=}, {item_len=}")
         dst_addr = dst_mm_ptrs[0] + int(dst_mm_indices[0]) * item_len
         length = item_len * len(mm_indices)
-        print(f"{len(dst_mm_ptrs)=} {len(dst_mm_indices)=} {len(mm_indices)=}, {item_len=}")
-        
-        status = self.engine.transfer_sync(
-            session_id, src_addr, dst_addr, length
+        print(
+            f"{len(dst_mm_ptrs)=} {len(dst_mm_indices)=} {len(mm_indices)=}, {item_len=}"
         )
+
+        status = self.engine.transfer_sync(session_id, src_addr, dst_addr, length)
         if status != 0:
             logger.error(
                 f"Embedding transfer failed: session_id={session_id}, status={status}"
@@ -575,7 +575,7 @@ class MooncakeKVManager(BaseKVManager):
                                 local_rank,
                             )
                             break
-                        
+
                     dst_kv_indice = req.dst_kv_indices
 
                     target_rank_registration_info: KVArgsRegisterInfo = (
@@ -823,7 +823,9 @@ class MooncakeKVManager(BaseKVManager):
                     self.decode_kv_args_table[mooncake_session_id] = (
                         KVArgsRegisterInfo.from_zmq(waiting_req_bytes)
                     )
-                    print(f"825 {mooncake_session_id=} {KVArgsRegisterInfo.from_zmq(waiting_req_bytes)=}")
+                    print(
+                        f"825 {mooncake_session_id=} {KVArgsRegisterInfo.from_zmq(waiting_req_bytes)=}"
+                    )
                     with self.session_lock:
                         if mooncake_session_id in self.failed_sessions:
                             self.failed_sessions.remove(mooncake_session_id)
@@ -843,7 +845,9 @@ class MooncakeKVManager(BaseKVManager):
                         TransferInfo.from_zmq(waiting_req_bytes)
                     )
                     print(f"waiting_req_bytes {len(waiting_req_bytes[4])=}")
-                    print(f"transfer_infos {room=} {mooncake_session_id=} {self.transfer_infos[room][mooncake_session_id]=}")
+                    print(
+                        f"transfer_infos {room=} {mooncake_session_id=} {self.transfer_infos[room][mooncake_session_id]=}"
+                    )
                     # NOTE: after bootstrapping we can mark the req as waiting for input
                     if len(self.transfer_infos[room]) == required_dst_info_num:
                         self.update_status(room, KVPoll.WaitingForInput)

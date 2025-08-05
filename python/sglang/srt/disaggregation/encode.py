@@ -20,8 +20,6 @@ Life cycle of a request in the decode server
 from __future__ import annotations
 
 import logging
-import socket
-import struct
 import threading
 import time
 from http import HTTPStatus
@@ -29,7 +27,6 @@ from typing import TYPE_CHECKING, Any, List, Optional
 
 import torch
 
-from sglang.srt.mem_cache.multimodal_cache import PagedMultiModalEmbeddingPool
 from sglang.srt.disaggregation.base import BaseKVManager, KVPoll
 from sglang.srt.disaggregation.utils import (
     FAKE_BOOTSTRAP_HOST,
@@ -43,6 +40,7 @@ from sglang.srt.disaggregation.utils import (
 from sglang.srt.managers.schedule_batch import FINISH_LENGTH, Req, ScheduleBatch
 from sglang.srt.managers.schedule_policy import AddReqResult
 from sglang.srt.managers.schedule_policy_encode_adder import EncodeAdder
+from sglang.srt.mem_cache.multimodal_cache import PagedMultiModalEmbeddingPool
 
 if TYPE_CHECKING:
     pass
@@ -102,15 +100,14 @@ class EncodeBootstrapQueue:
         kv_args.kv_data_ptrs = kv_data_ptrs
         kv_args.kv_data_lens = kv_data_lens
         kv_args.kv_item_lens = kv_item_lens
-        
+
         kv_args.aux_data_ptrs = []
         kv_args.aux_data_lens = []
         kv_args.aux_item_lens = None
-        
+
         kv_args.page_size = 1
         # placeholder
         kv_args.engine_rank = 0
-        
 
         # kv_args.page_size = self.mm_embedding_pool.page_size
         #
@@ -485,7 +482,7 @@ class SchedulerDisaggregationEncodeMixin:
     def process_batch_result_disagg_encode(
         self: Scheduler,
         batch: ScheduleBatch,
-        result: Any, # Union[GenerationBatchResult, EmbeddingBatchResult]
+        result: Any,  # Union[GenerationBatchResult, EmbeddingBatchResult]
         launch_done: Optional[threading.Event] = None,
     ) -> None:
         """
@@ -663,10 +660,15 @@ class SchedulerDisaggregationEncodeMixin:
         """
         Send a embedding to the prefill server
         """
-        
-        from sglang.srt.managers.mm_utils import get_embedding_hash
-        print(f"668 {req.mm_hashes=}")
-        mm_hash = get_embedding_hash(req.multimodal_inputs.mm_items)
-        mm_indices = self.mm_embedding_pool.get_embedding_locs_from_hash(mm_hash).cpu().numpy()
-        print(f"671 {mm_hash=}, {self.mm_embedding_pool.get_mm_embedding(mm_hash)[0][:10]=}")
+
+        from sglang.srt.managers.mm_utils import combine_hashes
+
+        mm_hash = combine_hashes(req.multimodal_inputs.mm_items)
+        print(f"{mm_hash=}")
+        print(f"{[item.hash for item in req.multimodal_inputs.mm_items]=}")
+        # mm_hash = req.multimodal_inputs.mm_items[0].hash
+
+        mm_indices = (
+            self.mm_embedding_pool.get_embedding_locs_from_hash(mm_hash).cpu().numpy()
+        )
         req.disagg_kv_sender.send_embedding(mm_indices)

@@ -213,7 +213,7 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
         self, mm_hash: int, embedding: torch.Tensor, loc: Optional[torch.Tensor] = None
     ) -> bool:
         if mm_hash in self.mm_hash_to_indices:
-            return True #FIXME(yyh): No, we have to free the LOC. 
+            return True  # FIXME(yyh): No, we have to free the LOC.
 
         if embedding.dtype != self.dtype:
             embedding = embedding.to(self.dtype)
