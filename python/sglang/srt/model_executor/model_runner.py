@@ -1129,8 +1129,8 @@ class ModelRunner:
         mm_embedding_dtype = self.dtype
 
         # Calculate maximum number of multimodal tokens based on available memory
-        # Each multimodal embedding has vision_config.hidden_size dimensions
-        hidden_size = self.model_config.vision_config.hidden_size
+        # Each multimodal embedding has hidden_size dimensions
+        hidden_size = self.model_config.hidden_size
 
         # Calculate memory per multimodal token
         mm_token_size = hidden_size * torch._utils._element_size(mm_embedding_dtype)
@@ -1183,29 +1183,35 @@ class ModelRunner:
         # Initialize multimodal embedding allocator
         if self.mm_embedding_allocator is None:
             assert mm_page_size == 1
-            # if mm_page_size == 1:
-            # Use simple allocator for page size 1
-            if self.server_args.disaggregation_mode == "encode":
-                self.mm_embedding_allocator = FakeAllocator(
-                    max_mm_total_num_tokens,
-                    dtype=mm_embedding_dtype,
-                    device=self.device,
-                    kvcache=None,
-                )
-            else:
-                self.mm_embedding_allocator = TokenToKVPoolAllocator(
+            self.mm_embedding_allocator = TokenToKVPoolAllocator(
                     max_mm_total_num_tokens,
                     dtype=mm_embedding_dtype,
                     device=self.device,
                     kvcache=self.mm_embedding_pool,
                 )
-                logger.info(
-                    f"Multimodal memory pool initialized. "
-                    f"max_mm_tokens={max_mm_total_num_tokens}, "
-                    f"hidden_size={hidden_size}, "
-                    f"dtype={mm_embedding_dtype}, "
-                    f"avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
-                )
+            # if mm_page_size == 1:
+            # Use simple allocator for page size 1
+            # if self.server_args.disaggregation_mode == "encode":
+            #     self.mm_embedding_allocator = FakeAllocator(
+            #         max_mm_total_num_tokens,
+            #         dtype=mm_embedding_dtype,
+            #         device=self.device,
+            #         kvcache=None,
+            #     )
+            # else:
+            #     self.mm_embedding_allocator = TokenToKVPoolAllocator(
+            #         max_mm_total_num_tokens,
+            #         dtype=mm_embedding_dtype,
+            #         device=self.device,
+            #         kvcache=self.mm_embedding_pool,
+            #     )
+            #     logger.info(
+            #         f"Multimodal memory pool initialized. "
+            #         f"max_mm_tokens={max_mm_total_num_tokens}, "
+            #         f"hidden_size={hidden_size}, "
+            #         f"dtype={mm_embedding_dtype}, "
+            #         f"avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
+            #     )
             # else:
             #     # Use paged allocator for larger page sizes
             #     if _is_npu:

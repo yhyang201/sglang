@@ -264,16 +264,15 @@ class MooncakeKVManager(BaseKVManager):
         )
 
     def register_buffer_to_engine(self):
-        if self.disaggregation_mode == "prefill":
-            for kv_data_ptr, kv_data_len in zip(
-                self.kv_args.kv_data_ptrs, self.kv_args.kv_data_lens
-            ):
-                self.engine.register(kv_data_ptr, kv_data_len)
+        for kv_data_ptr, kv_data_len in zip(
+            self.kv_args.kv_data_ptrs, self.kv_args.kv_data_lens
+        ):
+            self.engine.register(kv_data_ptr, kv_data_len)
 
-                for aux_data_ptr, aux_data_len in zip(
-                    self.kv_args.aux_data_ptrs, self.kv_args.aux_data_lens
-                ):
-                    self.engine.register(aux_data_ptr, aux_data_len)
+        for aux_data_ptr, aux_data_len in zip(
+            self.kv_args.aux_data_ptrs, self.kv_args.aux_data_lens
+        ):
+            self.engine.register(aux_data_ptr, aux_data_len)
 
     @cache
     def _connect(self, endpoint: str, is_ipv6: bool = False):
@@ -524,11 +523,20 @@ class MooncakeKVManager(BaseKVManager):
 
         if not isinstance(dst_ptrs, list):
             dst_ptrs = [dst_ptrs]
-
+        print(f"527 {dst_ptrs=}")
         dst_ptr = dst_ptrs[0]
+        print(f"{dst_ptr=}, {embedding_numel=}")
+        t0 = time.perf_counter()
+        self.engine.register(embedding_data_ptr, embedding_numel)
+        t1 = time.perf_counter()
+        print(f"register time: {(t1 - t0) * 1000:.3f} ms {embedding_data_ptr=}, {embedding_numel=}, {dst_ptr=} {embedding.shape=}")
         status = self.engine.transfer_sync(
-            session_id, embedding_data_ptr, dst_ptr, embedding_numel
+            session_id, 0, dst_ptr, embedding_numel
         )
+        t2 = time.perf_counter()
+        self.engine.deregister(embedding_data_ptr)
+        t3 = time.perf_counter()
+        print(f"deregister time: {(t3 - t2) * 1000:.3f} ms")
         if status != 0:
             logger.error(
                 f"Embedding transfer failed: session_id={session_id}, status={status}"
@@ -561,7 +569,7 @@ class MooncakeKVManager(BaseKVManager):
                 )
                 polls = []
                 dst_ranks_infos = []
-                local_rank = self.kv_args.engine_ranks
+                local_rank = self.kv_args.engine_rank
                 for req in reqs_to_be_processed:
                     with self.session_lock:
                         if req.mooncake_session_id in self.failed_sessions:
@@ -581,6 +589,7 @@ class MooncakeKVManager(BaseKVManager):
                     target_rank_registration_info: KVArgsRegisterInfo = (
                         self.decode_kv_args_table[req.mooncake_session_id]
                     )
+                    print(target_rank_registration_info)
 
                     ret = self.send_embedding(
                         req.mooncake_session_id,
@@ -821,6 +830,7 @@ class MooncakeKVManager(BaseKVManager):
                     self.decode_kv_args_table[mooncake_session_id] = (
                         KVArgsRegisterInfo.from_zmq(waiting_req_bytes)
                     )
+                    print(f"825 {mooncake_session_id=} {KVArgsRegisterInfo.from_zmq(waiting_req_bytes)=}")
                     with self.session_lock:
                         if mooncake_session_id in self.failed_sessions:
                             self.failed_sessions.remove(mooncake_session_id)
@@ -839,6 +849,8 @@ class MooncakeKVManager(BaseKVManager):
                     self.transfer_infos[room][mooncake_session_id] = (
                         TransferInfo.from_zmq(waiting_req_bytes)
                     )
+                    print(f"waiting_req_bytes {len(waiting_req_bytes[4])=}")
+                    print(f"transfer_infos {room=} {mooncake_session_id=} {self.transfer_infos[room][mooncake_session_id]=}")
                     # NOTE: after bootstrapping we can mark the req as waiting for input
                     if len(self.transfer_infos[room]) == required_dst_info_num:
                         self.update_status(room, KVPoll.WaitingForInput)
@@ -1457,6 +1469,15 @@ class MooncakeKVReceiver(BaseKVReceiver):
                 self.disaggregation_mode == DisaggregationMode.PREFILL
                 or self.disaggregation_mode == DisaggregationMode.TEXT
             ):
+                packed_kv_data_ptrs = b"".join(
+                    struct.pack("Q", ptr) for ptr in self.kv_mgr.kv_args.kv_data_ptrs
+                )
+                # packed_aux_data_ptrs = b"".join(
+                #     struct.pack("Q", ptr) for ptr in self.kv_mgr.kv_args.aux_data_ptrs
+                # )
+                kv_item_len = self.kv_mgr.kv_args.kv_item_lens[0]
+                print(f"{self.kv_mgr.kv_args.kv_data_ptrs=}, {kv_item_len=}")
+                dst_kv_item_len = str(kv_item_len).encode("ascii")
                 sock, lock = self._connect_to_bootstrap_server(bootstrap_info)
                 sock.send_multipart(
                     [
@@ -1464,11 +1485,11 @@ class MooncakeKVReceiver(BaseKVReceiver):
                         self.kv_mgr.local_ip.encode("ascii"),
                         str(self.kv_mgr.rank_port).encode("ascii"),
                         self.session_id.encode("ascii"),
-                        b"",
+                        packed_kv_data_ptrs,
                         b"",
                         dst_tp_rank,
                         dst_tp_size,
-                        "-1".encode("ascii"),
+                        dst_kv_item_len,
                     ]
                 )
 
@@ -1495,11 +1516,17 @@ class MooncakeKVReceiver(BaseKVReceiver):
         return sock, lock
 
     def init(self, kv_indices: npt.NDArray[np.int32], aux_index: Optional[int] = None):
+        print(f"init {kv_indices=}")
         for bootstrap_info in self.bootstrap_infos:
             sock, lock = self._connect_to_bootstrap_server(bootstrap_info)
             is_dummy = bootstrap_info["is_dummy"]
             print(
                 f"kv receiver init sending: {bootstrap_info=} {self.bootstrap_room=} "
+            )
+            print(
+                f"kv receiver init sending: {kv_indices=}"
+                f"{len(kv_indices.tobytes())=}"
+                f"{type(kv_indices)=}"
             )
             with lock:
                 sock.send_multipart(

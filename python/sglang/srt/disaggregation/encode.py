@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, List, Optional
 
 import torch
 
+from sglang.srt.mem_cache.multimodal_cache import PagedMultiModalEmbeddingPool
 from sglang.srt.disaggregation.base import BaseKVManager, KVPoll
 from sglang.srt.disaggregation.utils import (
     FAKE_BOOTSTRAP_HOST,
@@ -61,7 +62,7 @@ class EncodeBootstrapQueue:
 
     def __init__(
         self,
-        # mm_embedding_pool: PagedMultiModalEmbeddingPool,
+        mm_embedding_pool: PagedMultiModalEmbeddingPool,
         # draft_mm_embedding_pool: Optional[PagedMultiModalCache],
         # req_to_metadata_buffer_idx_allocator: ReqToMetadataIdxAllocator,
         # metadata_buffers: EncoderMetadataBuffers,
@@ -73,7 +74,7 @@ class EncodeBootstrapQueue:
         scheduler: Scheduler,
         transfer_backend: TransferBackend,
     ):
-        # self.mm_embedding_pool = mm_embedding_pool
+        self.mm_embedding_pool = mm_embedding_pool
         # self.draft_mm_embedding_pool = draft_mm_embedding_pool
         # self.metadata_buffers = metadata_buffers
         # self.req_to_metadata_buffer_idx_allocator = req_to_metadata_buffer_idx_allocator
@@ -94,13 +95,13 @@ class EncodeBootstrapQueue:
         # embedding_class = EmbeddingArgs()
         kv_args_class = get_kv_class(self.transfer_backend, KVClassType.KVARGS)
         kv_args = kv_args_class()
-        # kv_data_ptrs, kv_data_lens, kv_item_lens = (
-        #     self.mm_embedding_pool.get_mm_buffer_info()
-        # )
+        kv_data_ptrs, kv_data_lens, kv_item_lens = (
+            self.mm_embedding_pool.get_mm_buffer_info()
+        )
 
-        # kv_args.kv_data_ptrs = kv_data_ptrs
-        # kv_args.kv_data_lens = kv_data_lens
-        # kv_args.kv_item_lens = kv_item_lens
+        kv_args.kv_data_ptrs = kv_data_ptrs
+        kv_args.kv_data_lens = kv_data_lens
+        kv_args.kv_item_lens = kv_item_lens
         kv_args.page_size = 1
         # placeholder
         kv_args.engine_rank = 0
@@ -480,7 +481,7 @@ class SchedulerDisaggregationEncodeMixin:
     def process_batch_result_disagg_encode(
         self: Scheduler,
         batch: ScheduleBatch,
-        result: Any,
+        result: Any, # Union[GenerationBatchResult, EmbeddingBatchResult]
         launch_done: Optional[threading.Event] = None,
     ) -> None:
         """
@@ -557,7 +558,7 @@ class SchedulerDisaggregationEncodeMixin:
         print("setting finish reason")
         for i, req in enumerate(batch.reqs):
             req.finished_reason = FINISH_LENGTH(length=0)
-            self.send_embedding_chunk(req)
+            self.send_embedding_chunk(req, result)
 
         # for i, req in enumerate(batch.reqs):
         #     self.mm_embedding_allocator.free(req.cu_mm_embedding_len)
@@ -654,34 +655,17 @@ class SchedulerDisaggregationEncodeMixin:
 
         return transferred_rids
 
-    def send_embedding_chunk(self: Scheduler, req: Req) -> None:
+    def send_embedding_chunk(self: Scheduler, req: Req, result) -> None:
         """
         Send a embedding to the prefill server
         """
-        ...
-        print(f"send_embedding_chunk")
-        s = socket.socket()
-        ip = "127.0.0.1"
-        port = 53487
-        print(f"connecting...")
-        s.connect((ip, port))
-        print(f"connected, sending...")
-
-        embeddings: torch.Tensor = result.logits_output
-
-        shape = embeddings.shape
-        s.sendall(struct.pack("2I", *shape))  # 2个无符号int
-        print(f"{embeddings.shape=}")
-
-        data = embeddings.to(torch.float32).cpu().numpy().tobytes()
-        s.sendall(data)
-        print(f"sent")
-        s.close()
-        print(f"{req=}")
-        # req.disagg_kv_sender.send_embedding(embeddings, [0])
+        
+        embedding = torch.cat(result.logits_output.embeddings, dim=0)
 
         # TODO:
         if req.disagg_kv_sender is not None:
             req.disagg_kv_sender.send_embedding(
-                embeddings=req.embedding, embedding_start_indices=[]
+                embedding=embedding, embedding_start_indices=[]
             )
+        else:
+            raise NotImplementedError()

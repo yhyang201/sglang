@@ -460,7 +460,7 @@ class MMEmbeddingPreallocQueue:
         )
         kv_args.kv_data_ptrs = kv_data_ptrs
         kv_args.kv_data_lens = kv_data_lens
-        kv_args.kv_item_lens = None
+        kv_args.kv_item_lens = kv_item_lens
 
         kv_args.aux_data_ptrs = None
         kv_args.aux_data_lens = None
@@ -640,8 +640,8 @@ class MMEmbeddingPreallocQueue:
 
             allocatable_tokens -= required_tokens_for_request
             mm_embedding_indices = (
-                torch.cat(self._pre_alloc(encode_req.req)).cpu().numpy()
-            )
+                torch.cat(self._pre_alloc(encode_req.req)).to(torch.int32).cpu().numpy()
+            ) # it's type should be int32
 
             print(f"{encode_req.req.mm_hashes=}")
 
@@ -761,7 +761,7 @@ class SchedulerDisaggregationPrefillMixin:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
             if self.server_args.encoder_disaggregated:
-                # self.process_prefill_queue_with_encoder_disaggregated()
+                self.process_prefill_queue_with_encoder_disaggregated()
                 self.poll_req_to_waiting_queue()
             else:
                 self.waiting_queue.extend(
@@ -1105,11 +1105,11 @@ class SchedulerDisaggregationPrefillMixin:
         process text-model prefill queue when encoder if disaggregated
         """
         # try to resume retracted requests if there are enough space for another `num_reserved_decode_tokens` decode steps
-        resumed_reqs = self.disagg_prefill_prealloc_queue.resume_retracted_reqs()
-        self.waiting_queue.extend(resumed_reqs)
-        if len(self.disagg_prefill_prealloc_queue.retracted_queue) > 0:
-            # if there are still retracted requests, we do not allocate new requests
-            return
+        # resumed_reqs = self.disagg_prefill_prealloc_queue.resume_retracted_reqs()
+        # self.waiting_queue.extend(resumed_reqs)
+        # if len(self.disagg_prefill_prealloc_queue.retracted_queue) > 0:
+        #     # if there are still retracted requests, we do not allocate new requests
+        #     return
 
         req_conns = self.disagg_prefill_prealloc_queue.pop_preallocated()
         self.disagg_prefill_transfer_queue.extend(req_conns)
