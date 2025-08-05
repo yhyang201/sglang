@@ -25,7 +25,6 @@ from collections import deque
 from http import HTTPStatus
 from typing import TYPE_CHECKING, List, Optional
 
-import numpy as np
 import torch
 
 from sglang.srt.disaggregation.base import BaseKVManager, KVPoll
@@ -310,7 +309,7 @@ class MMEmbeddingTransferQueue:
         indices_to_remove = set()
         for i, (embedding_req, poll) in enumerate(zip(self.queue, polls)):
             if poll == KVPoll.Failed:
-                error_message = f"Decode transfer failed for request rank={self.tp_rank} {embedding_req.rid=} {embedding_req.bootstrap_room=}"
+                error_message = f"Encode transfer failed for request rank={self.tp_rank} {embedding_req.req.rid=} {embedding_req.req.bootstrap_room=}"
                 try:
                     embedding_req.embedding_receiver.failure_exception()
                 except Exception as e:
@@ -731,7 +730,7 @@ class SchedulerDisaggregationPrefillMixin:
             req.bootstrap_room
             for req in self.waiting_visual_queue
             if req.bootstrap_room
-            in [req.bootstrap_room for req in self.waiting_preallocate_queue]
+               in [req.bootstrap_room for req in self.waiting_preallocate_queue]
         ]
 
         self.waiting_visual_queue = [
