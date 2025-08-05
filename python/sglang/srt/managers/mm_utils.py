@@ -379,6 +379,7 @@ def _get_chunked_prefill_embedding(
     items_offset_list: List[List[Tuple[int, int]]],
     disaggregation_mode: Optional[str] = "null",
     mm_embedding_pool: Optional[PagedMultiModalEmbeddingPool] = None,
+    mm_embedding_allocator=None,
 ) -> Optional[torch.Tensor]:
     """
     :param mm_embedding_pool: If not none, mm embeddings are already presented in this pool
@@ -470,7 +471,13 @@ def _get_chunked_prefill_embedding(
 
         assert embedding_per_req is not None
         if disaggregation_mode == "encode":
-            return embedding_per_req
+            assert isinstance(embedding_per_req, torch.Tensor)
+            num_token = embedding_per_req.shape[0]
+            mm_embedding_pool = mm_embedding_allocator.get_kvcache()
+            loc = mm_embedding_allocator.alloc(num_token)
+            mm_embedding_pool.set_mm_embedding(embedding_items_hash, embedding_per_req, loc)
+            embedding_list.append(embedding_per_req) #FIXME(encode's model should early exit)
+            continue
         embedding_per_req_chunk, _, end_index = get_embedding_chunk(
             embedding=embedding_per_req,
             extend_prefix_len=prefix_length[i],
@@ -541,6 +548,7 @@ def get_embedding_and_mask(
     extend_length: List[int],
     items_offset_list: List[List[Tuple[int, int]]],
     disaggregation_mode: Optional[str] = "null",
+    mm_embedding_allocator = None,
     **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """
@@ -575,6 +583,7 @@ def get_embedding_and_mask(
             extend_length,
             items_offset_list,
             disaggregation_mode,
+            mm_embedding_allocator=mm_embedding_allocator,
             **kwargs,
         )
         if embedding is None:
@@ -599,6 +608,7 @@ def embed_mm_inputs(
         Modality, Callable[[List[MultimodalDataItem]], torch.Tensor]
     ] = None,
     disaggregation_mode: Optional[str] = "null",
+    mm_embedding_allocator = None,
     **kwargs,
 ) -> Union[Optional[torch.Tensor], List[torch.Tensor]]:
     """
@@ -673,6 +683,7 @@ def embed_mm_inputs(
                 extend_length=extend_seq_lens,
                 items_offset_list=items_offsets,
                 disaggregation_mode=disaggregation_mode,
+                mm_embedding_allocator=mm_embedding_allocator,
                 **kwargs,
             )
             # print(f"{embedding.shape=}")
@@ -759,6 +770,7 @@ def general_mm_embed_routine(
             input_ids=input_ids,
             input_embedding=embed_tokens,
             disaggregation_mode=disaggregation_mode,
+            mm_embedding_allocator=forward_batch.mm_embedding_allocator,
             **kwargs,
         )
         # once used, mm_inputs is useless, considering chunked-prefill is disabled for multimodal models

@@ -257,7 +257,8 @@ class TpModelWorker:
         Union[LogitsProcessorOutput, torch.Tensor], Optional[torch.Tensor], bool
     ]:
         forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
-
+        # FIXME(yyh): Temporary solution, needs proper design
+        forward_batch.mm_embedding_allocator = model_worker_batch.mm_embedding_allocator
         pp_proxy_tensors = None
         if not self.pp_group.is_first_rank:
             pp_proxy_tensors = PPProxyTensors(

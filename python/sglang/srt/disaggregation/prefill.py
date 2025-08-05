@@ -462,8 +462,8 @@ class MMEmbeddingPreallocQueue:
         kv_args.kv_data_lens = kv_data_lens
         kv_args.kv_item_lens = kv_item_lens
 
-        kv_args.aux_data_ptrs = None
-        kv_args.aux_data_lens = None
+        kv_args.aux_data_ptrs = []
+        kv_args.aux_data_lens = []
         kv_args.aux_item_lens = None
 
         #
@@ -1108,7 +1108,7 @@ class SchedulerDisaggregationPrefillMixin:
         # resumed_reqs = self.disagg_prefill_prealloc_queue.resume_retracted_reqs()
         # self.waiting_queue.extend(resumed_reqs)
         # if len(self.disagg_prefill_prealloc_queue.retracted_queue) > 0:
-        #     # if there are still retracted requests, we do not allocate new requests
+        #     if there are still retracted requests, we do not allocate new requests
         #     return
 
         req_conns = self.disagg_prefill_prealloc_queue.pop_preallocated()

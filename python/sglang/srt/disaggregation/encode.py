@@ -102,11 +102,15 @@ class EncodeBootstrapQueue:
         kv_args.kv_data_ptrs = kv_data_ptrs
         kv_args.kv_data_lens = kv_data_lens
         kv_args.kv_item_lens = kv_item_lens
+        
+        kv_args.aux_data_ptrs = []
+        kv_args.aux_data_lens = []
+        kv_args.aux_item_lens = None
+        
         kv_args.page_size = 1
         # placeholder
         kv_args.engine_rank = 0
-        kv_args.kv_data_ptrs = []
-        kv_args.kv_data_lens = []
+        
 
         # kv_args.page_size = self.mm_embedding_pool.page_size
         #
@@ -558,7 +562,7 @@ class SchedulerDisaggregationEncodeMixin:
         print("setting finish reason")
         for i, req in enumerate(batch.reqs):
             req.finished_reason = FINISH_LENGTH(length=0)
-            self.send_embedding_chunk(req, result)
+            self.send_embedding_chunk(req)
 
         # for i, req in enumerate(batch.reqs):
         #     self.mm_embedding_allocator.free(req.cu_mm_embedding_len)
@@ -655,17 +659,14 @@ class SchedulerDisaggregationEncodeMixin:
 
         return transferred_rids
 
-    def send_embedding_chunk(self: Scheduler, req: Req, result) -> None:
+    def send_embedding_chunk(self: Scheduler, req: Req) -> None:
         """
         Send a embedding to the prefill server
         """
         
-        embedding = torch.cat(result.logits_output.embeddings, dim=0)
-
-        # TODO:
-        if req.disagg_kv_sender is not None:
-            req.disagg_kv_sender.send_embedding(
-                embedding=embedding, embedding_start_indices=[]
-            )
-        else:
-            raise NotImplementedError()
+        from sglang.srt.managers.mm_utils import get_embedding_hash
+        print(f"668 {req.mm_hashes=}")
+        mm_hash = get_embedding_hash(req.multimodal_inputs.mm_items)
+        mm_indices = self.mm_embedding_pool.get_embedding_locs_from_hash(mm_hash).cpu().numpy()
+        print(f"671 {mm_hash=}, {self.mm_embedding_pool.get_mm_embedding(mm_hash)[0][:10]=}")
+        req.disagg_kv_sender.send_embedding(mm_indices)

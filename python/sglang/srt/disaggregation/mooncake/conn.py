@@ -71,7 +71,7 @@ class TransferKVChunk:
 @dataclasses.dataclass
 class TransferEmbeddingChunk:
     room: int
-    embedding: torch.Tensor
+    mm_indices: npt.NDArray[np.int32]
 
 
 # decode
@@ -508,35 +508,24 @@ class MooncakeKVManager(BaseKVManager):
     def send_embedding(
         self,
         session_id: str,
-        embedding: torch.Tensor,
-        dst_ptrs: list[int],
+        mm_indices: npt.NDArray[np.int32],
+        dst_mm_ptrs: List[int],
+        dst_mm_indices: npt.NDArray[np.int32],
     ):
-        """
-        Send the embedding tensor to the remote server using MooncakeTransferEngine.
-        """
-        # embedding: torch.Tensor, shape [N, D] or [D]
-        if not torch.is_tensor(embedding):
-            raise ValueError("embedding must be a torch.Tensor")
-        embedding = embedding.contiguous()
-        embedding_data_ptr = embedding.data_ptr()
-        embedding_numel = embedding.numel() * embedding.element_size()
-
-        if not isinstance(dst_ptrs, list):
-            dst_ptrs = [dst_ptrs]
-        print(f"527 {dst_ptrs=}")
-        dst_ptr = dst_ptrs[0]
-        print(f"{dst_ptr=}, {embedding_numel=}")
-        t0 = time.perf_counter()
-        self.engine.register(embedding_data_ptr, embedding_numel)
-        t1 = time.perf_counter()
-        print(f"register time: {(t1 - t0) * 1000:.3f} ms {embedding_data_ptr=}, {embedding_numel=}, {dst_ptr=} {embedding.shape=}")
+        mm_indices
+        item_len = self.kv_args.kv_item_lens[0]
+        
+        src_addr = self.kv_args.kv_data_ptrs[0] + int(mm_indices[0]) * item_len
+        print(f"{type(dst_mm_ptrs)=}, {dst_mm_ptrs=}" )
+        print(f"{type(dst_mm_indices)=}, {dst_mm_indices=}")
+        print(f"{type(item_len)=}, {item_len=}")
+        dst_addr = dst_mm_ptrs[0] + int(dst_mm_indices[0]) * item_len
+        length = item_len * len(mm_indices)
+        print(f"{len(dst_mm_ptrs)=} {len(dst_mm_indices)=} {len(mm_indices)=}, {item_len=}")
+        
         status = self.engine.transfer_sync(
-            session_id, 0, dst_ptr, embedding_numel
+            session_id, src_addr, dst_addr, length
         )
-        t2 = time.perf_counter()
-        self.engine.deregister(embedding_data_ptr)
-        t3 = time.perf_counter()
-        print(f"deregister time: {(t3 - t2) * 1000:.3f} ms")
         if status != 0:
             logger.error(
                 f"Embedding transfer failed: session_id={session_id}, status={status}"
@@ -586,15 +575,19 @@ class MooncakeKVManager(BaseKVManager):
                                 local_rank,
                             )
                             break
+                        
+                    dst_kv_indice = req.dst_kv_indices
+
                     target_rank_registration_info: KVArgsRegisterInfo = (
                         self.decode_kv_args_table[req.mooncake_session_id]
                     )
                     print(target_rank_registration_info)
 
                     ret = self.send_embedding(
-                        req.mooncake_session_id,
-                        embedding_chunk.embedding,
-                        target_rank_registration_info.dst_kv_ptrs,
+                        session_id=req.mooncake_session_id,
+                        mm_indices=embedding_chunk.mm_indices,
+                        dst_mm_ptrs=target_rank_registration_info.dst_kv_ptrs,
+                        dst_mm_indices=dst_kv_indice,
                     )
                     if ret != 0:
                         with self.session_lock:
@@ -951,7 +944,7 @@ class MooncakeKVManager(BaseKVManager):
     def add_transfer_embedding_request(
         self,
         bootstrap_room: int,
-        embedding: torch.Tensor,
+        mm_indices: npt.NDArray[np.int32],
     ):
         assert self.disaggregation_mode == DisaggregationMode.ENCODE
         if (
@@ -979,7 +972,7 @@ class MooncakeKVManager(BaseKVManager):
         self.transfer_queues[shard_idx].put(
             TransferEmbeddingChunk(
                 room=bootstrap_room,
-                embedding=embedding,
+                mm_indices=mm_indices,
             )
         )
 
@@ -1223,13 +1216,13 @@ class MooncakeKVSender(BaseKVSender):
             )
         raise KVTransferError(self.bootstrap_room, failure_reason)
 
-    def send_embedding(self, embedding: torch.Tensor, embedding_start_indices=None):
+    def send_embedding(self, mm_indices: npt.NDArray[np.int32]):
         """
         Send the embedding tensor to the remote server using MooncakeKVManager.
         """
         self.kv_mgr.add_transfer_embedding_request(
             self.bootstrap_room,
-            embedding,
+            mm_indices,
         )
 
 

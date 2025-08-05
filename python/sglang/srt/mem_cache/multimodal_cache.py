@@ -171,8 +171,8 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
         """Returns the pointer, size, and item length of the multimodal buffer."""
         return (
             [self.mm_buffer.data_ptr()],
-            self.mm_buffer.nbytes,
-            [self.hidden_size * self.mm_buffer.element_size()],
+            [self.mm_buffer.nbytes],
+            [self.mm_buffer[0].nbytes * self.page_size],
         )
 
     def get_pointers_from_locs(self, locs: torch.Tensor) -> torch.Tensor:
@@ -213,7 +213,7 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
         self, mm_hash: int, embedding: torch.Tensor, loc: Optional[torch.Tensor] = None
     ) -> bool:
         if mm_hash in self.mm_hash_to_indices:
-            return True
+            return True #FIXME(yyh): No, we have to free the LOC. 
 
         if embedding.dtype != self.dtype:
             embedding = embedding.to(self.dtype)

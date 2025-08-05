@@ -867,7 +867,7 @@ class Scheduler(
             self.disagg_encode_inflight_queue: List[Req] = []
             # The encode requests pushing embeddings
             self.disagg_encode_bootstrap_queue = EncodeBootstrapQueue(
-                # mm_embedding_pool=self.mm_embedding_allocator.get_kvcache(),
+                mm_embedding_pool=self.mm_embedding_pool,
                 # draft_mm_embedding_pool=(
                 #     None
                 #     if self.draft_worker is None
@@ -1761,6 +1761,8 @@ class Scheduler(
                     self.running_batch.merge_batch(self.last_batch)
 
         new_batch = self.get_new_batch_prefill()
+        if new_batch is not None:
+            print(f"1765 {new_batch=}")
 
         need_dp_attn_preparation = require_mlp_sync(self.server_args)
 
@@ -2011,6 +2013,8 @@ class Scheduler(
                 self.tp_worker.set_hicache_consumer(
                     model_worker_batch.hicache_consumer_index
                 )
+                # FIXME(yyh): Temporary solution, needs proper design
+                model_worker_batch.mm_embedding_allocator = self.mm_embedding_allocator
                 skip_sample = self.server_args.disaggregation_mode == "encode"
                 if self.pp_group.is_last_rank:
                     logits_output, next_token_ids, can_run_cuda_graph = (
