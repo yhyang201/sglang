@@ -248,6 +248,7 @@ class DecodePreallocQueue:
                 bootstrap_addr=f"{req.bootstrap_host}:{req.bootstrap_port}",
                 bootstrap_room=req.bootstrap_room,
                 data_parallel_rank=req.data_parallel_rank,
+                disaggregation_mode=DisaggregationMode.DECODE,
             )
 
             self.queue.append(

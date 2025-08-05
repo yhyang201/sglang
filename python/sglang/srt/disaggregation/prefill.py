@@ -730,7 +730,7 @@ class SchedulerDisaggregationPrefillMixin:
             req.bootstrap_room
             for req in self.waiting_visual_queue
             if req.bootstrap_room
-               in [req.bootstrap_room for req in self.waiting_preallocate_queue]
+            in [req.bootstrap_room for req in self.waiting_preallocate_queue]
         ]
 
         self.waiting_visual_queue = [

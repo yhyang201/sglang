@@ -1363,14 +1363,14 @@ class Scheduler(
     def _add_request_to_queue(self, req: Req):
         req.queue_time_start = time.perf_counter()
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            if req.contains_mm_input():
-                self.disagg_prefill_bootstrap_queue.add(
-                    req, self.model_config.num_key_value_heads
-                )
-                if self.server_args.encoder_disaggregated:
+            if self.server_args.encoder_disaggregated:
+                if req.contains_mm_input():
                     self.disagg_prefill_prealloc_queue.add(req)
-            else:
-                self.waiting_queue.append(req)
+                else:
+                    self.waiting_queue.append(req)
+            self.disagg_prefill_bootstrap_queue.add(
+                req, self.model_config.num_key_value_heads
+            )
         elif self.disaggregation_mode == DisaggregationMode.TEXT:
             if req.contains_mm_input():
                 self.disagg_prefill_prealloc_queue.add(req)
