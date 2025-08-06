@@ -52,9 +52,9 @@ Currently, we support Mooncake and NIXL as the transfer engine.
 
 ```bash
 # start an encode server
-$ python -m sglang.launch_server --model-path Qwen/Qwen2-VL-7B-Instruct --host 0.0.0.0  --disaggregation-mode encode --port 60001
+$ python -m sglang.launch_server --model-path Qwen/Qwen2-VL-7B-Instruct --host 0.0.0.0  --disaggregation-mode encode --port 60001 --disaggregation-ib-device ${device_name}
 # start a text server
-$ python -m sglang.launch_server --model-path Qwen/Qwen2-VL-7B-Instruct --host 0.0.0.0  --disaggregation-mode text --port 60002 --encoder-disaggregated
+$ python -m sglang.launch_server --model-path Qwen/Qwen2-VL-7B-Instruct --host 0.0.0.0  --disaggregation-mode text --port 60002 --encoder-disaggregated --disaggregation-ib-device ${device_name}
 # mini_lb
 $ python -m sglang.srt.disaggregation.mini_lb --encode http://127.0.0.1:60001 --text http://127.0.0.1:60002 --host 0.0.0.0 --port 9080
 ```
@@ -64,11 +64,11 @@ $ python -m sglang.srt.disaggregation.mini_lb --encode http://127.0.0.1:60001 --
 
 ```bash
 # start an encode server
-$ python -m sglang.launch_server --model-path Qwen/Qwen2-VL-7B-Instruct --host 0.0.0.0  --disaggregation-mode encode --port 60001
+$ python -m sglang.launch_server --model-path Qwen/Qwen2-VL-7B-Instruct --host 0.0.0.0  --disaggregation-mode encode --port 60001 --disaggregation-ib-device ${device_name}
 # start a prefill server, make sure to set --encoder-disaggregated
-$ python -m sglang.launch_server --model-path Qwen/Qwen2-VL-7B-Instruct --host 0.0.0.0  --disaggregation-mode prefill --port 60002 --encoder-disaggregated
+$ python -m sglang.launch_server --model-path Qwen/Qwen2-VL-7B-Instruct --host 0.0.0.0  --disaggregation-mode prefill --port 60002 --encoder-disaggregated --disaggregation-ib-device ${device_name}
 # start a decode server
-$ python -m sglang.launch_server --model-path Qwen/Qwen2-VL-7B-Instruct --host 0.0.0.0  --disaggregation-mode decode --port 60003
+$ python -m sglang.launch_server --model-path Qwen/Qwen2-VL-7B-Instruct --host 0.0.0.0  --disaggregation-mode decode --port 60003 --disaggregation-ib-device ${device_name}
 # mini_lb
 $ python -m sglang.srt.disaggregation.mini_lb --encode http://127.0.0.1:60001 --prefill http://127.0.0.1:60002 --decode http://127.0.0.1:60003 --host 0.0.0.0 --port 9080
 ```
