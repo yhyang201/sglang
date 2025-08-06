@@ -909,8 +909,9 @@ class SchedulerDisaggregationPrefillMixin:
                     mm_hash = MultimodalCache.combine_hashes(
                         [item.hash for item in req.multimodal_inputs.mm_items]
                     )
-                    loc = self.mm_embedding_pool.free(mm_hash)
-                    self.mm_embedding_allocator.free(loc)
+                    loc = self.mm_embedding_pool.free(
+                        mm_hash, self.mm_embedding_allocator
+                    )
 
                 if logits_output.hidden_states is not None:
                     last_hidden_index = (

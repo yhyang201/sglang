@@ -603,8 +603,9 @@ class SchedulerDisaggregationEncodeMixin:
                     mm_hash = MultimodalCache.combine_hashes(
                         [item.hash for item in req.multimodal_inputs.mm_items]
                     )
-                    loc = self.mm_embedding_pool.free(mm_hash)
-                    self.mm_embedding_allocator.free(loc)
+                    loc = self.mm_embedding_pool.free(
+                        mm_hash, self.mm_embedding_allocator
+                    )
                 # self.tree_cache.cache_finished_req(req)  # unlock the tree
                 req.finished_reason = FINISH_LENGTH(length=0)
                 # FIXME: clean up req's data in transfer engine
@@ -622,8 +623,9 @@ class SchedulerDisaggregationEncodeMixin:
                     mm_hash = MultimodalCache.combine_hashes(
                         [item.hash for item in req.multimodal_inputs.mm_items]
                     )
-                    loc = self.mm_embedding_pool.free(mm_hash)
-                    self.mm_embedding_allocator.free(loc)
+                    loc = self.mm_embedding_pool.free(
+                        mm_hash, self.mm_embedding_allocator
+                    )
                 # self.tree_cache.cache_finished_req(req)  # unlock the tree
                 prepare_abort(
                     req, error_message, status_code=HTTPStatus.INTERNAL_SERVER_ERROR

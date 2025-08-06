@@ -1,4 +1,5 @@
 import abc
+from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -161,6 +162,7 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
         self.page_size = page_size
 
         self.mm_hash_to_indices: Dict[int, torch.Tensor] = {}
+        self.mm_hash_count = Counter()
 
         self.page_size = page_size
         self.dtype = dtype
@@ -267,8 +269,10 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
         mm_embedding_allocator: BaseTokenToKVPoolAllocator,
     ) -> bool:
         if mm_hash in self.mm_hash_to_indices:
+            self.mm_hash_count[mm_hash] += 1
             return True
 
+        self.mm_hash_count[mm_hash] = 1
         loc = mm_embedding_allocator.alloc(embedding.shape[0])
         if loc is None:
             raise RuntimeError("Out of memory—needs to be handled.")
@@ -293,8 +297,10 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
         num_tokens: int,
         mm_embedding_allocator: BaseTokenToKVPoolAllocator,
     ) -> torch.Tensor:
-        # if mm_hash in self.mm_hash_to_indices:
-        #     return True
+        if mm_hash in self.mm_hash_to_indices:
+            self.mm_hash_count[mm_hash] += 1
+            return self.mm_hash_to_indices[mm_hash]
+        self.mm_hash_count[mm_hash] = 1
         # Even if mm_hash exists in mm_hash_to_indices, it should still return loc
         # caching should be handled elsewhere
         loc = mm_embedding_allocator.alloc(num_tokens)
@@ -308,11 +314,17 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
     def has(self, mm_hash: int) -> bool:
         return mm_hash in self.mm_hash_to_indices
 
-    def free(self, mm_hash: int) -> torch.Tensor:
+    def free(
+        self, mm_hash: int, mm_embedding_allocator: BaseTokenToKVPoolAllocator
+    ) -> torch.Tensor:
         if mm_hash in self.mm_hash_to_indices:
-            indices = self.mm_hash_to_indices.pop(mm_hash)
-            self.used_size -= indices.size(0)
-            return indices
+            self.mm_hash_count[mm_hash] -= 1
+            if self.mm_hash_count[mm_hash] <= 0:
+                del self.mm_hash_count[mm_hash]
+                indices = self.mm_hash_to_indices.pop(mm_hash)
+                self.used_size -= indices.size(0)
+                mm_embedding_allocator.free(indices)
+                return indices
         return torch.tensor([])
 
     def clear(self):
