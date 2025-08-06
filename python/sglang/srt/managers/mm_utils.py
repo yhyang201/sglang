@@ -398,18 +398,13 @@ def _get_chunked_prefill_embedding(
 
         embedding_per_req = embedding_cache.get_mm_embedding(mm_hashes)
         if embedding_per_req is None:
-            # print(f"mm_utils 402 | {mm_embedding_pool=}")
-            if mm_embedding_pool is None:
-                mm_embedding_pool = mm_embedding_allocator.get_kvcache()  # temp
-            # print(f"mm_utils 405 | {mm_embedding_pool=}")
-
             if (
                 disaggregation_mode == "prefill"
                 and global_server_args_dict["encoder_disaggregated"]
                 or disaggregation_mode == "text"
             ):
+                mm_embedding_pool = mm_embedding_allocator.get_kvcache()
                 assert mm_embedding_pool
-                print(f"Getting embedding from pool...")
                 embedding_per_req = mm_embedding_pool.get_mm_embedding(
                     mm_hashes, combined_hash
                 )
@@ -511,7 +506,6 @@ def get_embedding_and_mask(
     items_offset_list: List[List[Tuple[int, int]]],
     disaggregation_mode: Optional[str] = "null",
     mm_embedding_allocator=None,
-    **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """
     Generate multimodal embeddings and create a mask for identifying their positions in the input sequence.
@@ -546,7 +540,6 @@ def get_embedding_and_mask(
             items_offset_list,
             disaggregation_mode,
             mm_embedding_allocator=mm_embedding_allocator,
-            **kwargs,
         )
         if embedding is None:
             return None, None
@@ -646,7 +639,6 @@ def embed_mm_inputs(
                 items_offset_list=items_offsets,
                 disaggregation_mode=disaggregation_mode,
                 mm_embedding_allocator=mm_embedding_allocator,
-                **kwargs,
             )
             # print(f"{embedding.shape=}")
             embeddings += [embedding]

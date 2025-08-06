@@ -566,7 +566,6 @@ class Qwen2VLForConditionalGeneration(nn.Module):
             forward_batch=forward_batch,
             language_model=self.model,
             multimodal_model=self,
-            mm_embedding_pool=forward_batch.mm_embedding_pool,
             positions=positions,
         )
         if self.is_encoder:

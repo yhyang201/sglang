@@ -497,6 +497,7 @@ class Req:
 
         # For multimodal inputs
         self.multimodal_inputs: Optional[MultimodalInputs] = None
+        self.mm_embedding_indices: Optional[np.ndarray] = None
 
         # Prefix info
         # The indices to kv cache for the shared prefix.
