@@ -16,7 +16,7 @@ docker run -it \
 -v /dev/infiniband:/dev/infiniband  \
 -v /sys/class/infiniband:/sys/class/infiniband  \
 -v /usr/sbin/show_gids:/usr/sbin/show_gids:ro  \
-lmsysorg/sglang:latest /bin/bash 
+lmsysorg/sglang:latest /bin/bash
 
 
 python -m sglang.launch_server --model-path Qwen/Qwen2.5-VL-7B-Instruct --host 0.0.0.0  --disaggregation-mode encode --port 60001 --disaggregation-ib-device  mlx5_0

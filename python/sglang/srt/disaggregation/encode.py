@@ -40,7 +40,10 @@ from sglang.srt.disaggregation.utils import (
 from sglang.srt.managers.schedule_batch import FINISH_LENGTH, Req, ScheduleBatch
 from sglang.srt.managers.schedule_policy import AddReqResult
 from sglang.srt.managers.schedule_policy_encode_adder import EncodeAdder
-from sglang.srt.mem_cache.multimodal_cache import PagedMultiModalEmbeddingPool
+from sglang.srt.mem_cache.multimodal_cache import (
+    MultimodalCache,
+    PagedMultiModalEmbeddingPool,
+)
 
 if TYPE_CHECKING:
     pass
@@ -661,9 +664,9 @@ class SchedulerDisaggregationEncodeMixin:
         Send a embedding to the prefill server
         """
 
-        from sglang.srt.managers.mm_utils import combine_hashes
-
-        mm_hash = combine_hashes(req.multimodal_inputs.mm_items)
+        mm_hash = MultimodalCache.combine_hashes(
+            [item.hash for item in req.multimodal_inputs.mm_items]
+        )
         print(f"{mm_hash=}")
         print(f"{[item.hash for item in req.multimodal_inputs.mm_items]=}")
         # mm_hash = req.multimodal_inputs.mm_items[0].hash

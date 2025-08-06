@@ -550,18 +550,19 @@ class Qwen2VLForConditionalGeneration(nn.Module):
         if self.is_encoder:
             pass
         else:
+            print(f"{positions=}")
             if self.is_mrope_enabled:
                 positions = forward_batch.mrope_positions
-
-            if not (
-                forward_batch.forward_mode.is_decode()
-                or not forward_batch.contains_image_inputs()
-            ):
-                if self.is_mrope_enabled:
+                if not (
+                    forward_batch.forward_mode.is_decode()
+                    or not forward_batch.contains_image_inputs()
+                ):
                     assert positions.ndim == 2 and positions.size(0) == 3, (
                         "multimodal section rotary embedding requires "
                         f"(3, seq_len) positions, but got {positions.size()}"
                     )
+            print(f"{forward_batch.mrope_positions=}")
+            print(f"{self.is_mrope_enabled=}")
 
         hidden_states = general_mm_embed_routine(
             input_ids=input_ids,

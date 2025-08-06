@@ -676,7 +676,7 @@ class Scheduler(
             )
         )
 
-        embedding_cache_size = int(os.environ.get("SGLANG_VLM_CACHE_SIZE_MB", "100"))
+        embedding_cache_size = int(os.environ.get("SGLANG_MM_CACHE_SIZE_MB", "100"))
         init_embedding_cache(embedding_cache_size * 1024 * 1024)
 
     def init_profier(self):
@@ -1362,20 +1362,22 @@ class Scheduler(
 
     def _add_request_to_queue(self, req: Req):
         req.queue_time_start = time.perf_counter()
-        if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            if self.server_args.encoder_disaggregated:
+        if (
+            self.disaggregation_mode == DisaggregationMode.PREFILL
+            or self.disaggregation_mode == DisaggregationMode.TEXT
+        ):
+            if (
+                self.server_args.encoder_disaggregated
+                or self.disaggregation_mode == DisaggregationMode.TEXT
+            ):
                 if req.contains_mm_input():
                     self.disagg_prefill_prealloc_queue.add(req)
                 else:
                     self.waiting_queue.append(req)
-            self.disagg_prefill_bootstrap_queue.add(
-                req, self.model_config.num_key_value_heads
-            )
-        elif self.disaggregation_mode == DisaggregationMode.TEXT:
-            if req.contains_mm_input():
-                self.disagg_prefill_prealloc_queue.add(req)
-            else:
-                self.waiting_queue.append(req)
+            if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                self.disagg_prefill_bootstrap_queue.add(
+                    req, self.model_config.num_key_value_heads
+                )
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
             self.disagg_decode_prealloc_queue.add(req)
         elif self.disaggregation_mode == DisaggregationMode.ENCODE:
@@ -1761,8 +1763,6 @@ class Scheduler(
                     self.running_batch.merge_batch(self.last_batch)
 
         new_batch = self.get_new_batch_prefill()
-        if new_batch is not None:
-            print(f"1765 {new_batch=}")
 
         need_dp_attn_preparation = require_mlp_sync(self.server_args)
 

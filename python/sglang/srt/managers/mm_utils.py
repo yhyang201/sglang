@@ -4,8 +4,6 @@ Multi-modality utils
 
 import hashlib
 import pickle
-import socket
-import struct
 from abc import abstractmethod
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
@@ -20,7 +18,6 @@ from sglang.srt.managers.schedule_batch import (
     MultimodalInputs,
     global_server_args_dict,
 )
-from sglang.srt.mem_cache.allocator import TokenToKVPoolAllocator
 from sglang.srt.mem_cache.multimodal_cache import (
     MultimodalCache,
     MultiModalStaticCache,
@@ -298,11 +295,6 @@ def init_embedding_cache(max_size: int = 0):
     embedding_cache = MultiModalStaticCache(max_size)
 
 
-def combine_hashes(embedding_items: List[MultimodalDataItem]) -> int:
-    hash_list = [item.hash for item in embedding_items]
-    return hash(tuple(hash_list))
-
-
 def get_embedding_chunk(
     embedding: torch.Tensor,
     extend_prefix_len: int,
@@ -396,77 +388,30 @@ def _get_chunked_prefill_embedding(
         embedding_items_per_req = embedding_items[
             cu_items_size[i] : cu_items_size[i + 1]
         ]
+        mm_hashes = [item.hash for item in embedding_items_per_req]
+        combined_hash = embedding_cache.combine_hashes(mm_hashes)
         items_offset = items_offset_list[i]
         assert items_offset is not None, items_offset
-        embedding_items_hash = combine_hashes(embedding_items_per_req)
         # if all items has been prefixed, we do not need to calculate embedding
         if all([offset_end < prefix_length[i] for _, offset_end in items_offset]):
             continue
-        embedding_per_req = embedding_cache.get_mm_embedding(embedding_items_hash)
+
+        embedding_per_req = embedding_cache.get_mm_embedding(mm_hashes)
+        print(f"{embedding_per_req=}")
         if embedding_per_req is None:
-            print(f"{mm_embedding_pool=}")
             if mm_embedding_pool is not None and disaggregation_mode != "encode":
-                s = socket.socket()
-                ip = "127.0.0.1"
-                port = 53487
-                print(f"start receiving....")
-                s.bind((ip, port))
-                s.listen(1)
-                conn, addr = s.accept()
-                shape_bytes = conn.recv(8)
-                rows, cols = struct.unpack("2I", shape_bytes)
-                buf = b""
-                expected = rows * cols * 4
-                while len(buf) < expected:
-                    buf += conn.recv(4096)
-                arr = np.frombuffer(buf, dtype=np.float32).reshape(token_length, -1)
-                embedding_per_req = torch.from_numpy(arr).to("cuda")
-                print(f"end receiving....")
-                print(f"{embedding_per_req.shape=}")
-                conn.close()
-
-                # TODO: mock the pre-alloc
-                allocator = TokenToKVPoolAllocator(
-                    size=4000,
-                    dtype=torch.bfloat16,
-                    device="cuda",
-                    kvcache=mm_embedding_pool,
-                )
-                locs = allocator.alloc(embedding_per_req.shape[0])
-                # TODO: mocking the `set` op here, in practice, this will done in `EmbeddingReceiver`
-                mm_embedding_pool.set_mm_embedding(
-                    embedding_items_hash, embedding_per_req, loc=locs
-                )
-
-            if mm_embedding_pool is not None and disaggregation_mode != "encode":
-                # at this point, the embeddings have already been written into embedding pool
                 embedding_per_req = mm_embedding_pool.get_mm_embedding(
-                    embedding_items_hash
+                    mm_hashes, combined_hash
                 )
+                print(f"{embedding_per_req.shape=}")
             else:
                 embedding_per_req = data_embedding_func(embedding_items_per_req)
-                print(f"{embedding_per_req.shape=}")
-                # if disaggregation_mode == "prefill":
-                #     # TODO: mock the pre-alloc
-                #     allocator = TokenToKVPoolAllocator(
-                #         size=2000,
-                #         dtype=torch.bfloat16,
-                #         device="cuda:0",
-                #         kvcache=mm_embedding_pool,
-                #     )
-                #     locs = allocator.alloc(embedding_per_req.shape[0])
-                #     # TODO: mocking the `set` op here, in practice, this will done in `EmbeddingReceiver`
-                #     mm_embedding_pool.set_mm_embedding(
-                #         embedding_items_hash, embedding_per_req, loc=locs
-                #     )
-                #     # pass
-                # else:
                 if not embedding_cache.set_mm_embedding(
-                    embedding_items_hash, embedding_per_req
+                    combined_hash, embedding_per_req
                 ):
                     print_warning_once(
                         "Multimodal embedding cache is full. Consider increasing the "
-                        "`SGLANG_VLM_CACHE_SIZE_MB` environment variable."
+                        "`SGLANG_MM_CACHE_SIZE_MB` environment variable."
                     )
 
         assert embedding_per_req is not None
@@ -475,9 +420,7 @@ def _get_chunked_prefill_embedding(
             num_token = embedding_per_req.shape[0]
             mm_embedding_pool = mm_embedding_allocator.get_kvcache()
             loc = mm_embedding_allocator.alloc(num_token)
-            mm_embedding_pool.set_mm_embedding(
-                embedding_items_hash, embedding_per_req, loc
-            )
+            mm_embedding_pool.set_mm_embedding(combined_hash, embedding_per_req, loc)
             embedding_list.append(
                 embedding_per_req
             )  # FIXME(encode's model should early exit)
@@ -496,7 +439,7 @@ def _get_chunked_prefill_embedding(
             else embedding_per_req.shape[0] * embedding_per_req.shape[1]
         )
         if end_index == embedding_per_req_length:
-            embedding_cache.free(embedding_items_hash)
+            embedding_cache.free(combined_hash)
         embedding_list.append(embedding_per_req_chunk)
     if len(embedding_list) == 0:
         return None
@@ -786,6 +729,7 @@ def general_mm_embed_routine(
     if disaggregation_mode == "encode":
         return inputs_embeds
 
+    print(f"{positions=}")
     hidden_states = language_model(
         input_ids=None,
         forward_batch=forward_batch,

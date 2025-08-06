@@ -513,8 +513,10 @@ class ForwardBatch:
         # batch_size * [3 * seq_len]
         batch_size = self.seq_lens.shape[0]
         mrope_positions_list = [[]] * batch_size
+        # print(f"{batch_size=}")
         for batch_idx in range(batch_size):
             mm_input = batch.multimodal_inputs[batch_idx]
+            # print(f"{self.forward_mode=}")
             if self.forward_mode.is_decode():
                 mrope_position_deltas = (
                     [0]
@@ -522,6 +524,8 @@ class ForwardBatch:
                     else flatten_nested_list(mm_input.mrope_position_delta.tolist())
                 )
                 next_input_positions = []
+                # print(f"{mm_input.mrope_position_delta=}")
+                # print(f"{mrope_position_deltas=}")
                 for mrope_position_delta in mrope_position_deltas:
                     # batched deltas needs to be processed separately
                     # Convert list of lists to tensor with shape [3, seq_len]
@@ -532,6 +536,8 @@ class ForwardBatch:
                             int(self.seq_lens[batch_idx]),
                         )
                     ]
+                print(f"{next_input_positions=}")
+
                 # 3 * N
                 mrope_positions_list[batch_idx] = torch.cat(next_input_positions, dim=1)
             elif self.forward_mode.is_extend():

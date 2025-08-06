@@ -29,11 +29,21 @@ class MultimodalCache(abc.ABC):
         # self.cpu_offloading_chunk_size = 8192
 
     @abc.abstractmethod
-    def get_mm_embedding(self, mm_hash: int) -> torch.Tensor:
+    def get_mm_embedding(
+        self, mm_hashes: List[int], combined_hash: Optional[int] = None
+    ) -> Optional[torch.Tensor]:
         """
-        Extract the embedding with a hash id. the returned tensor may not be contiguous
+        Extract the embedding with the hash-ids of the queried items. Try combined hash first, if missed, fallback to individual hashes
+        The returned tensor may not be contiguous
         """
         raise NotImplementedError()
+
+    @staticmethod
+    def combine_hashes(mm_hashes: List[int]) -> int:
+        """
+        Get a combined hash from individual mm item hashes
+        """
+        return hash(tuple(mm_hashes))
 
     @abc.abstractmethod
     def set_mm_embedding(
@@ -83,8 +93,13 @@ class MultiModalStaticCache(MultimodalCache):
         self.mm_cache: Dict[int, torch.Tensor] = {}
         self.current_size = 0
 
-    def get_mm_embedding(self, mm_hash: int) -> torch.Tensor:
-        return self.mm_cache.get(mm_hash)
+    def get_mm_embedding(
+        self, mm_hashes: List[int], combined_hash: Optional[int] = None
+    ) -> Optional[torch.Tensor]:
+
+        combined_hash = self.combine_hashes(mm_hashes)
+        # MultiModalStaticCache does not fallback to individual item lookup
+        return self.mm_cache.get(combined_hash)
 
     def set_mm_embedding(
         self, mm_hash: int, embedding: torch.Tensor, loc: Optional[torch.Tensor] = None
@@ -175,6 +190,9 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
             [self.mm_buffer[0].nbytes * self.page_size],
         )
 
+    def stored_mm_hashes(self) -> List[int]:
+        return list(self.mm_hash_to_indices.keys())
+
     def get_pointers_from_locs(self, locs: torch.Tensor) -> torch.Tensor:
         """
         Given a tensor of locations (indices), returns a tensor of pointers
@@ -198,8 +216,8 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
     ) -> List[torch.Tensor]:
         return [self.get_embedding_locs_from_hash(mm_hash) for mm_hash in mm_hashes]
 
-    def get_mm_embedding(self, mm_hash: int) -> torch.Tensor:
-        indices = self.mm_hash_to_indices.get(mm_hash)
+    def try_get_mm_embedding(self, combined_hash: int) -> Optional[torch.Tensor]:
+        indices = self.mm_hash_to_indices.get(combined_hash)
         if indices is None:
             return None
 
@@ -208,6 +226,35 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
         if self.store_dtype != self.dtype:
             return embedding.view(self.dtype)
         return embedding
+
+    def get_mm_embedding(
+        self, mm_hashes: List[int], combined_hash: Optional[int] = None
+    ) -> Optional[torch.Tensor]:
+        """
+        Tries to get the multimodal embedding using a combined hash.
+        If that fails, falls back to getting embeddings for each item individually
+        and concatenating them.
+        """
+        # 1. Try with combined hash
+        combined_hash = combined_hash or self.combine_hashes(mm_hashes)
+        combined_embedding = self.try_get_mm_embedding(combined_hash)
+        if combined_embedding is not None:
+            return combined_embedding
+
+        # 2. Fallback to individual item hashes
+        individual_embeddings = []
+        for h in mm_hashes:
+            individual_embedding = self.try_get_mm_embedding(h)
+            if individual_embedding is None:
+                # If any part is missing, we can't reconstruct the full embedding.
+                return None
+            individual_embeddings.append(individual_embedding)
+
+        # 3. Concatenate and return
+        if not individual_embeddings:
+            return None
+
+        return torch.cat(individual_embeddings, dim=0)
 
     def set_mm_embedding(
         self, mm_hash: int, embedding: torch.Tensor, loc: Optional[torch.Tensor] = None
