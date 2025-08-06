@@ -1517,14 +1517,14 @@ class MooncakeKVReceiver(BaseKVReceiver):
         for bootstrap_info in self.bootstrap_infos:
             sock, lock = self._connect_to_bootstrap_server(bootstrap_info)
             is_dummy = bootstrap_info["is_dummy"]
-            print(
-                f"kv receiver init sending: {bootstrap_info=} {self.bootstrap_room=} "
-            )
-            print(
-                # f"kv receiver init sending: {kv_indices=}"
-                f"{len(kv_indices.tobytes())=}"
-                f"{type(kv_indices)=}"
-            )
+            # print(
+            #     f"kv receiver init sending: {bootstrap_info=} {self.bootstrap_room=} "
+            # )
+            # print(
+            #     f"kv receiver init sending: {kv_indices=}"
+            #     f"{len(kv_indices.tobytes())=}"
+            #     f"{type(kv_indices)=}"
+            # )
             with lock:
                 sock.send_multipart(
                     [

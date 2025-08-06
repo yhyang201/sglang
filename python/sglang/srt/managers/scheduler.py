@@ -1390,6 +1390,8 @@ class Scheduler(
             # TODO: should we skip this req at lb-side?
             if req.contains_mm_input():
                 self.disagg_encode_bootstrap_queue.add(req)
+            else:
+                logger.warning("Skipping pure text request")
         else:
             if self.enable_hicache_storage:
                 req.init_next_round_input(self.tree_cache)

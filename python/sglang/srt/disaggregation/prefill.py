@@ -503,8 +503,6 @@ class MMEmbeddingPreallocQueue:
                 kv_receiver_class = get_kv_class(
                     self.transfer_backend, KVClassType.RECEIVER
                 )
-            print(f"{req.bootstrap_host_encode=}")
-            print(f"{req.bootstrap_port_encode=}")
             kv_receiver = kv_receiver_class(
                 mgr=self.kv_manager,
                 bootstrap_addr=f"{req.bootstrap_host_encode}:{req.bootstrap_port_encode}",
@@ -651,7 +649,7 @@ class MMEmbeddingPreallocQueue:
             # mm_embedding_indices = [self.mm_embedding_pool.get_embedding_locs_from_hash(mm_hash) for mm_hash in
             #                         encode_req.req.mm_hashes]
 
-            print(f"{mm_embedding_indices=}")
+            # print(f"{mm_embedding_indices=}")
 
             # prefill_req.metadata_buffer_index = (
             #     self.req_to_metadata_buffer_idx_allocator.alloc()
@@ -701,8 +699,8 @@ class MMEmbeddingPreallocQueue:
             mm_embedding_len for mm_embedding_len in req.mm_embedding_lens
         )
 
-        print(f"prefill 699 | {mm_hash=}")
-        print(f"prefill 701 | {mm_embedding_lens=}")
+        # print(f"prefill 699 | {mm_hash=}")
+        # print(f"prefill 701 | {mm_embedding_lens=}")
 
         embedding_locs = self.mm_embedding_pool.reserve_mm_embedding(
             mm_hash, mm_embedding_lens, self.token_to_kv_pool_allocator
