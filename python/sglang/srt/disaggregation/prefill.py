@@ -734,18 +734,23 @@ class SchedulerDisaggregationPrefillMixin:
         self.waiting_preallocate_queue.extend(
             self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
         )
-        # TODO:
-        self.waiting_visual_queue.extend([])
+
         bootstrapped_room_ids = [
             req.bootstrap_room
-            for req in self.waiting_visual_queue
+            for req in self.waiting_encode_queue
             if req.bootstrap_room
             in [req.bootstrap_room for req in self.waiting_preallocate_queue]
         ]
 
-        self.waiting_visual_queue = [
+        waiting_queue = [
             req
-            for req in self.waiting_visual_queue
+            for req in self.waiting_encode_queue
+            if req.bootstrap_room in bootstrapped_room_ids
+        ]
+        
+        self.waiting_encode_queue = [
+            req
+            for req in self.waiting_encode_queue
             if req.bootstrap_room not in bootstrapped_room_ids
         ]
 
@@ -754,11 +759,7 @@ class SchedulerDisaggregationPrefillMixin:
             for req in self.waiting_preallocate_queue
             if req.bootstrap_room not in bootstrapped_room_ids
         ]
-        waiting_queue = [
-            req
-            for req in self.waiting_visual_queue
-            if req.bootstrap_room in bootstrapped_room_ids
-        ]
+        
         self.waiting_queue.extend(waiting_queue)
 
     @torch.no_grad()
@@ -1137,4 +1138,5 @@ class SchedulerDisaggregationPrefillMixin:
         alloc_reqs = (
             self.disagg_prefill_transfer_queue.pop_transferred()
         )  # the requests which kv has arrived
-        self.waiting_queue.extend(alloc_reqs)
+        self.waiting_encode_queue.extend(alloc_reqs)
+        
