@@ -399,12 +399,21 @@ def _get_chunked_prefill_embedding(
         embedding_per_req = embedding_cache.get_mm_embedding(mm_hashes)
         print(f"{embedding_per_req=}")
         if embedding_per_req is None:
+            print(f"mm_utils 402 | {mm_embedding_pool=}")
+            if mm_embedding_pool is None:
+                mm_embedding_pool = mm_embedding_allocator.get_kvcache()  # temp
+            print(f"mm_utils 405 | {mm_embedding_pool=}")
+
             if mm_embedding_pool is not None and disaggregation_mode != "encode":
                 embedding_per_req = mm_embedding_pool.get_mm_embedding(
                     mm_hashes, combined_hash
                 )
+                print(f"mm_utils 410 | {mm_hashes=} {combined_hash=}")
                 print(f"{embedding_per_req.shape=}")
             else:
+                if disaggregation_mode != "encode":
+                    print("NO!!!!!!!!!!!!!!!!!")
+                    raise RuntimeError("Non-Encode should not call data_embedding_func")
                 embedding_per_req = data_embedding_func(embedding_items_per_req)
                 if not embedding_cache.set_mm_embedding(
                     combined_hash, embedding_per_req
@@ -416,6 +425,7 @@ def _get_chunked_prefill_embedding(
 
         assert embedding_per_req is not None
         if disaggregation_mode == "encode":
+            print(f"mm_utils 419 | {combined_hash}")
             assert isinstance(embedding_per_req, torch.Tensor)
             num_token = embedding_per_req.shape[0]
             mm_embedding_pool = mm_embedding_allocator.get_kvcache()

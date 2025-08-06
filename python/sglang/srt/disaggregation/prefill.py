@@ -50,7 +50,10 @@ from sglang.srt.managers.schedule_batch import (
     ScheduleBatch,
 )
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
-from sglang.srt.mem_cache.multimodal_cache import PagedMultiModalEmbeddingPool
+from sglang.srt.mem_cache.multimodal_cache import (
+    MultimodalCache,
+    PagedMultiModalEmbeddingPool,
+)
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.utils import require_mlp_sync
 
@@ -639,7 +642,7 @@ class MMEmbeddingPreallocQueue:
 
             allocatable_tokens -= required_tokens_for_request
             mm_embedding_indices = (
-                torch.cat(self._pre_alloc(encode_req.req)).to(torch.int32).cpu().numpy()
+                self._pre_alloc(encode_req.req).to(torch.int32).cpu().numpy()
             )  # it's type should be int32
 
             print(f"{encode_req.req.mm_hashes=}")
@@ -690,13 +693,20 @@ class MMEmbeddingPreallocQueue:
         #     #     len(req.origin_input_ids) + max(len(req.output_ids) - 1, 0)
         #     # )
         # else:
-        embedding_locs = []
-        for mm_hash, num_token in zip(req.mm_hashes, req.mm_embedding_lens):
-            embedding_loc = self.token_to_kv_pool_allocator.alloc(num_token)
-            self.mm_embedding_pool.reserve_mm_embedding(
-                mm_hash, num_token, embedding_loc
-            )
-            embedding_locs += [embedding_loc]
+        mm_hash = MultimodalCache.combine_hashes(
+            [item.hash for item in req.multimodal_inputs.mm_items]
+        )
+        mm_embedding_lens = sum(
+            mm_embedding_len for mm_embedding_len in req.mm_embedding_lens
+        )
+
+        print(f"prefill 699 | {mm_hash=}")
+        print(f"prefill 701 | {mm_embedding_lens=}")
+
+        embedding_locs = self.token_to_kv_pool_allocator.alloc(mm_embedding_lens)
+        self.mm_embedding_pool.reserve_mm_embedding(
+            mm_hash, mm_embedding_lens, embedding_locs
+        )
 
         # assert (
         #     kv_loc is not None
