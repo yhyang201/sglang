@@ -41,10 +41,12 @@ class MultimodalCache(abc.ABC):
         raise NotImplementedError()
 
     @staticmethod
-    def combine_hashes(mm_hashes: List[int]) -> int:
+    def combine_hashes(mm_hashes: List[int]) -> Optional[int]:
         """
         Get a combined hash from individual mm item hashes
         """
+        if not mm_hashes:
+            return None
         return hash(tuple(mm_hashes))
 
     @abc.abstractmethod
