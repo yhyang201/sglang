@@ -127,25 +127,22 @@ class MiniLoadBalancer:
             text,
         )
 
-    async def generate(
+    async def get_responses(
         self,
-        modified_request,
         prefill_server,
         decode_server,
+        encode_server,
+        text_server,
         endpoint,
-        encode_server=None,
-        text_server=None,
-        modified_request_for_prefill=None,
-    ) -> ORJSONResponse:
-        assert endpoint[0] != "/", f"Endpoint should not start with '/': {endpoint}"
-
+        modified_request,
+        modified_request_for_prefill,
+    ):
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(
                 total=3600
             )  # Add timeout for request reliability
         ) as session:
             tasks_mapping = dict()
-
             for server_role, server in [
                 (ServerRole.PREFILL, prefill_server),
                 (ServerRole.DECODE, decode_server),
@@ -160,16 +157,16 @@ class MiniLoadBalancer:
                         req = modified_request_for_prefill
                     else:
                         req = modified_request
-                    print(f"req for {server_role}: {req=}")
+                    # print(f"req for {server_role}: {req=}")
                     tasks_mapping[server_role] = session.post(
                         f"{server}/{endpoint}", json=req
                     )
 
-            print(f"requests {tasks_mapping.values()=}")
+            # print(f"requests {tasks_mapping.values()=}")
 
             # Wait for all responses to complete. Prefill should end first.
             responses = await asyncio.gather(*tasks_mapping.values())
-            print(f"got all responses")
+
             # Extract responses based on server roles
             response_mapping = {}
             response_idx = 0
@@ -183,39 +180,62 @@ class MiniLoadBalancer:
                     response_mapping[server_role] = responses[response_idx]
                     response_idx += 1
 
-            if "return_logprob" in modified_request:
-                prefill_response = response_mapping.get(ServerRole.PREFILL)
-                decode_response = response_mapping.get(ServerRole.DECODE)
+            prefill_response = response_mapping.get(ServerRole.PREFILL)
+            decode_response = response_mapping.get(ServerRole.DECODE)
+            encode_response = response_mapping.get(ServerRole.ENCODE)
+            text_response = response_mapping.get(ServerRole.TEXT)
+            return prefill_response, decode_response, encode_response, text_response
 
-                if prefill_response and decode_response:
-                    prefill_json = await prefill_response.json()
-                    ret_json = await decode_response.json()
-                    # encode_json = await encode_response.json()
-
-                    # merge `meta_info.input_token_logprobs` from prefill to decode
-                    if "meta_info" in ret_json:
-                        if "input_token_logprobs" in ret_json["meta_info"]:
-                            ret_json["meta_info"]["input_token_logprobs"] = (
-                                prefill_json["meta_info"]["input_token_logprobs"]
-                                + ret_json["meta_info"]["input_token_logprobs"]
-                            )
-                else:
-                    # Fallback to decode response only if prefill is not available
-                    decode_response = response_mapping.get(ServerRole.DECODE)
-                    ret_json = await decode_response.json() if decode_response else {}
-            else:
-                if decode_server:
-                    decode_response = response_mapping.get(ServerRole.DECODE)
-                else:
-                    assert text_server
-                    print(f"using text response as decode_response")
-                    decode_response = response_mapping.get(ServerRole.TEXT)
-                ret_json = await decode_response.json() if decode_response else {}
-
-            return ORJSONResponse(
-                content=ret_json,
-                status_code=decode_response.status if decode_response else 200,
+    async def generate(
+        self,
+        modified_request,
+        prefill_server,
+        decode_server,
+        endpoint,
+        encode_server=None,
+        text_server=None,
+        modified_request_for_prefill=None,
+    ) -> ORJSONResponse:
+        assert endpoint[0] != "/", f"Endpoint should not start with '/': {endpoint}"
+        prefill_response, decode_response, encode_response, text_response = (
+            await self.get_responses(
+                prefill_server,
+                decode_server,
+                encode_server,
+                text_server,
+                endpoint,
+                modified_request,
+                modified_request_for_prefill,
             )
+        )
+        if "return_logprob" in modified_request:
+            final_response = decode_response
+            if prefill_response and decode_response:
+                prefill_json = await prefill_response.json()
+                ret_json = await decode_response.json()
+                # merge `meta_info.input_token_logprobs` from prefill to decode
+                if "meta_info" in ret_json:
+                    if "input_token_logprobs" in ret_json["meta_info"]:
+                        ret_json["meta_info"]["input_token_logprobs"] = (
+                            prefill_json["meta_info"]["input_token_logprobs"]
+                            + ret_json["meta_info"]["input_token_logprobs"]
+                        )
+            else:
+                # Fallback to decode response only if prefill is not available
+                ret_json = await decode_response.json() if decode_response else {}
+        else:
+            if decode_server:
+                final_response = decode_response
+            else:
+                assert text_server
+                print(f"using text response as decode_response")
+                final_response = text_response
+            ret_json = await final_response.json() if final_response else {}
+
+        return ORJSONResponse(
+            content=ret_json,
+            status_code=final_response.status if final_response else 200,
+        )
 
     async def generate_stream(
         self,
@@ -230,57 +250,51 @@ class MiniLoadBalancer:
         assert endpoint[0] != "/", f"Endpoint should not start with '/': {endpoint}"
 
         async def stream_results():
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(
-                    total=3600
-                )  # Add timeout for request reliability
-            ) as session:
-                # Create the tasks for both prefill and decode requests
-                tasks = [
-                    session.post(f"{prefill_server}/{endpoint}", json=modified_request),
-                    session.post(f"{decode_server}/{endpoint}", json=modified_request),
-                    session.post(f"{encode_server}/{endpoint}", json=modified_request),
-                ]
-                # Wait for both responses to complete. Since this is streaming, they return immediately.
-                prefill_response, decode_response, _encode_response = (
-                    await asyncio.gather(*tasks)
+            prefill_response, decode_response, encode_response, text_response = (
+                await self.get_responses(
+                    prefill_server,
+                    decode_server,
+                    encode_server,
+                    text_server,
+                    endpoint,
+                    modified_request,
+                    modified_request_for_prefill,
                 )
+            )
 
-                if modified_request.get("return_logprob", False):
-                    prefill_chunks = []
-                    async for chunk in prefill_response.content:
-                        prefill_chunks.append(chunk)
+            if modified_request.get("return_logprob", False):
+                prefill_chunks = []
+                async for chunk in prefill_response.content:
+                    prefill_chunks.append(chunk)
 
-                    first_prefill_chunk = (
-                        prefill_chunks[0].decode("utf-8")[5:].strip("\n")
-                    )
-                    first_prefill_chunk_json = orjson.loads(first_prefill_chunk)
+                first_prefill_chunk = prefill_chunks[0].decode("utf-8")[5:].strip("\n")
+                first_prefill_chunk_json = orjson.loads(first_prefill_chunk)
 
-                    async for chunk in decode_response.content:
-                        # Note: This is inefficient
-                        # merge prefill input_token_logprobs, output_token_logprobs to decode
-                        decoded_chunk = chunk.decode("utf-8")
-                        if (
-                            decoded_chunk
-                            and decoded_chunk.startswith("data:")
-                            and "[DONE]" not in decoded_chunk
-                        ):
-                            ret_json = orjson.loads(decoded_chunk[5:].strip("\n"))
-                            ret_json["meta_info"]["input_token_logprobs"] = (
-                                first_prefill_chunk_json["meta_info"][
-                                    "input_token_logprobs"
-                                ]
-                                + ret_json["meta_info"]["input_token_logprobs"]
-                            )
-
-                            yield b"data: " + orjson.dumps(ret_json) + b"\n\n"
-                        else:
-                            yield chunk
-                else:
-                    async for chunk in decode_response.content.iter_chunked(
-                        AIOHTTP_STREAM_READ_CHUNK_SIZE
+                async for chunk in decode_response.content:
+                    # Note: This is inefficient
+                    # merge prefill input_token_logprobs, output_token_logprobs to decode
+                    decoded_chunk = chunk.decode("utf-8")
+                    if (
+                        decoded_chunk
+                        and decoded_chunk.startswith("data:")
+                        and "[DONE]" not in decoded_chunk
                     ):
+                        ret_json = orjson.loads(decoded_chunk[5:].strip("\n"))
+                        ret_json["meta_info"]["input_token_logprobs"] = (
+                            first_prefill_chunk_json["meta_info"][
+                                "input_token_logprobs"
+                            ]
+                            + ret_json["meta_info"]["input_token_logprobs"]
+                        )
+
+                        yield b"data: " + orjson.dumps(ret_json) + b"\n\n"
+                    else:
                         yield chunk
+            else:
+                async for chunk in decode_response.content.iter_chunked(
+                    AIOHTTP_STREAM_READ_CHUNK_SIZE
+                ):
+                    yield chunk
 
         return StreamingResponse(
             stream_results(),
@@ -499,8 +513,8 @@ async def _forward_to_backend(request_data: dict, endpoint_name: str):
         request_data, prefill_server, bootstrap_port
     )
 
-    print(f"{encode_server=}")
-    print(f"{bootstrap_port_encode=}")
+    # print(f"{encode_server=}")
+    # print(f"{bootstrap_port_encode=}")
     if encode_server:
         modified_request_for_prefill = modify_bootstrap_info_in_request(
             modified_request, encode_server, bootstrap_port_encode
@@ -508,8 +522,8 @@ async def _forward_to_backend(request_data: dict, endpoint_name: str):
     else:
         modified_request_for_prefill = modified_request
 
-    print(f"{modified_request=}")
-    print(f"{modified_request_for_prefill=}")
+    # print(f"{modified_request=}")
+    # print(f"{modified_request_for_prefill=}")
     if request_data.get("stream", False):
         return await load_balancer.generate_stream(
             modified_request,
