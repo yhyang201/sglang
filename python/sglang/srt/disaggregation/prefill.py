@@ -259,6 +259,7 @@ class PrefillBootstrapQueue:
             assert req.metadata_buffer_index is not None
 
             num_pages = kv_to_page_num(num_kv_indices, self.token_to_kv_pool.page_size)
+            print(f"initing disagg_kv_sender")
             req.disagg_kv_sender.init(num_pages, req.metadata_buffer_index)
             bootstrapped_reqs.append(req)
             indices_to_remove.add(i)

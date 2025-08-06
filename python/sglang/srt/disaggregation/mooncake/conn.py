@@ -845,9 +845,9 @@ class MooncakeKVManager(BaseKVManager):
                         TransferInfo.from_zmq(waiting_req_bytes)
                     )
                     print(f"waiting_req_bytes {len(waiting_req_bytes[4])=}")
-                    print(
-                        f"transfer_infos {room=} {mooncake_session_id=} {self.transfer_infos[room][mooncake_session_id]=}"
-                    )
+                    # print(
+                    #     f"transfer_infos {room=} {mooncake_session_id=} {self.transfer_infos[room][mooncake_session_id]=}"
+                    # )
                     # NOTE: after bootstrapping we can mark the req as waiting for input
                     if len(self.transfer_infos[room]) == required_dst_info_num:
                         self.update_status(room, KVPoll.WaitingForInput)
@@ -1401,7 +1401,7 @@ class MooncakeKVReceiver(BaseKVReceiver):
             response = requests.get(url, timeout=5)
             if response.status_code == 200:
                 bootstrap_info = response.json()
-                print(f"{bootstrap_info=}")
+                # print(f"{bootstrap_info=}")
                 return bootstrap_info
             else:
                 logger.error(
@@ -1513,7 +1513,7 @@ class MooncakeKVReceiver(BaseKVReceiver):
         return sock, lock
 
     def init(self, kv_indices: npt.NDArray[np.int32], aux_index: Optional[int] = None):
-        print(f"init {kv_indices=}")
+        # print(f"init {kv_indices=}")
         for bootstrap_info in self.bootstrap_infos:
             sock, lock = self._connect_to_bootstrap_server(bootstrap_info)
             is_dummy = bootstrap_info["is_dummy"]
@@ -1521,7 +1521,7 @@ class MooncakeKVReceiver(BaseKVReceiver):
                 f"kv receiver init sending: {bootstrap_info=} {self.bootstrap_room=} "
             )
             print(
-                f"kv receiver init sending: {kv_indices=}"
+                # f"kv receiver init sending: {kv_indices=}"
                 f"{len(kv_indices.tobytes())=}"
                 f"{type(kv_indices)=}"
             )
