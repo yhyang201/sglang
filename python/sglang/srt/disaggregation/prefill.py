@@ -806,9 +806,13 @@ class SchedulerDisaggregationPrefillMixin:
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
-            self.waiting_queue.extend(
-                self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
-            )
+            if self.server_args.encoder_disaggregated:
+                self.process_prefill_queue_with_encoder_disaggregated()
+                self.poll_req_to_waiting_queue()
+            else:
+                self.waiting_queue.extend(
+                    self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
+                )
             self.process_prefill_chunk()
             batch = self.get_new_batch_prefill()
 
