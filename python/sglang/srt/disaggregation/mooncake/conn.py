@@ -1473,7 +1473,7 @@ class MooncakeKVReceiver(BaseKVReceiver):
                 #     struct.pack("Q", ptr) for ptr in self.kv_mgr.kv_args.aux_data_ptrs
                 # )
                 kv_item_len = self.kv_mgr.kv_args.kv_item_lens[0]
-                print(f"{self.kv_mgr.kv_args.kv_data_ptrs=}, {kv_item_len=}")
+                # print(f"{self.kv_mgr.kv_args.kv_data_ptrs=}, {kv_item_len=}")
                 dst_kv_item_len = str(kv_item_len).encode("ascii")
                 sock, lock = self._connect_to_bootstrap_server(bootstrap_info)
                 sock.send_multipart(

@@ -387,9 +387,9 @@ class MMEmbeddingTransferQueue:
         #     assert idx != -1
         #     self.req_to_metadata_buffer_idx_allocator.free(idx)
 
-        # self.queue = [
-        #     entry for i, entry in enumerate(self.queue) if i not in indices_to_remove
-        # ]
+        self.queue = [
+            entry for i, entry in enumerate(self.queue) if i not in indices_to_remove
+        ]
 
         return transferred_reqs
 
@@ -744,13 +744,12 @@ class SchedulerDisaggregationPrefillMixin:
             for req in self.waiting_preallocate_queue
             if req.bootstrap_room not in bootstrapped_room_ids
         ]
-        self.waiting_queue.extend(
-            [
-                req
-                for req in self.waiting_visual_queue
-                if req.bootstrap_room in bootstrapped_room_ids
-            ]
-        )
+        waiting_queue = [
+            req
+            for req in self.waiting_visual_queue
+            if req.bootstrap_room in bootstrapped_room_ids
+        ]
+        self.waiting_queue.extend(waiting_queue)
 
     @torch.no_grad()
     def event_loop_normal_disagg_prefill(self: Scheduler) -> None:

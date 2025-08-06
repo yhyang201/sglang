@@ -27,7 +27,7 @@ class EncodeAdder:
     ):
         self.page_size = page_size
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
-        print(f"{self.token_to_kv_pool_allocator=}")
+        # print(f"{self.token_to_kv_pool_allocator=}")
         self.running_batch = running_batch
         self.new_token_ratio = new_token_ratio
         self.rem_input_tokens = rem_input_tokens

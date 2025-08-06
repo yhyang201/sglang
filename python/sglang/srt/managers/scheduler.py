@@ -1189,7 +1189,10 @@ class Scheduler(
                 else:
                     self.send_to_tokenizer.send_pyobj(output)
 
-        if self.server_args.encoder_disaggregated:
+        if (
+            self.server_args.encoder_disaggregated
+            or self.server_args.disaggregation_mode == "text"
+        ):
             # TEXT mode
             self.process_prefill_queue_with_encoder_disaggregated()
 
