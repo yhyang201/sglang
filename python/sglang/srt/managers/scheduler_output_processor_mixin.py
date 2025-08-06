@@ -87,11 +87,12 @@ class SchedulerOutputProcessorMixin:
                     req.output_ids.append(next_token_id)
                     req.check_finished()
 
-                    mm_hash = MultimodalCache.combine_hashes(
-                        [item.hash for item in req.multimodal_inputs.mm_items]
-                    )
-                    loc = self.mm_embedding_pool.free(mm_hash)
-                    self.mm_embedding_allocator.free(loc)
+                    if req.multimodal_inputs is not None:
+                        mm_hash = MultimodalCache.combine_hashes(
+                            [item.hash for item in req.multimodal_inputs.mm_items]
+                        )
+                        loc = self.mm_embedding_pool.free(mm_hash)
+                        self.mm_embedding_allocator.free(loc)
 
                     if req.finished():
                         self.tree_cache.cache_finished_req(req)
