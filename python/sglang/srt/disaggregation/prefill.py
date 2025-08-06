@@ -23,12 +23,13 @@ import logging
 import threading
 from collections import deque
 from http import HTTPStatus
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import torch
 
 from sglang.srt.disaggregation.base import BaseKVManager, KVPoll
 from sglang.srt.disaggregation.decode import EmbeddingRequest
+from sglang.srt.disaggregation.mooncake import MooncakeKVSender
 from sglang.srt.disaggregation.utils import (
     FAKE_BOOTSTRAP_HOST,
     DisaggregationMode,
@@ -201,23 +202,22 @@ class PrefillBootstrapQueue:
         self,
         return_failed_reqs: bool = False,
         rids_to_check: Optional[List[str]] = None,
-    ) -> List[Req]:
+    ) -> Tuple[List[Req], List[Req]]:
         """
         pop the reqs which has finished bootstrapping
 
         return_failed_reqs: For PP, on rank 0, also return the failed reqs to notify the next rank
         rids_to_check: For PP, on rank > 0, check the rids from the previous rank has consensus with the current rank.
         """
+        if len(self.queue) == 0:
+            if not return_failed_reqs:
+                return [], []
+            else:
+                return [], []
 
         bootstrapped_reqs = []
         failed_reqs = []
         indices_to_remove = set()
-
-        if len(self.queue) == 0:
-            if return_failed_reqs is False:
-                return []
-            else:
-                return [], []
 
         polls = poll_and_all_reduce(
             [req.disagg_kv_sender for req in self.queue], self.gloo_group
@@ -259,8 +259,8 @@ class PrefillBootstrapQueue:
             assert req.metadata_buffer_index is not None
 
             num_pages = kv_to_page_num(num_kv_indices, self.token_to_kv_pool.page_size)
-            print(f"initing disagg_kv_sender")
             req.disagg_kv_sender.init(num_pages, req.metadata_buffer_index)
+
             bootstrapped_reqs.append(req)
             indices_to_remove.add(i)
 
@@ -268,8 +268,8 @@ class PrefillBootstrapQueue:
             entry for i, entry in enumerate(self.queue) if i not in indices_to_remove
         ]
 
-        if return_failed_reqs is False:
-            return bootstrapped_reqs
+        if not return_failed_reqs:
+            return bootstrapped_reqs, []
         else:
             return bootstrapped_reqs, failed_reqs
 
@@ -724,41 +724,64 @@ class SchedulerDisaggregationPrefillMixin:
     Mixin for Scheduler to handle disaggregation prefill
     """
 
-    def poll_req_to_waiting_queue(self: Scheduler):
+    def poll_prefill_req_to_waiting_queue_with_encoder_disaggregated(self: Scheduler):
         """
         Poll the requests in the middle of transfer. If done, return the request.
         rids_to_check: For PP, on rank > 0, check the rids from the previous rank has consensus with the current rank.
         """
-        self.waiting_preallocate_queue.extend(
-            self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
-        )
 
-        bootstrapped_room_ids = [
-            req.bootstrap_room
-            for req in self.waiting_encode_queue
-            if req.bootstrap_room
-            in [req.bootstrap_room for req in self.waiting_preallocate_queue]
-        ]
+        # bootstrapping queue
+        bootstrapped, _failed = self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
+        # if bootstrapped:
+        #     print(f"{bootstrapped=}")
+        # if self.waiting_queue:
+        #     print(f"741 {self.waiting_queue=}")
 
-        waiting_queue = [
-            req
-            for req in self.waiting_encode_queue
-            if req.bootstrap_room in bootstrapped_room_ids
-        ]
-        
-        self.waiting_encode_queue = [
-            req
-            for req in self.waiting_encode_queue
-            if req.bootstrap_room not in bootstrapped_room_ids
-        ]
+        # method_one = True
+        method_one = False
+        if method_one:
+            self.bootstrapped_queue.extend(bootstrapped)
+            bootstrapped_room_ids = [
+                req.bootstrap_room for req in self.bootstrapped_queue
+            ]
+            bootstrapped_and_received_room_ids = [
+                req.bootstrap_room
+                for req in self.embedding_received_bootstrapped_queue
+                if req.bootstrap_room in bootstrapped_room_ids
+            ]
 
-        self.waiting_preallocate_queue = [
-            req
-            for req in self.waiting_preallocate_queue
-            if req.bootstrap_room not in bootstrapped_room_ids
-        ]
-        
-        self.waiting_queue.extend(waiting_queue)
+            # if self.embedding_received_bootstrapped_queue:
+            #     print(f"{self.embedding_received_bootstrapped_queue=}")
+
+            # print(f"{bootstrapped_room_ids=}")
+            # print(f"{bootstrapped_and_received_room_ids=}")
+            # both bootstrapped and received
+            ready_reqs_queue = [
+                req
+                for req in self.embedding_received_bootstrapped_queue
+                if req.bootstrap_room in bootstrapped_and_received_room_ids
+            ]
+
+            # leave received but not bootstrapped reqs
+            self.embedding_received_bootstrapped_queue = [
+                req
+                for req in self.embedding_received_bootstrapped_queue
+                if req.bootstrap_room not in bootstrapped_and_received_room_ids
+            ]
+
+            # leave bootstrapped but not received reqs
+            self.bootstrapped_queue = [
+                req
+                for req in self.bootstrapped_queue
+                if req.bootstrap_room not in bootstrapped_and_received_room_ids
+            ]
+
+            self.waiting_queue.extend(ready_reqs_queue)
+        else:
+            self.waiting_queue.extend(bootstrapped)
+
+        # if self.waiting_queue:
+        #     print(f"788 {self.waiting_queue=}")
 
     @torch.no_grad()
     def event_loop_normal_disagg_prefill(self: Scheduler) -> None:
@@ -769,11 +792,20 @@ class SchedulerDisaggregationPrefillMixin:
             self.process_input_requests(recv_reqs)
             if self.server_args.encoder_disaggregated:
                 self.process_prefill_queue_with_encoder_disaggregated()
-                self.poll_req_to_waiting_queue()
+                self.poll_prefill_req_to_waiting_queue_with_encoder_disaggregated()
             else:
-                self.waiting_queue.extend(
-                    self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
+                bootstrapped, _failed = (
+                    self.disagg_encode_bootstrap_queue.pop_bootstrapped()
                 )
+                if bootstrapped:
+                    # print(f"{[req.rid for req in batch.reqs]}")
+                    assert all(
+                        not isinstance(req.disagg_kv_sender, MooncakeKVSender)
+                        or hasattr(req.disagg_kv_sender, "num_kv_indices")
+                        for req in bootstrapped
+                    )
+
+                self.waiting_queue.extend(bootstrapped)
             self.process_prefill_chunk()
             batch = self.get_new_batch_prefill()
 
@@ -807,11 +839,12 @@ class SchedulerDisaggregationPrefillMixin:
             self.process_input_requests(recv_reqs)
             if self.server_args.encoder_disaggregated:
                 self.process_prefill_queue_with_encoder_disaggregated()
-                self.poll_req_to_waiting_queue()
+                self.poll_prefill_req_to_waiting_queue_with_encoder_disaggregated()
             else:
-                self.waiting_queue.extend(
-                    self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
+                bootstrapped, _failed = (
+                    self.disagg_encode_bootstrap_queue.pop_bootstrapped()
                 )
+                self.waiting_queue.extend(bootstrapped)
             self.process_prefill_chunk()
             batch = self.get_new_batch_prefill()
 
@@ -908,7 +941,7 @@ class SchedulerDisaggregationPrefillMixin:
                     mm_hash = MultimodalCache.combine_hashes(
                         [item.hash for item in req.multimodal_inputs.mm_items]
                     )
-                    loc = self.mm_embedding_pool.free(
+                    _loc = self.mm_embedding_pool.free(
                         mm_hash, self.mm_embedding_allocator
                     )
 
@@ -1122,7 +1155,7 @@ class SchedulerDisaggregationPrefillMixin:
 
     def process_prefill_queue_with_encoder_disaggregated(self: Scheduler):
         """
-        process text-model prefill queue when encoder if disaggregated
+        process text-model prefill queue when encoder if disaggregated, dumping mm_received req to disagg_prefill_bootstrap_queue, waiting to be bootstrapped
         """
         # try to resume retracted requests if there are enough space for another `num_reserved_decode_tokens` decode steps
         # resumed_reqs = self.disagg_prefill_prealloc_queue.resume_retracted_reqs()
@@ -1131,10 +1164,16 @@ class SchedulerDisaggregationPrefillMixin:
         #     if there are still retracted requests, we do not allocate new requests
         #     return
 
+        # the req whose embedding has been pre-allocated
         req_conns = self.disagg_prefill_prealloc_queue.pop_preallocated()
-        self.disagg_prefill_transfer_queue.extend(req_conns)
-        alloc_reqs = (
-            self.disagg_prefill_transfer_queue.pop_transferred()
-        )  # the requests which kv has arrived
-        self.waiting_encode_queue.extend(alloc_reqs)
-        
+
+        self.disagg_prefill_receiving_queue.extend(req_conns)
+        # the requests whose embedding has arrived
+        mm_received_reqs = self.disagg_prefill_receiving_queue.pop_transferred()
+        # TODO: the pop-out from prefill_bootstrap queue and prefill_receiving_queue should probably be merged to reduce overhead
+        self.disagg_prefill_bootstrap_queue.extend(
+            mm_received_reqs, self.model_config.num_key_value_heads
+        )
+        # self.embedding_received_bootstrapped_queue.extend(mm_received_reqs)
+
+        # self.waiting_encode_queue.extend(mm_received_reqs)

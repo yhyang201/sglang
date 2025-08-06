@@ -99,8 +99,7 @@ async def process_sample(
         max_tokens=sampling_params["max_new_tokens"],
         extra_body=extra_body,
     )
-    return sample, None
-    # return sample, response.choices[0].message.content
+    return sample, response.choices[0].message.content
 
 
 async def process_sample_with_semaphore(
@@ -146,7 +145,7 @@ async def eval_mmmu(args) -> None:
             _, response = await process_sample(
                 client, sample, sampling_params, lora_path
             )
-            # process_result(response, sample, answer_dict, out_samples)
+            process_result(response, sample, answer_dict, out_samples)
     else:
         semaphore = asyncio.Semaphore(args.concurrency)
         tasks = [

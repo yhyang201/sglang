@@ -23,7 +23,7 @@ import logging
 import threading
 import time
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 import torch
 
@@ -171,23 +171,22 @@ class EncodeBootstrapQueue:
         self,
         return_failed_reqs: bool = False,
         rids_to_check: Optional[List[str]] = None,
-    ) -> List[Req]:
+    ) -> Tuple[List[Req], List[Req]]:
         """
         pop the reqs which has finished bootstrapping
 
         return_failed_reqs: For PP, on rank 0, also return the failed reqs to notify the next rank
         rids_to_check: For PP, on rank > 0, check the rids from the previous rank has consensus with the current rank.
         """
+        if len(self.waiting_reqs) == 0:
+            if not return_failed_reqs:
+                return [], []
+            else:
+                return [], []
 
         bootstrapped_reqs = []
         failed_reqs = []
         indices_to_remove = set()
-
-        if len(self.waiting_reqs) == 0:
-            if not return_failed_reqs:
-                return []
-            else:
-                return [], []
 
         polls = poll_and_all_reduce(
             [req.disagg_kv_sender for req in self.waiting_reqs], self.gloo_group
@@ -236,7 +235,7 @@ class EncodeBootstrapQueue:
 
         # print(f"{len(bootstrapped_reqs)=}")
         if not return_failed_reqs:
-            return bootstrapped_reqs
+            return bootstrapped_reqs, []
         else:
             return bootstrapped_reqs, failed_reqs
 
@@ -402,9 +401,11 @@ class SchedulerDisaggregationEncodeMixin:
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
-            self.waiting_queue.extend(
+            bootstrapped, _failed = (
                 self.disagg_encode_bootstrap_queue.pop_bootstrapped()
             )
+
+            self.waiting_queue.extend(bootstrapped)
             batch = self.get_new_batch_encode()
 
             # if require_mlp_sync(self.server_args):

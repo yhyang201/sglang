@@ -408,8 +408,8 @@ def _get_chunked_prefill_embedding(
                 embedding_per_req = mm_embedding_pool.get_mm_embedding(
                     mm_hashes, combined_hash
                 )
-                print(f"mm_utils 410 | {mm_hashes=} {combined_hash=}")
-                print(f"{embedding_per_req.shape=}")
+                # print(f"mm_utils 410 | {mm_hashes=} {combined_hash=}")
+                # print(f"{embedding_per_req.shape=}")
             else:
                 if disaggregation_mode != "encode":
                     print("NO!!!!!!!!!!!!!!!!!")

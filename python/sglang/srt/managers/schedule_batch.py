@@ -637,7 +637,7 @@ class Req:
         self.mm_embedding_lens = [
             mm_item.token_len for mm_item in self.multimodal_inputs.mm_items
         ]
-        print(f"{self.mm_embedding_lens=}")
+        # print(f"{self.mm_embedding_lens=}")
         self.cu_mm_embedding_len = sum(self.mm_embedding_lens)
 
     def finished(self) -> bool:

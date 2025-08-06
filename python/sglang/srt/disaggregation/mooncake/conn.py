@@ -516,8 +516,8 @@ class MooncakeKVManager(BaseKVManager):
         item_len = self.kv_args.kv_item_lens[0]
 
         src_addr = self.kv_args.kv_data_ptrs[0] + int(mm_indices[0]) * item_len
-        print(f"{type(dst_mm_ptrs)=}, {dst_mm_ptrs=}")
-        print(f"{type(dst_mm_indices)=}, {dst_mm_indices=}")
+        # print(f"{type(dst_mm_ptrs)=}, {dst_mm_ptrs=}")
+        # print(f"{type(dst_mm_indices)=}, {dst_mm_indices=}")
         print(f"{type(item_len)=}, {item_len=}")
         dst_addr = dst_mm_ptrs[0] + int(dst_mm_indices[0]) * item_len
         length = item_len * len(mm_indices)
