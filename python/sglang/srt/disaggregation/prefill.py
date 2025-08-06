@@ -703,9 +703,8 @@ class MMEmbeddingPreallocQueue:
         print(f"prefill 699 | {mm_hash=}")
         print(f"prefill 701 | {mm_embedding_lens=}")
 
-        embedding_locs = self.token_to_kv_pool_allocator.alloc(mm_embedding_lens)
-        self.mm_embedding_pool.reserve_mm_embedding(
-            mm_hash, mm_embedding_lens, embedding_locs
+        embedding_locs = self.mm_embedding_pool.reserve_mm_embedding(
+            mm_hash, mm_embedding_lens, self.token_to_kv_pool_allocator
         )
 
         # assert (

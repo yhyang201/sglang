@@ -427,10 +427,10 @@ def _get_chunked_prefill_embedding(
         if disaggregation_mode == "encode":
             print(f"mm_utils 419 | {combined_hash}")
             assert isinstance(embedding_per_req, torch.Tensor)
-            num_token = embedding_per_req.shape[0]
             mm_embedding_pool = mm_embedding_allocator.get_kvcache()
-            loc = mm_embedding_allocator.alloc(num_token)
-            mm_embedding_pool.set_mm_embedding(combined_hash, embedding_per_req, loc)
+            mm_embedding_pool.set_mm_embedding(
+                combined_hash, embedding_per_req, mm_embedding_allocator
+            )
             embedding_list.append(
                 embedding_per_req
             )  # FIXME(encode's model should early exit)

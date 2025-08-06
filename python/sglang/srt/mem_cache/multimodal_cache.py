@@ -3,6 +3,8 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
+from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
+
 
 class MultimodalCache(abc.ABC):
     @abc.abstractmethod
@@ -257,10 +259,17 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
         return torch.cat(individual_embeddings, dim=0)
 
     def set_mm_embedding(
-        self, mm_hash: int, embedding: torch.Tensor, loc: Optional[torch.Tensor] = None
+        self,
+        mm_hash: int,
+        embedding: torch.Tensor,
+        token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator,
     ) -> bool:
         if mm_hash in self.mm_hash_to_indices:
             return True  # FIXME(yyh): No, we have to free the LOC.
+
+        loc = token_to_kv_pool_allocator.alloc(embedding.shape[0])
+        if loc is None:
+            raise RuntimeError("Out of memory—needs to be handled.")
 
         if embedding.dtype != self.dtype:
             embedding = embedding.to(self.dtype)
@@ -277,14 +286,22 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
         return True
 
     def reserve_mm_embedding(
-        self, mm_hash: int, num_tokens: int, loc: torch.Tensor
-    ) -> bool:
-        if mm_hash in self.mm_hash_to_indices:
-            return True
+        self,
+        mm_hash: int,
+        num_tokens: int,
+        token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator,
+    ) -> torch.Tensor:
+        # if mm_hash in self.mm_hash_to_indices:
+        #     return True
+        # Even if mm_hash exists in mm_hash_to_indices, it should still return loc
+        # caching should be handled elsewhere
+        loc = token_to_kv_pool_allocator.alloc(num_tokens)
+        if loc is None:
+            raise RuntimeError("Out of memory—needs to be handled.")
 
         self.mm_hash_to_indices[mm_hash] = loc
         self.used_size += num_tokens
-        return True
+        return loc
 
     def has(self, mm_hash: int) -> bool:
         return mm_hash in self.mm_hash_to_indices
