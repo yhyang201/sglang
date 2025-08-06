@@ -536,7 +536,6 @@ class ForwardBatch:
                             int(self.seq_lens[batch_idx]),
                         )
                     ]
-                print(f"{next_input_positions=}")
 
                 # 3 * N
                 mrope_positions_list[batch_idx] = torch.cat(next_input_positions, dim=1)

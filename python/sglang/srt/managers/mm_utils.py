@@ -397,14 +397,19 @@ def _get_chunked_prefill_embedding(
             continue
 
         embedding_per_req = embedding_cache.get_mm_embedding(mm_hashes)
-        print(f"{embedding_per_req=}")
         if embedding_per_req is None:
-            print(f"mm_utils 402 | {mm_embedding_pool=}")
-            if mm_embedding_pool is None:
-                mm_embedding_pool = mm_embedding_allocator.get_kvcache()  # temp
-            print(f"mm_utils 405 | {mm_embedding_pool=}")
+            # print(f"mm_utils 402 | {mm_embedding_pool=}")
+            # if mm_embedding_pool is None:
+            #     mm_embedding_pool = mm_embedding_allocator.get_kvcache()  # temp
+            # print(f"mm_utils 405 | {mm_embedding_pool=}")
 
-            if mm_embedding_pool is not None and disaggregation_mode != "encode":
+            if (
+                disaggregation_mode == "prefill"
+                and global_server_args_dict["encoder_disaggregated"]
+                or disaggregation_mode == "text"
+            ):
+                assert mm_embedding_pool
+                print(f"Getting embedding from pool...")
                 embedding_per_req = mm_embedding_pool.get_mm_embedding(
                     mm_hashes, combined_hash
                 )
@@ -739,7 +744,6 @@ def general_mm_embed_routine(
     if disaggregation_mode == "encode":
         return inputs_embeds
 
-    print(f"{positions=}")
     hidden_states = language_model(
         input_ids=None,
         forward_batch=forward_batch,

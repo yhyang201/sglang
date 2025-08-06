@@ -821,7 +821,10 @@ class Scheduler(
                 self.disagg_prefill_inflight_queue: List[Req] = []
 
             # TODO: only if encode is disaggregated
-            if self.server_args.encoder_disaggregated:
+            if (
+                self.server_args.encoder_disaggregated
+                or self.server_args.disaggregation_mode == "text"
+            ):
                 # The prefill requests polling mm embedding cache
                 self.disagg_prefill_transfer_queue = MMEmbeddingTransferQueue(
                     gloo_group=self.attn_tp_cpu_group,
