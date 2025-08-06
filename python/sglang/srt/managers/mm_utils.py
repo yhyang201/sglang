@@ -399,8 +399,8 @@ def _get_chunked_prefill_embedding(
         embedding_per_req = embedding_cache.get_mm_embedding(mm_hashes)
         if embedding_per_req is None:
             # print(f"mm_utils 402 | {mm_embedding_pool=}")
-            # if mm_embedding_pool is None:
-            #     mm_embedding_pool = mm_embedding_allocator.get_kvcache()  # temp
+            if mm_embedding_pool is None:
+                mm_embedding_pool = mm_embedding_allocator.get_kvcache()  # temp
             # print(f"mm_utils 405 | {mm_embedding_pool=}")
 
             if (
