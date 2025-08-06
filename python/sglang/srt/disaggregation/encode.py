@@ -349,11 +349,6 @@ class SchedulerDisaggregationEncodeMixin:
         # Prepare the batch for extend mode (encode is similar to extend)
         new_batch.prepare_for_extend(should_set_req_pool_indices=False)
 
-        total_embedding_lens = sum(req.cu_mm_embedding_len for req in new_batch.reqs)
-        self.mm_embedding_allocator.alloc(total_embedding_lens)
-        print(
-            f"mm_embedding_allocator remained size: {self.mm_embedding_allocator.available_size()=}"
-        )
         # Encode mode doesn't have decoding requests
         new_batch.decoding_reqs = None
 
@@ -420,7 +415,7 @@ class SchedulerDisaggregationEncodeMixin:
                 result = self.run_batch(batch)
                 self.process_batch_result_disagg_encode(batch, result)
 
-            # self.process_disagg_encode_inflight_queue()
+            self.process_disagg_encode_inflight_queue()
 
             if batch is None and len(self.disagg_encode_inflight_queue) == 0:
                 # self.check_memory()
@@ -562,6 +557,7 @@ class SchedulerDisaggregationEncodeMixin:
         print("setting finish reason")
         for i, req in enumerate(batch.reqs):
             req.finished_reason = FINISH_LENGTH(length=0)
+            self.disagg_encode_inflight_queue.append(req)
             self.send_embedding_chunk(req)
 
         # for i, req in enumerate(batch.reqs):
@@ -603,7 +599,11 @@ class SchedulerDisaggregationEncodeMixin:
             if poll in [KVPoll.WaitingForInput, KVPoll.Transferring]:
                 undone_reqs.append(req)
             elif poll == KVPoll.Success:  # transfer done
-                self.mm_embedding_allocator.free(req.cu_mm_embedding_len)
+                mm_hash = MultimodalCache.combine_hashes(
+                    [item.hash for item in req.multimodal_inputs.mm_items]
+                )
+                loc = self.mm_embedding_pool.free(mm_hash)
+                self.mm_embedding_allocator.free(loc)
                 # self.tree_cache.cache_finished_req(req)  # unlock the tree
                 req.finished_reason = FINISH_LENGTH(length=0)
                 # FIXME: clean up req's data in transfer engine
@@ -617,7 +617,11 @@ class SchedulerDisaggregationEncodeMixin:
                 except Exception as e:
                     error_message += f" with exception {e}"
                 logger.warning(error_message)
-                self.mm_embedding_allocator.free(req.cu_mm_embedding_len)
+                mm_hash = MultimodalCache.combine_hashes(
+                    [item.hash for item in req.multimodal_inputs.mm_items]
+                )
+                loc = self.mm_embedding_pool.free(mm_hash)
+                self.mm_embedding_allocator.free(loc)
                 # self.tree_cache.cache_finished_req(req)  # unlock the tree
                 prepare_abort(
                     req, error_message, status_code=HTTPStatus.INTERNAL_SERVER_ERROR
@@ -627,7 +631,7 @@ class SchedulerDisaggregationEncodeMixin:
                 assert False, f"Unexpected polling state {poll=}"
 
         # Stream requests which have finished transfer
-        print(f"streaming requests out")
+        # print(f"streaming requests out")
         self.stream_output(
             done_reqs,
             any(req.return_logprob for req in done_reqs),

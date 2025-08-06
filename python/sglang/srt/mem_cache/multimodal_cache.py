@@ -262,12 +262,12 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
         self,
         mm_hash: int,
         embedding: torch.Tensor,
-        token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator,
+        mm_embedding_allocator: BaseTokenToKVPoolAllocator,
     ) -> bool:
         if mm_hash in self.mm_hash_to_indices:
-            return True  # FIXME(yyh): No, we have to free the LOC.
+            return True
 
-        loc = token_to_kv_pool_allocator.alloc(embedding.shape[0])
+        loc = mm_embedding_allocator.alloc(embedding.shape[0])
         if loc is None:
             raise RuntimeError("Out of memory—needs to be handled.")
 
@@ -289,13 +289,13 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
         self,
         mm_hash: int,
         num_tokens: int,
-        token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator,
+        mm_embedding_allocator: BaseTokenToKVPoolAllocator,
     ) -> torch.Tensor:
         # if mm_hash in self.mm_hash_to_indices:
         #     return True
         # Even if mm_hash exists in mm_hash_to_indices, it should still return loc
         # caching should be handled elsewhere
-        loc = token_to_kv_pool_allocator.alloc(num_tokens)
+        loc = mm_embedding_allocator.alloc(num_tokens)
         if loc is None:
             raise RuntimeError("Out of memory—needs to be handled.")
 
@@ -306,12 +306,12 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
     def has(self, mm_hash: int) -> bool:
         return mm_hash in self.mm_hash_to_indices
 
-    def free(self, mm_hash: int) -> bool:
+    def free(self, mm_hash: int) -> torch.Tensor:
         if mm_hash in self.mm_hash_to_indices:
-            embedding = self.mm_hash_to_indices.pop(mm_hash)
-            self.used_size -= embedding.size(0)
-            return True
-        return False
+            indices = self.mm_hash_to_indices.pop(mm_hash)
+            self.used_size -= indices.size(0)
+            return indices
+        return torch.tensor([])
 
     def clear(self):
         self.mm_hash_to_indices.clear()
