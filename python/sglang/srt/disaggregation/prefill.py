@@ -720,7 +720,7 @@ class SchedulerDisaggregationPrefillMixin:
     Mixin for Scheduler to handle disaggregation prefill
     """
 
-    def poll_prefill_req_to_waiting_queue_with_encoder_disaggregated(self: Scheduler):
+    def process_prefill_bootstrapping_queue(self: Scheduler):
         """
         Poll the requests in the middle of transfer. If done, return the request.
         rids_to_check: For PP, on rank > 0, check the rids from the previous rank has consensus with the current rank.
@@ -768,8 +768,8 @@ class SchedulerDisaggregationPrefillMixin:
             self.process_input_requests(recv_reqs)
             if self.server_args.encoder_disaggregated:
 
-                self.process_prefill_queue_with_encoder_disaggregated()
-                self.poll_prefill_req_to_waiting_queue_with_encoder_disaggregated()
+                self.process_prefill_mm_embedding_transfer_queue()
+                self.process_prefill_bootstrapping_queue()
             else:
                 bootstrapped, _failed = (
                     self.disagg_encode_bootstrap_queue.pop_bootstrapped()
@@ -806,8 +806,8 @@ class SchedulerDisaggregationPrefillMixin:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
             if self.server_args.encoder_disaggregated:
-                self.process_prefill_queue_with_encoder_disaggregated()
-                self.poll_prefill_req_to_waiting_queue_with_encoder_disaggregated()
+                self.process_prefill_mm_embedding_transfer_queue()
+                self.process_prefill_bootstrapping_queue()
             else:
                 bootstrapped, _failed = (
                     self.disagg_encode_bootstrap_queue.pop_bootstrapped()
@@ -1121,7 +1121,7 @@ class SchedulerDisaggregationPrefillMixin:
             return
         req.disagg_kv_sender.send(page_indices)
 
-    def process_prefill_queue_with_encoder_disaggregated(self: Scheduler):
+    def process_prefill_mm_embedding_transfer_queue(self: Scheduler):
         """
         process text-model prefill queue when encoder if disaggregated, dumping mm_received req to disagg_prefill_bootstrap_queue, waiting to be bootstrapped
         """
@@ -1135,14 +1135,11 @@ class SchedulerDisaggregationPrefillMixin:
         # the req whose embedding has been pre-allocated
         # TODO: this is time-consuming and foreground
         allocated_reqs = self.disagg_prefill_prealloc_queue.pop_preallocated()
-        # if allocated_reqs:
-        #     print(f"{allocated_reqs=}")
         self.disagg_prefill_receiving_queue.extend(allocated_reqs)
 
         mm_received_reqs = self.disagg_prefill_receiving_queue.pop_transferred()
         if mm_received_reqs:
-            if self.server_args.disaggregation_mode == "encode":
-                # print(f"{mm_received_reqs=}")
+            if self.server_args.disaggregation_mode == "prefill":
                 # Find requests that are already in the bootstrapped_queue
                 received_rooms = {req.bootstrap_room for req in mm_received_reqs}
                 ready_reqs = [
@@ -1150,9 +1147,6 @@ class SchedulerDisaggregationPrefillMixin:
                     for req in self.bootstrapped_queue
                     if req.bootstrap_room in received_rooms
                 ]
-
-                # if ready_reqs:
-                #     print(f"{ready_reqs=}")
 
                 # Add ready requests to the waiting_queue
                 self.waiting_queue.extend(ready_reqs)

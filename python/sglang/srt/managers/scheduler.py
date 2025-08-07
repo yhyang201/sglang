@@ -1197,7 +1197,7 @@ class Scheduler(
         if self.server_args.disaggregation_mode == "text":
             # TEXT mode
             # FIXME: is this place appropriate?
-            self.process_prefill_queue_with_encoder_disaggregated()
+            self.process_prefill_mm_embedding_transfer_queue()
 
     def handle_generate_request(
         self,
@@ -1381,10 +1381,7 @@ class Scheduler(
                 else:
                     # no mm presented, directly wait to be bootstrapped
                     self.embedding_received_queue.append(req)
-            elif (
-                self.disaggregation_mode == DisaggregationMode.PREFILL
-                and not self.server_args.encoder_disaggregated
-            ):
+            elif self.disaggregation_mode == DisaggregationMode.PREFILL:
                 self.disagg_prefill_bootstrap_queue.add(req)
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
             self.disagg_decode_prealloc_queue.add(req)
