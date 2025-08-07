@@ -176,8 +176,10 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
         else:
             self.store_dtype = dtype
 
+        self.capacity = self.size + self.page_size
+
         self.mm_buffer = torch.zeros(
-            (self.size + self.page_size, self.hidden_size),
+            (self.capacity, self.hidden_size),
             dtype=self.store_dtype,
             device=self.device,
         )
@@ -190,7 +192,7 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
         # self.cpu_offloading_chunk_size = 8192
 
     # for disaggregation, aligned with get_contiguous_buf_infos
-    def get_mm_buffer_info(self) -> Tuple[List[int], int, List[int]]:
+    def get_mm_buffer_info(self) -> Tuple[List[int], List[int], List[int]]:
         """Returns the pointer, size, and item length of the multimodal buffer."""
         return (
             [self.mm_buffer.data_ptr()],
@@ -335,11 +337,11 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
     def __len__(self):
         return len(self.mm_hash_to_indices)
 
-    def capacity(self) -> int:
-        return self.mm_buffer.size(0)
+    # def capacity(self) -> int:
+    #     return self.mm_buffer.size(0)
 
     def allocated(self) -> int:
         return self.used_size
 
     def available_size(self):
-        return self.capacity() - self.allocated()
+        return self.capacity - self.allocated()

@@ -1027,7 +1027,7 @@ class MooncakeKVManager(BaseKVManager):
         return self.request_status[bootstrap_room]
 
     def update_status(self, bootstrap_room: int, status: KVPoll):
-        print(f"update status of {bootstrap_room=} with {status=}")
+        # print(f"update status of {bootstrap_room=} with {status=}")
         if bootstrap_room not in self.request_status:
             self.request_status[bootstrap_room] = status
         else:

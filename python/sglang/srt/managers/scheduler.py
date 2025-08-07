@@ -554,10 +554,16 @@ class Scheduler(
         if get_bool_env_var("SGLANG_GC_LOG"):
             configure_gc_logger()
 
-        # vision disaggregation related
+        # epd related
+        # reqs which have already been bootstrapped
+
+        # a image-containing req should go to:
+        # 1. disagg_prefill_prealloc_queue -> disagg_prefill_receiving_queue -> mm_received_reqs
+        # 2. disagg_prefill_bootstrap_queue
+        # before going into waiting_queue
         self.bootstrapped_queue: List[Req] = []
-        # reqs waiting for associated mm embeddings to be transferred
-        self.embedding_received_bootstrapped_queue: List[Req] = []
+        # reqs whose required mm embedding has already been received
+        self.embedding_received_queue: List[Req] = []
 
     def current_scheduler_metrics_enabled(self):
         return self.attn_tp_rank == 0 or self.enable_metrics_for_all_schedulers
@@ -1174,7 +1180,6 @@ class Scheduler(
     def process_input_requests(self, recv_reqs: List):
         for recv_req in recv_reqs:
             # If it is a health check generation request and there are running requests, ignore it.
-            # print(f"{recv_req=}")
             if is_health_check_generate_req(recv_req) and (
                 self.chunked_req is not None or not self.running_batch.is_empty()
             ):
@@ -1368,12 +1373,13 @@ class Scheduler(
             or self.disaggregation_mode == DisaggregationMode.TEXT
         ):
             if self.server_args.encoder_disaggregated:
+                self.disagg_prefill_bootstrap_queue.add(req)
                 if req.contains_mm_input():
-                    # pre-allocate first
+                    # requires receiving mm embedding
                     self.disagg_prefill_prealloc_queue.add(req)
                 else:
                     # no mm presented, directly wait to be bootstrapped
-                    self.disagg_prefill_bootstrap_queue.add(req)
+                    self.embedding_received_queue.append(req)
             elif (
                 self.disaggregation_mode == DisaggregationMode.PREFILL
                 and not self.server_args.encoder_disaggregated
@@ -2387,8 +2393,9 @@ class Scheduler(
             self.tree_cache.reset()
             if self.grammar_backend:
                 self.grammar_backend.reset()
-            self.req_to_token_pool.clear()
-            self.token_to_kv_pool_allocator.clear()
+            if self.req_to_token_pool:
+                self.req_to_token_pool.clear()
+                self.token_to_kv_pool_allocator.clear()
 
             if not self.spec_algorithm.is_none():
                 self.draft_worker.model_runner.mm_embedding_pool.clear()
