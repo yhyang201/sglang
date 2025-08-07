@@ -158,7 +158,7 @@ class PrefillBootstrapQueue:
         )
         return kv_manager
 
-    def add(self, req: Req, num_kv_heads: int) -> None:
+    def add(self, req: Req) -> None:
         if self._check_if_req_exceed_kv_capacity(req):
             return
 
@@ -179,9 +179,9 @@ class PrefillBootstrapQueue:
         self._process_req(req)
         self.queue.append(req)
 
-    def extend(self, reqs: List[Req], num_kv_heads: int) -> None:
+    def extend(self, reqs: List[Req]) -> None:
         for req in reqs:
-            self.add(req, num_kv_heads)
+            self.add(req)
 
     def _check_if_req_exceed_kv_capacity(self, req: Req) -> bool:
         if len(req.origin_input_ids) > self.max_total_num_tokens:
@@ -1167,14 +1167,10 @@ class SchedulerDisaggregationPrefillMixin:
         # the requests whose embedding has arrived
         mm_received_reqs = self.disagg_prefill_receiving_queue.pop_transferred()
         # TODO: the pop-out from prefill_bootstrap queue and prefill_receiving_queue should probably be merged to reduce overhead
-        if (
-            self.server_args.encoder_disaggregated
-            and self.server_args.disaggregation_mode == DisaggregationMode.TEXT
-        ):
-            self.disagg_prefill_bootstrap_queue.extend(
-                mm_received_reqs, self.model_config.num_key_value_heads
-            )
+        if self.server_args.encoder_disaggregated:
+            self.disagg_prefill_bootstrap_queue.extend(mm_received_reqs)
         else:
+            raise RuntimeError("unreachable")
             self.waiting_queue.extend(mm_received_reqs)
         # self.embedding_received_bootstrapped_queue.extend(mm_received_reqs)
 

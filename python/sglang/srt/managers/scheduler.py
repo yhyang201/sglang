@@ -1373,16 +1373,12 @@ class Scheduler(
                     self.disagg_prefill_prealloc_queue.add(req)
                 else:
                     # no mm presented, directly wait to be bootstrapped
-                    self.disagg_prefill_bootstrap_queue.add(
-                        req, self.model_config.num_key_value_heads
-                    )
+                    self.disagg_prefill_bootstrap_queue.add(req)
             elif (
                 self.disaggregation_mode == DisaggregationMode.PREFILL
                 and not self.server_args.encoder_disaggregated
             ):
-                self.disagg_prefill_bootstrap_queue.add(
-                    req, self.model_config.num_key_value_heads
-                )
+                self.disagg_prefill_bootstrap_queue.add(req)
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
             self.disagg_decode_prealloc_queue.add(req)
         elif self.disaggregation_mode == DisaggregationMode.ENCODE:
@@ -1405,9 +1401,7 @@ class Scheduler(
 
     def _extend_requests_to_queue(self, reqs: List[Req], is_retracted: bool = False):
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            self.disagg_prefill_bootstrap_queue.extend(
-                reqs, self.model_config.num_key_value_heads
-            )
+            self.disagg_prefill_bootstrap_queue.extend(reqs)
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
             # If this is a decode server, we put the request to the decode pending prealloc queue
             self.disagg_decode_prealloc_queue.extend(reqs, is_retracted)
