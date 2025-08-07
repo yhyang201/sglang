@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
@@ -44,6 +45,7 @@ from sglang.srt.mem_cache.multimodal_cache import (
     MultimodalCache,
     PagedMultiModalEmbeddingPool,
 )
+from sglang.srt.model_executor.forward_batch_info import ForwardMode
 
 if TYPE_CHECKING:
     pass
@@ -404,8 +406,8 @@ class SchedulerDisaggregationEncodeMixin:
             bootstrapped, _failed = (
                 self.disagg_encode_bootstrap_queue.pop_bootstrapped()
             )
-
             self.waiting_queue.extend(bootstrapped)
+
             batch = self.get_new_batch_encode()
 
             # if require_mlp_sync(self.server_args):
@@ -428,55 +430,55 @@ class SchedulerDisaggregationEncodeMixin:
             # Otherwise, it hangs under high concurrency
             self.running_batch.batch_is_full = False
 
-    # @torch.no_grad()
-    # def event_loop_overlap_disagg_encode(self: Scheduler) -> None:
-    #     self.result_queue = deque()
-    #
-    #     while True:
-    #         recv_reqs = self.recv_requests()
-    #         self.process_input_requests(recv_reqs)
-    #         self.waiting_queue.extend(
-    #             self.disagg_encode_bootstrap_queue.pop_bootstrapped()
-    #         )
-    #         # self.process_prefill_chunk()
-    #         batch = self.get_new_batch_encode()
-    #
-    #         if require_mlp_sync(self.server_args):
-    #             batch = self.prepare_mlp_sync_batch(batch)
-    #         self.cur_batch = batch
-    #         if batch:
-    #             result = self.run_batch(batch)
-    #             self.result_queue.append((batch.copy(), result))
-    #
-    #             if self.last_batch is None:
-    #                 # Create a dummy first batch to start the pipeline for overlap schedule.
-    #                 # It is now used for triggering the sampling_info_done event.
-    #                 tmp_batch = ScheduleBatch(
-    #                     reqs=None,
-    #                     forward_mode=ForwardMode.DUMMY_FIRST,
-    #                     next_batch_sampling_info=self.tp_worker.cur_sampling_info,
-    #                 )
-    #                 self.set_next_batch_sampling_info_done(tmp_batch)
-    #
-    #         if self.last_batch:
-    #             tmp_batch, tmp_result = self.result_queue.popleft()
-    #             tmp_batch.next_batch_sampling_info = (
-    #                 self.tp_worker.cur_sampling_info if batch else None
-    #             )
-    #             self.process_batch_result_disagg_encode(tmp_batch, tmp_result)
-    #
-    #         if len(self.disagg_encode_inflight_queue) > 0:
-    #             self.process_disagg_encode_inflight_queue()
-    #
-    #         if batch is None and len(self.disagg_encode_inflight_queue) == 0:
-    #             self.check_memory()
-    #             self.new_token_ratio = self.init_new_token_ratio
-    #             self.maybe_sleep_on_idle()
-    #
-    #         self.last_batch = batch
-    #         # HACK (byronhsu): reset the batch_is_full flag because we never enter update_running_batch which resets it
-    #         # Otherwise, it hangs under high concurrency
-    #         self.running_batch.batch_is_full = False
+    @torch.no_grad()
+    def event_loop_overlap_disagg_encode(self: Scheduler) -> None:
+        self.result_queue = deque()
+
+        while True:
+            recv_reqs = self.recv_requests()
+            self.process_input_requests(recv_reqs)
+
+            bootstrapped, _failed = (
+                self.disagg_encode_bootstrap_queue.pop_bootstrapped()
+            )
+            self.waiting_queue.extend(bootstrapped)
+
+            batch = self.get_new_batch_encode()
+
+            self.cur_batch = batch
+            if batch:
+                result = self.run_batch(batch)
+                self.result_queue.append((batch.copy(), result))
+
+                if self.last_batch is None:
+                    # Create a dummy first batch to start the pipeline for overlap schedule.
+                    # It is now used for triggering the sampling_info_done event.
+                    tmp_batch = ScheduleBatch(
+                        reqs=None,
+                        forward_mode=ForwardMode.DUMMY_FIRST,
+                        next_batch_sampling_info=self.tp_worker.cur_sampling_info,
+                    )
+                    self.set_next_batch_sampling_info_done(tmp_batch)
+
+            if self.last_batch:
+                tmp_batch, tmp_result = self.result_queue.popleft()
+                tmp_batch.next_batch_sampling_info = (
+                    self.tp_worker.cur_sampling_info if batch else None
+                )
+                self.process_batch_result_disagg_encode(tmp_batch, tmp_result)
+
+            if len(self.disagg_encode_inflight_queue) > 0:
+                self.process_disagg_encode_inflight_queue()
+
+            if batch is None and len(self.disagg_encode_inflight_queue) == 0:
+                # self.check_memory()
+                self.new_token_ratio = self.init_new_token_ratio
+                self.maybe_sleep_on_idle()
+
+            self.last_batch = batch
+            # HACK (byronhsu): reset the batch_is_full flag because we never enter update_running_batch which resets it
+            # Otherwise, it hangs under high concurrency
+            self.running_batch.batch_is_full = False
 
     def process_batch_result_disagg_encode(
         self: Scheduler,

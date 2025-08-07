@@ -3090,7 +3090,7 @@ def run_scheduler_process(
                 scheduler.event_loop_normal_disagg_decode()
         elif disaggregation_mode == DisaggregationMode.ENCODE:
             if scheduler.enable_overlap:
-                raise RuntimeError("overlapped encode scheduler is not supported")
+                scheduler.event_loop_overlap_disagg_encode()
             else:
                 scheduler.event_loop_normal_disagg_encode()
 

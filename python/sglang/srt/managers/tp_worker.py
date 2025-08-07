@@ -274,7 +274,9 @@ class TpModelWorker:
             if launch_done is not None:
                 launch_done.set()
 
-            if skip_sample:
+            if self.server_args.disaggregation_mode == "encode":
+                next_token_ids = None
+            elif skip_sample:
                 next_token_ids = None
             else:
                 next_token_ids = self.model_runner.sample(

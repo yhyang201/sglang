@@ -29,7 +29,6 @@ import torch
 
 from sglang.srt.disaggregation.base import BaseKVManager, KVPoll
 from sglang.srt.disaggregation.decode import EmbeddingRequest
-from sglang.srt.disaggregation.mooncake import MooncakeKVSender
 from sglang.srt.disaggregation.utils import (
     FAKE_BOOTSTRAP_HOST,
     DisaggregationMode,
@@ -794,14 +793,6 @@ class SchedulerDisaggregationPrefillMixin:
                 bootstrapped, _failed = (
                     self.disagg_encode_bootstrap_queue.pop_bootstrapped()
                 )
-                if bootstrapped:
-                    # print(f"{[req.rid for req in batch.reqs]}")
-                    assert all(
-                        not isinstance(req.disagg_kv_sender, MooncakeKVSender)
-                        or hasattr(req.disagg_kv_sender, "num_kv_indices")
-                        for req in bootstrapped
-                    )
-
                 self.waiting_queue.extend(bootstrapped)
             self.process_prefill_chunk()
             batch = self.get_new_batch_prefill()
@@ -838,7 +829,7 @@ class SchedulerDisaggregationPrefillMixin:
                 self.poll_prefill_req_to_waiting_queue_with_encoder_disaggregated()
             else:
                 bootstrapped, _failed = (
-                    self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
+                    self.disagg_encode_bootstrap_queue.pop_bootstrapped()
                 )
                 self.waiting_queue.extend(bootstrapped)
             self.process_prefill_chunk()

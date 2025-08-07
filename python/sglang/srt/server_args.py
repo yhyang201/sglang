@@ -587,9 +587,9 @@ class ServerArgs:
             self.validate_disagg_tp_size(self.tp_size, self.disaggregation_decode_tp)
 
         elif self.disaggregation_mode == "encode":
-            if not self.disable_overlap_schedule:
-                self.disable_overlap_schedule = True
-                print(f"Automatically turn off overlap schedule for encoder")
+            # if not self.disable_overlap_schedule:
+            # self.disable_overlap_schedule = True
+            # print(f"Automatically turn off overlap schedule for encoder")
 
             # self.disable_cuda_graph = True
             # print(f"Automatically turn off cuda graph for encoder")
