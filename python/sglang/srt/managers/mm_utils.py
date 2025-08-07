@@ -24,7 +24,7 @@ from sglang.srt.mem_cache.multimodal_cache import (
     PagedMultiModalEmbeddingPool,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-from sglang.srt.utils import flatten_nested_list, print_warning_once
+from sglang.srt.utils import flatten_nested_list, print_info_once, print_warning_once
 from sglang.utils import logger
 
 # NOTE: Using the shared logger from sglang.utils instead of creating a module-specific logger
@@ -414,7 +414,7 @@ def _get_chunked_prefill_embedding(
                 if not embedding_cache.set_mm_embedding(
                     combined_hash, embedding_per_req
                 ):
-                    print_warning_once(
+                    print_info_once(
                         "Multimodal embedding cache is full. Consider increasing the "
                         "`SGLANG_MM_CACHE_SIZE_MB` environment variable."
                     )

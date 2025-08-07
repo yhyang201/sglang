@@ -518,10 +518,10 @@ class MooncakeKVManager(BaseKVManager):
         src_addr = self.kv_args.kv_data_ptrs[0] + int(mm_indices[0]) * item_len
         # print(f"{type(dst_mm_ptrs)=}, {dst_mm_ptrs=}")
         # print(f"{type(dst_mm_indices)=}, {dst_mm_indices=}")
-        print(f"{type(item_len)=}, {item_len=}")
+        # print(f"{type(item_len)=}, {item_len=}")
         dst_addr = dst_mm_ptrs[0] + int(dst_mm_indices[0]) * item_len
         length = item_len * len(mm_indices)
-        print(
+        logger.debug(
             f"{len(dst_mm_ptrs)=} {len(dst_mm_indices)=} {len(mm_indices)=}, {item_len=}"
         )
 
@@ -581,7 +581,7 @@ class MooncakeKVManager(BaseKVManager):
                     target_rank_registration_info: KVArgsRegisterInfo = (
                         self.decode_kv_args_table[req.mooncake_session_id]
                     )
-                    print(target_rank_registration_info)
+                    # print(target_rank_registration_info)
 
                     ret = self.send_embedding(
                         session_id=req.mooncake_session_id,
@@ -844,7 +844,7 @@ class MooncakeKVManager(BaseKVManager):
                     self.transfer_infos[room][mooncake_session_id] = (
                         TransferInfo.from_zmq(waiting_req_bytes)
                     )
-                    print(f"waiting_req_bytes {len(waiting_req_bytes[4])=}")
+                    logger.debug(f"waiting_req_bytes {len(waiting_req_bytes[4])=}")
                     # print(
                     #     f"transfer_infos {room=} {mooncake_session_id=} {self.transfer_infos[room][mooncake_session_id]=}"
                     # )
@@ -1699,7 +1699,6 @@ class MooncakeKVBootstrapServer(BaseKVBootstrapServer):
         return web.Response(text="OK", status=200)
 
     async def _handle_route_get(self, request: web.Request):
-        print("_handle_route_get")
         engine_rank = request.query.get("engine_rank")
         target_dp_group = request.query.get("target_dp_group")
         print(f"{engine_rank=}")

@@ -1167,10 +1167,10 @@ class SchedulerDisaggregationPrefillMixin:
         # the requests whose embedding has arrived
         mm_received_reqs = self.disagg_prefill_receiving_queue.pop_transferred()
         # TODO: the pop-out from prefill_bootstrap queue and prefill_receiving_queue should probably be merged to reduce overhead
-        if self.server_args.encoder_disaggregated:
+        if self.server_args.disaggregation_mode == "prefill":
             self.disagg_prefill_bootstrap_queue.extend(mm_received_reqs)
         else:
-            raise RuntimeError("unreachable")
+            # raise RuntimeError("unreachable")
             self.waiting_queue.extend(mm_received_reqs)
         # self.embedding_received_bootstrapped_queue.extend(mm_received_reqs)
 
