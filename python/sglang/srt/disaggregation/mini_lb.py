@@ -74,6 +74,7 @@ class MiniLoadBalancer:
         self.prefill_configs = prefill_configs
         self.prefill_servers = [p.url for p in prefill_configs]
         self.decode_servers = decode_servers
+        print(f"{encode_configs=}")
         self.encode_configs = encode_configs
         self.encode_servers = [p.url for p in encode_configs]
         self.text_addrs = text_servers
@@ -141,49 +142,68 @@ class MiniLoadBalancer:
                 total=3600
             )  # Add timeout for request reliability
         ) as session:
-            tasks_mapping = dict()
-            for server_role, server in [
-                (ServerRole.PREFILL, prefill_server),
-                (ServerRole.DECODE, decode_server),
-                (ServerRole.ENCODE, encode_server),
-                (ServerRole.TEXT, text_server),
-            ]:
-                if server:
-                    if (
-                        server_role == ServerRole.PREFILL
-                        or server_role == ServerRole.TEXT
-                    ):
-                        req = modified_request_for_prefill
-                    else:
-                        req = modified_request
-                    # print(f"req for {server_role}: {req=}")
-                    tasks_mapping[server_role] = session.post(
-                        f"{server}/{endpoint}", json=req
-                    )
+            return await self._get_responses_from_session(
+                session,
+                prefill_server,
+                decode_server,
+                encode_server,
+                text_server,
+                endpoint,
+                modified_request,
+                modified_request_for_prefill,
+            )
 
-            # print(f"requests {tasks_mapping.values()=}")
+    async def _get_responses_from_session(
+        self,
+        session,
+        prefill_server,
+        decode_server,
+        encode_server,
+        text_server,
+        endpoint,
+        modified_request,
+        modified_request_for_prefill,
+    ):
+        tasks_mapping = dict()
+        for server_role, server in [
+            (ServerRole.PREFILL, prefill_server),
+            (ServerRole.DECODE, decode_server),
+            (ServerRole.ENCODE, encode_server),
+            (ServerRole.TEXT, text_server),
+        ]:
+            if server:
+                if server_role == ServerRole.PREFILL or server_role == ServerRole.TEXT:
+                    req = modified_request_for_prefill
+                else:
+                    req = modified_request
+                # print(f"req for {server_role}: {req=}")
+                tasks_mapping[server_role] = session.post(
+                    f"{server}/{endpoint}", json=req
+                )
 
-            # Wait for all responses to complete. Prefill should end first.
-            responses = await asyncio.gather(*tasks_mapping.values())
+        # print(f"requests {tasks_mapping.values()=}")
 
-            # Extract responses based on server roles
-            response_mapping = {}
-            response_idx = 0
-            for server_role, _ in [
-                (ServerRole.PREFILL, prefill_server),
-                (ServerRole.DECODE, decode_server),
-                (ServerRole.ENCODE, encode_server),
-                (ServerRole.TEXT, text_server),
-            ]:
-                if server_role in tasks_mapping:
-                    response_mapping[server_role] = responses[response_idx]
-                    response_idx += 1
+        # Wait for all responses to complete. Prefill should end first.
+        responses = await asyncio.gather(*tasks_mapping.values())
 
-            prefill_response = response_mapping.get(ServerRole.PREFILL)
-            decode_response = response_mapping.get(ServerRole.DECODE)
-            encode_response = response_mapping.get(ServerRole.ENCODE)
-            text_response = response_mapping.get(ServerRole.TEXT)
-            return prefill_response, decode_response, encode_response, text_response
+        # Extract responses based on server roles
+        response_mapping = {}
+        response_idx = 0
+        for server_role, _ in [
+            (ServerRole.PREFILL, prefill_server),
+            (ServerRole.DECODE, decode_server),
+            (ServerRole.ENCODE, encode_server),
+            (ServerRole.TEXT, text_server),
+        ]:
+            if server_role in tasks_mapping:
+                response_mapping[server_role] = responses[response_idx]
+                response_idx += 1
+
+        prefill_response = response_mapping.get(ServerRole.PREFILL)
+        decode_response = response_mapping.get(ServerRole.DECODE)
+        encode_response = response_mapping.get(ServerRole.ENCODE)
+        text_response = response_mapping.get(ServerRole.TEXT)
+        return prefill_response, decode_response, encode_response, text_response
 
     async def generate(
         self,
@@ -210,13 +230,15 @@ class MiniLoadBalancer:
         if "return_logprob" in modified_request:
             final_response = decode_response
             if prefill_response and decode_response:
-                prefill_json = await prefill_response.json()
-                ret_json = await decode_response.json()
+                # Concurrently parse JSON to improve performance
+                prefill_json, ret_json = await asyncio.gather(
+                    prefill_response.json(), decode_response.json()
+                )
                 # merge `meta_info.input_token_logprobs` from prefill to decode
-                if "meta_info" in ret_json:
+                if "meta_info" in ret_json and "meta_info" in prefill_json:
                     if "input_token_logprobs" in ret_json["meta_info"]:
                         ret_json["meta_info"]["input_token_logprobs"] = (
-                            prefill_json["meta_info"]["input_token_logprobs"]
+                            prefill_json["meta_info"].get("input_token_logprobs", [])
                             + ret_json["meta_info"]["input_token_logprobs"]
                         )
             else:
@@ -227,7 +249,7 @@ class MiniLoadBalancer:
                 final_response = decode_response
             else:
                 assert text_server
-                # print(f"using text response as decode_response")
+                print(f"using text response as decode_response")
                 final_response = text_response
             ret_json = await final_response.json() if final_response else {}
 
@@ -249,8 +271,18 @@ class MiniLoadBalancer:
         assert endpoint[0] != "/", f"Endpoint should not start with '/': {endpoint}"
 
         async def stream_results():
-            prefill_response, decode_response, encode_response, text_response = (
-                await self.get_responses(
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(
+                    total=3600
+                )  # Add timeout for request reliability
+            ) as session:
+                (
+                    prefill_response,
+                    decode_response,
+                    encode_response,
+                    text_response,
+                ) = await self._get_responses_from_session(
+                    session,
                     prefill_server,
                     decode_server,
                     encode_server,
@@ -259,47 +291,59 @@ class MiniLoadBalancer:
                     modified_request,
                     modified_request_for_prefill,
                 )
-            )
 
-            if decode_server:
-                final_response = decode_response
-            else:
-                assert text_server
-                # print(f"using text response as decode_response")
-                final_response = text_response
-            if modified_request.get("return_logprob", False):
-                prefill_chunks = []
-                async for chunk in prefill_response.content:
-                    prefill_chunks.append(chunk)
+                if decode_server:
+                    final_response = decode_response
+                else:
+                    assert text_server
+                    # print(f"using text response as decode_response")
+                    final_response = text_response
+                if modified_request.get("return_logprob", False):
+                    # Optimized logprob handling for streaming
+                    # 1. Read the entire prefill response first.
+                    prefill_body = await prefill_response.read()
+                    prefill_response.release()  # Release connection early
 
-                first_prefill_chunk = prefill_chunks[0].decode("utf-8")[5:].strip("\n")
-                first_prefill_chunk_json = orjson.loads(first_prefill_chunk)
+                    # 2. Extract the first chunk of prefill to get initial logprobs
+                    first_prefill_chunk = (
+                        prefill_body.split(b"\n\n")[0].decode("utf-8")[5:].strip()
+                    )
+                    first_prefill_chunk_json = orjson.loads(first_prefill_chunk)
+                    initial_logprobs = first_prefill_chunk_json["meta_info"].get(
+                        "input_token_logprobs", []
+                    )
 
-                async for chunk in final_response.content:
-                    # Note: This is inefficient
-                    # merge prefill input_token_logprobs, output_token_logprobs to decode
-                    decoded_chunk = chunk.decode("utf-8")
-                    if (
-                        decoded_chunk
-                        and decoded_chunk.startswith("data:")
-                        and "[DONE]" not in decoded_chunk
+                    # 3. Process the decode stream
+                    first_chunk = True
+                    async for chunk in final_response.content:
+                        if first_chunk:
+                            # For the first chunk, merge the logprobs
+                            decoded_chunk = chunk.decode("utf-8")
+                            if (
+                                decoded_chunk
+                                and decoded_chunk.startswith("data:")
+                                and "[DONE]" not in decoded_chunk
+                            ):
+                                ret_json = orjson.loads(decoded_chunk[5:].strip("\n"))
+                                if "meta_info" in ret_json:
+                                    ret_json["meta_info"]["input_token_logprobs"] = (
+                                        initial_logprobs
+                                        + ret_json["meta_info"].get(
+                                            "input_token_logprobs", []
+                                        )
+                                    )
+                                yield b"data: " + orjson.dumps(ret_json) + b"\n\n"
+                            else:
+                                yield chunk
+                            first_chunk = False
+                        else:
+                            # For all subsequent chunks, forward them directly
+                            yield chunk
+                else:
+                    async for chunk in final_response.content.iter_chunked(
+                        AIOHTTP_STREAM_READ_CHUNK_SIZE
                     ):
-                        ret_json = orjson.loads(decoded_chunk[5:].strip("\n"))
-                        ret_json["meta_info"]["input_token_logprobs"] = (
-                            first_prefill_chunk_json["meta_info"][
-                                "input_token_logprobs"
-                            ]
-                            + ret_json["meta_info"]["input_token_logprobs"]
-                        )
-
-                        yield b"data: " + orjson.dumps(ret_json) + b"\n\n"
-                    else:
                         yield chunk
-            else:
-                async for chunk in final_response.content.iter_chunked(
-                    AIOHTTP_STREAM_READ_CHUNK_SIZE
-                ):
-                    yield chunk
 
         return StreamingResponse(
             stream_results(),
