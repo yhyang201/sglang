@@ -817,13 +817,13 @@ class MooncakeKVManager(BaseKVManager):
             while True:
                 waiting_req_bytes = self.server_socket.recv_multipart()
                 room = waiting_req_bytes[0].decode("ascii")
-                print(f"encode thread received waiting_req_bytes {room=}")
+                logger.debug(f"encode thread received waiting_req_bytes {room=}")
                 mooncake_session_id = waiting_req_bytes[3].decode("ascii")
                 if room == "None":
                     self.decode_kv_args_table[mooncake_session_id] = (
                         KVArgsRegisterInfo.from_zmq(waiting_req_bytes)
                     )
-                    print(
+                    logger.debug(
                         f"825 {mooncake_session_id=} {KVArgsRegisterInfo.from_zmq(waiting_req_bytes)=}"
                     )
                     with self.session_lock:

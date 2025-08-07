@@ -351,7 +351,7 @@ class SchedulerDisaggregationEncodeMixin:
         # Encode mode doesn't have decoding requests
         new_batch.decoding_reqs = None
 
-        print(f"get_new_batch_encode: batch_size={len(can_run_list)}")
+        logger.debug(f"get_new_batch_encode: batch_size={len(can_run_list)}")
         return new_batch
 
     def log_encode_stats(
@@ -555,7 +555,7 @@ class SchedulerDisaggregationEncodeMixin:
         #         logprob_pt += num_input_logprobs
         # FIXME: manually set finish reason to let req response
 
-        print("setting finish reason")
+        # print("setting finish reason")
         for i, req in enumerate(batch.reqs):
             req.finished_reason = FINISH_LENGTH(length=0)
             self.disagg_encode_inflight_queue.append(req)
@@ -604,7 +604,7 @@ class SchedulerDisaggregationEncodeMixin:
                     mm_hash = MultimodalCache.combine_hashes(
                         [item.hash for item in req.multimodal_inputs.mm_items]
                     )
-                    loc = self.mm_embedding_pool.free(
+                    _loc = self.mm_embedding_pool.free(
                         mm_hash, self.mm_embedding_allocator
                     )
                 # self.tree_cache.cache_finished_req(req)  # unlock the tree
@@ -624,7 +624,7 @@ class SchedulerDisaggregationEncodeMixin:
                     mm_hash = MultimodalCache.combine_hashes(
                         [item.hash for item in req.multimodal_inputs.mm_items]
                     )
-                    loc = self.mm_embedding_pool.free(
+                    _loc = self.mm_embedding_pool.free(
                         mm_hash, self.mm_embedding_allocator
                     )
                 # self.tree_cache.cache_finished_req(req)  # unlock the tree
@@ -676,8 +676,8 @@ class SchedulerDisaggregationEncodeMixin:
         mm_hash = MultimodalCache.combine_hashes(
             [item.hash for item in req.multimodal_inputs.mm_items]
         )
-        print(f"{mm_hash=}")
-        print(f"{[item.hash for item in req.multimodal_inputs.mm_items]=}")
+        # print(f"{mm_hash=}")
+        # print(f"{[item.hash for item in req.multimodal_inputs.mm_items]=}")
         # mm_hash = req.multimodal_inputs.mm_items[0].hash
 
         mm_indices = (

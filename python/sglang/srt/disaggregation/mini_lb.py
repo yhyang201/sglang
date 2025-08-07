@@ -74,7 +74,6 @@ class MiniLoadBalancer:
         self.prefill_configs = prefill_configs
         self.prefill_servers = [p.url for p in prefill_configs]
         self.decode_servers = decode_servers
-        print(f"{encode_configs=}")
         self.encode_configs = encode_configs
         self.encode_servers = [p.url for p in encode_configs]
         self.text_addrs = text_servers
@@ -157,7 +156,7 @@ class MiniLoadBalancer:
                         req = modified_request_for_prefill
                     else:
                         req = modified_request
-                    print(f"req for {server_role}: {req=}")
+                    # print(f"req for {server_role}: {req=}")
                     tasks_mapping[server_role] = session.post(
                         f"{server}/{endpoint}", json=req
                     )
@@ -228,7 +227,7 @@ class MiniLoadBalancer:
                 final_response = decode_response
             else:
                 assert text_server
-                print(f"using text response as decode_response")
+                # print(f"using text response as decode_response")
                 final_response = text_response
             ret_json = await final_response.json() if final_response else {}
 
@@ -266,7 +265,7 @@ class MiniLoadBalancer:
                 final_response = decode_response
             else:
                 assert text_server
-                print(f"using text response as decode_response")
+                # print(f"using text response as decode_response")
                 final_response = text_response
             if modified_request.get("return_logprob", False):
                 prefill_chunks = []

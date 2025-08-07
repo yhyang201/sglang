@@ -838,7 +838,7 @@ class SchedulerDisaggregationPrefillMixin:
                 self.poll_prefill_req_to_waiting_queue_with_encoder_disaggregated()
             else:
                 bootstrapped, _failed = (
-                    self.disagg_encode_bootstrap_queue.pop_bootstrapped()
+                    self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
                 )
                 self.waiting_queue.extend(bootstrapped)
             self.process_prefill_chunk()

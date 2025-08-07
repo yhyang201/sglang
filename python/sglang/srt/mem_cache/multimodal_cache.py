@@ -72,7 +72,9 @@ class MultimodalCache(abc.ABC):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def free(self, mm_hash: int) -> bool:
+    def free(
+        self, mm_hash: int, mm_embedding_allocator: BaseTokenToKVPoolAllocator
+    ) -> bool:
         raise NotImplementedError()
 
     @abc.abstractmethod
