@@ -730,11 +730,13 @@ class SchedulerDisaggregationPrefillMixin:
         if bootstrapped:
             # print(f"{bootstrapped}")
             # Find requests that are already in the embedding_received_queue
-            bootstrapped_rooms = {req.bootstrap_room for req in bootstrapped}
+            embedding_received_rooms = {
+                req.bootstrap_room for req in self.embedding_received_queue
+            }
             ready_reqs = [
                 req
-                for req in self.embedding_received_queue
-                if req.bootstrap_room in bootstrapped_rooms
+                for req in bootstrapped
+                if req.bootstrap_room in embedding_received_rooms
             ]
 
             # if ready_reqs:
@@ -1139,30 +1141,35 @@ class SchedulerDisaggregationPrefillMixin:
 
         mm_received_reqs = self.disagg_prefill_receiving_queue.pop_transferred()
         if mm_received_reqs:
-            # print(f"{mm_received_reqs=}")
-            # Find requests that are already in the bootstrapped_queue
-            received_rooms = {req.bootstrap_room for req in mm_received_reqs}
-            ready_reqs = [
-                req
-                for req in self.bootstrapped_queue
-                if req.bootstrap_room in received_rooms
-            ]
+            if self.server_args.disaggregation_mode == "encode":
+                # print(f"{mm_received_reqs=}")
+                # Find requests that are already in the bootstrapped_queue
+                received_rooms = {req.bootstrap_room for req in mm_received_reqs}
+                ready_reqs = [
+                    req
+                    for req in self.bootstrapped_queue
+                    if req.bootstrap_room in received_rooms
+                ]
 
-            # if ready_reqs:
-            #     print(f"{ready_reqs=}")
+                # if ready_reqs:
+                #     print(f"{ready_reqs=}")
 
-            # Add ready requests to the waiting_queue
-            self.waiting_queue.extend(ready_reqs)
+                # Add ready requests to the waiting_queue
+                self.waiting_queue.extend(ready_reqs)
 
-            # Remove ready requests from bootstrapped_queue
-            ready_rooms = {req.bootstrap_room for req in ready_reqs}
-            self.bootstrapped_queue = [
-                req
-                for req in self.bootstrapped_queue
-                if req.bootstrap_room not in ready_rooms
-            ]
+                # Remove ready requests from bootstrapped_queue
+                ready_rooms = {req.bootstrap_room for req in ready_reqs}
+                self.bootstrapped_queue = [
+                    req
+                    for req in self.bootstrapped_queue
+                    if req.bootstrap_room not in ready_rooms
+                ]
 
-            # Add the remaining received requests to the embedding_received_queue
-            self.embedding_received_queue.extend(
-                req for req in mm_received_reqs if req.bootstrap_room not in ready_rooms
-            )
+                # Add the remaining received requests to the embedding_received_queue
+                self.embedding_received_queue.extend(
+                    req
+                    for req in mm_received_reqs
+                    if req.bootstrap_room not in ready_rooms
+                )
+            else:
+                self.waiting_queue.extend(mm_received_reqs)
