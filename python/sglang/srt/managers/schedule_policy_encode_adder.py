@@ -41,7 +41,7 @@ class EncodeAdder:
         self.log_hit_tokens = 0
         # TODO(lsyin): report the real input tokens excluding page alignment
         self.log_input_tokens = 0
-        print(f"EncodeAdder, {self.rem_total_tokens=}")
+        # print(f"EncodeAdder, {self.rem_total_tokens=}")
 
         if running_batch is not None:
             self.rem_total_token_offset += sum(

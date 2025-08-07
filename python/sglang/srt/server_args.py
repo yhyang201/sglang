@@ -617,6 +617,10 @@ class ServerArgs:
             "1" if self.disable_outlines_disk_cache else "0"
         )
 
+        # EPD
+        if self.disaggregation_mode == "text":
+            self.encoder_disaggregated = True
+
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
         # Model and tokenizer

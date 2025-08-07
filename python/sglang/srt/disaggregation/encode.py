@@ -129,7 +129,7 @@ class EncodeBootstrapQueue:
         return kv_manager
 
     def add(self, req: Req) -> None:
-        print(f"adding req to EncodeBootstrapQueue, waiting to be bootstrapped")
+        logger.debug(f"adding req to EncodeBootstrapQueue, waiting to be bootstrapped")
         if self._check_if_req_exceed_kv_capacity(req):
             return
 
@@ -198,7 +198,7 @@ class EncodeBootstrapQueue:
                     continue
                 # Either waiting for input or failed
                 assert poll == KVPoll.WaitingForInput or poll == KVPoll.Failed
-            # print(f"{poll=}")
+            # print(f"{req=} {poll=}")
             if poll == KVPoll.Bootstrapping:
                 continue
             elif poll == KVPoll.Failed:
@@ -216,7 +216,7 @@ class EncodeBootstrapQueue:
                 failed_reqs.append(req)
                 continue
 
-            print(f"bootstrapped")
+            logger.debug(f"bootstrapped")
             # KV.WaitingForInput - init here
             num_kv_indices = len(req.origin_input_ids)
             assert req.metadata_buffer_index is not None

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.io_struct import AbortReq, BatchEmbeddingOut, BatchTokenIDOut
-from sglang.srt.managers.schedule_batch import BaseFinishReason, Req, ScheduleBatch
+from sglang.srt.managers.schedule_batch import BaseFinishReason, Req
 from sglang.srt.mem_cache.multimodal_cache import MultimodalCache
 
 if TYPE_CHECKING:
@@ -87,11 +87,14 @@ class SchedulerOutputProcessorMixin:
                     req.output_ids.append(next_token_id)
                     req.check_finished()
 
-                    if req.multimodal_inputs is not None:
+                    if (
+                        self.mm_embedding_pool is not None
+                        and req.multimodal_inputs is not None
+                    ):
                         mm_hash = MultimodalCache.combine_hashes(
                             [item.hash for item in req.multimodal_inputs.mm_items]
                         )
-                        loc = self.mm_embedding_pool.free(
+                        _loc = self.mm_embedding_pool.free(
                             mm_hash, self.mm_embedding_allocator
                         )
 

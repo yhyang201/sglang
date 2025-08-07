@@ -50,7 +50,6 @@ from sglang.srt.disaggregation.encode import (
     SchedulerDisaggregationEncodeMixin,
 )
 from sglang.srt.disaggregation.kv_events import EventPublisherFactory, KVEventBatch
-from sglang.srt.disaggregation.mooncake import MooncakeKVSender
 from sglang.srt.disaggregation.prefill import (
     MMEmbeddingPreallocQueue,
     MMEmbeddingTransferQueue,
@@ -822,10 +821,7 @@ class Scheduler(
                 # The prefill requests that are in the middle of kv sending
                 self.disagg_prefill_inflight_queue: List[Req] = []
 
-            if (
-                self.server_args.encoder_disaggregated
-                or self.server_args.disaggregation_mode == "text"
-            ):
+            if self.server_args.encoder_disaggregated:
                 # The prefill requests polling mm embedding cache
                 self.disagg_prefill_receiving_queue = MMEmbeddingTransferQueue(
                     gloo_group=self.attn_tp_cpu_group,
@@ -1193,12 +1189,10 @@ class Scheduler(
                 else:
                     self.send_to_tokenizer.send_pyobj(output)
 
-        # if (
-        #     self.server_args.encoder_disaggregated
-        #     or self.server_args.disaggregation_mode == "text"
-        # ):
-        #     # TEXT mode
-        #     self.process_prefill_queue_with_encoder_disaggregated()
+        if self.server_args.disaggregation_mode == "text":
+            # TEXT mode
+            # FIXME: is this place appropriate?
+            self.process_prefill_queue_with_encoder_disaggregated()
 
     def handle_generate_request(
         self,
@@ -1373,14 +1367,12 @@ class Scheduler(
             self.disaggregation_mode == DisaggregationMode.PREFILL
             or self.disaggregation_mode == DisaggregationMode.TEXT
         ):
-            if (
-                self.server_args.encoder_disaggregated
-                or self.disaggregation_mode == DisaggregationMode.TEXT
-            ):
+            if self.server_args.encoder_disaggregated:
                 if req.contains_mm_input():
                     # pre-allocate first
                     self.disagg_prefill_prealloc_queue.add(req)
                 else:
+                    # no mm presented, directly wait to be bootstrapped
                     self.disagg_prefill_bootstrap_queue.add(
                         req, self.model_config.num_key_value_heads
                     )
@@ -1940,7 +1932,7 @@ class Scheduler(
             new_batch.hicache_consumer_index = (
                 self.tree_cache.ready_to_load_host_cache()
             )
-        print(f"get_new_batch_prefill")
+        logger.debug(f"get_new_batch_prefill")
         new_batch.prepare_for_extend()
 
         # Mixed-style chunked prefill

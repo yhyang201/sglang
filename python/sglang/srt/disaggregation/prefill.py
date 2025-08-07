@@ -486,12 +486,11 @@ class MMEmbeddingPreallocQueue:
 
     def add(self, req: Req, is_retracted: bool = False) -> None:
         """Add a request to the pending queue."""
-        print(
-            f"adding request to MMEmbeddingPreallocQueue, waiting to be bootstrapped..."
+        logger.debug(
+            f"adding request {req.rid=} to MMEmbeddingPreallocQueue, waiting to be bootstrapped..."
         )
         if self._check_if_req_exceed_mm_pool_capacity(req):
             return
-        # print(f"{req=}")
         if is_retracted:
             self.retracted_queue.append(req)
         else:
@@ -510,7 +509,7 @@ class MMEmbeddingPreallocQueue:
                 data_parallel_rank=req.data_parallel_rank,
                 disaggregation_mode=DisaggregationMode.PREFILL,
             )
-            print(f"EmbeddingRequest added")
+            logger.debug(f"EmbeddingRequest added")
             self.queue.append(
                 EmbeddingRequest(
                     req=req, embedding_receiver=kv_receiver, waiting_for_input=False
@@ -580,7 +579,7 @@ class MMEmbeddingPreallocQueue:
         )
 
         for i, (encode_req, poll) in enumerate(zip(self.queue, polls)):
-            print(f"{poll=}")
+            # print(f"{poll=}")
             if poll == KVPoll.Bootstrapping:
                 pass
             elif poll == KVPoll.WaitingForInput:
@@ -621,8 +620,6 @@ class MMEmbeddingPreallocQueue:
             if i in indices_to_remove:
                 continue
 
-            print(f"{encode_req.waiting_for_input=}")
-
             if not encode_req.waiting_for_input:
                 continue
 
@@ -644,7 +641,7 @@ class MMEmbeddingPreallocQueue:
                 self._pre_alloc(encode_req.req).to(torch.int32).cpu().numpy()
             )  # it's type should be int32
 
-            print(f"{encode_req.req.mm_hashes=}")
+            logger.debug(f"{encode_req.req.mm_hashes=}")
 
             # mm_embedding_indices = [self.mm_embedding_pool.get_embedding_locs_from_hash(mm_hash) for mm_hash in
             #                         encode_req.req.mm_hashes]
@@ -677,7 +674,7 @@ class MMEmbeddingPreallocQueue:
 
     def _pre_alloc(self, req: Req) -> List[torch.Tensor]:
         """Pre-allocate the memory for req_to_token and token_kv_pool"""
-        print(f"pre_allocating...")
+        logger.debug(f"pre_allocating...")
         # req_pool_indices = self.mm_embedding_pool.alloc(1)
 
         # assert (
@@ -833,7 +830,6 @@ class SchedulerDisaggregationPrefillMixin:
     @torch.no_grad()
     def event_loop_overlap_disagg_prefill(self: Scheduler) -> None:
         self.result_queue = deque()
-
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
@@ -1171,9 +1167,15 @@ class SchedulerDisaggregationPrefillMixin:
         # the requests whose embedding has arrived
         mm_received_reqs = self.disagg_prefill_receiving_queue.pop_transferred()
         # TODO: the pop-out from prefill_bootstrap queue and prefill_receiving_queue should probably be merged to reduce overhead
-        self.disagg_prefill_bootstrap_queue.extend(
-            mm_received_reqs, self.model_config.num_key_value_heads
-        )
+        if (
+            self.server_args.encoder_disaggregated
+            and self.server_args.disaggregation_mode == DisaggregationMode.TEXT
+        ):
+            self.disagg_prefill_bootstrap_queue.extend(
+                mm_received_reqs, self.model_config.num_key_value_heads
+            )
+        else:
+            self.waiting_queue.extend(mm_received_reqs)
         # self.embedding_received_bootstrapped_queue.extend(mm_received_reqs)
 
         # self.waiting_encode_queue.extend(mm_received_reqs)

@@ -812,7 +812,7 @@ class MooncakeKVManager(BaseKVManager):
         self._bind_server_socket()
 
         def bootstrap_thread():
-            """This thread recvs pre-alloc notification from the decode engine"""
+            """This thread recvs pre-alloc notification from the prefill/text engine"""
             # KVPoll.Bootstrapping -> KVPoll.WaitingForInput
             while True:
                 waiting_req_bytes = self.server_socket.recv_multipart()
@@ -1139,7 +1139,7 @@ class MooncakeKVSender(BaseKVSender):
     ):
         self.kv_mgr = mgr
         self.bootstrap_room = bootstrap_room
-        print(f"sender {bootstrap_room=}")
+        logger.debug(f"sender {bootstrap_room=}")
         self.kv_mgr.update_status(bootstrap_room, KVPoll.Bootstrapping)
         self.aux_index = None
         self.bootstrap_server_url = bootstrap_addr
@@ -1417,7 +1417,7 @@ class MooncakeKVReceiver(BaseKVReceiver):
         try:
             url = f"http://{self.bootstrap_addr}/route?engine_rank={-1}&target_dp_group={-1}"
             response = requests.get(url)
-            print(f"{response.json()=}")
+            logger.debug(f"{response.json()=}")
             if response.status_code == 200:
                 prefill_parallel_info = response.json()
                 return int(prefill_parallel_info["prefill_tp_size"]), int(
@@ -1513,18 +1513,17 @@ class MooncakeKVReceiver(BaseKVReceiver):
         return sock, lock
 
     def init(self, kv_indices: npt.NDArray[np.int32], aux_index: Optional[int] = None):
-        # print(f"init {kv_indices=}")
         for bootstrap_info in self.bootstrap_infos:
             sock, lock = self._connect_to_bootstrap_server(bootstrap_info)
             is_dummy = bootstrap_info["is_dummy"]
-            # print(
-            #     f"kv receiver init sending: {bootstrap_info=} {self.bootstrap_room=} "
-            # )
-            # print(
-            #     f"kv receiver init sending: {kv_indices=}"
-            #     f"{len(kv_indices.tobytes())=}"
-            #     f"{type(kv_indices)=}"
-            # )
+            logger.debug(
+                f"kv receiver init sending: {bootstrap_info=} {self.bootstrap_room=} "
+            )
+            logger.debug(
+                f"kv receiver init sending: {kv_indices=}"
+                f"{len(kv_indices.tobytes())=}"
+                f"{type(kv_indices)=}"
+            )
             with lock:
                 sock.send_multipart(
                     [

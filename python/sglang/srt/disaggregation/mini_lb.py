@@ -157,7 +157,7 @@ class MiniLoadBalancer:
                         req = modified_request_for_prefill
                     else:
                         req = modified_request
-                    # print(f"req for {server_role}: {req=}")
+                    print(f"req for {server_role}: {req=}")
                     tasks_mapping[server_role] = session.post(
                         f"{server}/{endpoint}", json=req
                     )
@@ -262,6 +262,12 @@ class MiniLoadBalancer:
                 )
             )
 
+            if decode_server:
+                final_response = decode_response
+            else:
+                assert text_server
+                print(f"using text response as decode_response")
+                final_response = text_response
             if modified_request.get("return_logprob", False):
                 prefill_chunks = []
                 async for chunk in prefill_response.content:
@@ -270,7 +276,7 @@ class MiniLoadBalancer:
                 first_prefill_chunk = prefill_chunks[0].decode("utf-8")[5:].strip("\n")
                 first_prefill_chunk_json = orjson.loads(first_prefill_chunk)
 
-                async for chunk in decode_response.content:
+                async for chunk in final_response.content:
                     # Note: This is inefficient
                     # merge prefill input_token_logprobs, output_token_logprobs to decode
                     decoded_chunk = chunk.decode("utf-8")
@@ -291,7 +297,7 @@ class MiniLoadBalancer:
                     else:
                         yield chunk
             else:
-                async for chunk in decode_response.content.iter_chunked(
+                async for chunk in final_response.content.iter_chunked(
                     AIOHTTP_STREAM_READ_CHUNK_SIZE
                 ):
                     yield chunk

@@ -456,13 +456,8 @@ class Qwen2VLForConditionalGeneration(nn.Module):
 
         self.config = config
         self.is_encoder = global_server_args_dict["disaggregation_mode"] == "encode"
-        self.is_prefill = global_server_args_dict["disaggregation_mode"] == "prefill"
-        self.is_text_model_only = (
-            global_server_args_dict["disaggregation_mode"] == "text"
-        )
-        self.should_load_vision_model = not self.is_text_model_only or (
-            global_server_args_dict["disaggregation_mode"] != "encode"
-            and not global_server_args_dict["encoder_disaggregated"]
+        self.should_load_vision_model = (
+            self.is_encoder or not global_server_args_dict["encoder_disaggregated"]
         )
         if self.should_load_vision_model:
             self.visual = Qwen2VisionTransformer(
