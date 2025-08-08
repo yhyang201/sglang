@@ -95,7 +95,6 @@ class EncodeBootstrapQueue:
     def _init_kv_manager(self) -> BaseKVManager:
         print(f"initializing kv manager")
         # TODO
-        # embedding_class = EmbeddingArgs()
         kv_args_class = get_kv_class(self.transfer_backend, KVClassType.KVARGS)
         kv_args = kv_args_class()
         kv_data_ptrs, kv_data_lens, kv_item_lens = (
@@ -121,7 +120,6 @@ class EncodeBootstrapQueue:
         # )
         kv_args.ib_device = self.scheduler.server_args.disaggregation_ib_device
         kv_args.gpu_id = self.scheduler.gpu_id
-        #
         kv_manager_class = get_kv_class(self.transfer_backend, KVClassType.MANAGER)
         kv_manager = kv_manager_class(
             kv_args,
@@ -132,7 +130,7 @@ class EncodeBootstrapQueue:
 
     def add(self, req: Req) -> None:
         logger.debug(f"adding req to EncodeBootstrapQueue, waiting to be bootstrapped")
-        if self._check_if_req_exceed_kv_capacity(req):
+        if self._check_if_req_exceed_capacity(req):
             return
 
         if req.bootstrap_host == FAKE_BOOTSTRAP_HOST:
@@ -153,7 +151,7 @@ class EncodeBootstrapQueue:
         for req in reqs:
             self.add(req)
 
-    def _check_if_req_exceed_kv_capacity(self, req: Req) -> bool:
+    def _check_if_req_exceed_capacity(self, req: Req) -> bool:
         # TODO: not accurate check
         if len(req.origin_input_ids) > self.max_total_num_tokens:
             message = f"Request {req.rid} exceeds the maximum number of tokens: {len(req.origin_input_ids)} > {self.max_total_num_tokens}"
@@ -415,8 +413,8 @@ class SchedulerDisaggregationEncodeMixin:
             self.cur_batch = batch
 
             if batch:
-                result = self.run_batch(batch)
-                self.process_batch_result_disagg_encode(batch, result)
+                _result = self.run_batch(batch)
+                self.process_batch_result_disagg_encode(batch)
 
             self.process_disagg_encode_inflight_queue()
 
@@ -461,11 +459,8 @@ class SchedulerDisaggregationEncodeMixin:
                     self.set_next_batch_sampling_info_done(tmp_batch)
 
             if self.last_batch:
-                tmp_batch, tmp_result = self.result_queue.popleft()
-                tmp_batch.next_batch_sampling_info = (
-                    self.tp_worker.cur_sampling_info if batch else None
-                )
-                self.process_batch_result_disagg_encode(tmp_batch, tmp_result)
+                tmp_batch, _tmp_result = self.result_queue.popleft()
+                self.process_batch_result_disagg_encode(tmp_batch)
 
             if len(self.disagg_encode_inflight_queue) > 0:
                 self.process_disagg_encode_inflight_queue()
@@ -483,7 +478,6 @@ class SchedulerDisaggregationEncodeMixin:
     def process_batch_result_disagg_encode(
         self: Scheduler,
         batch: ScheduleBatch,
-        result: Any,  # Union[GenerationBatchResult, EmbeddingBatchResult]
         launch_done: Optional[threading.Event] = None,
     ) -> None:
         """

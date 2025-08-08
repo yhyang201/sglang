@@ -52,7 +52,10 @@ class MultimodalCache(abc.ABC):
 
     @abc.abstractmethod
     def set_mm_embedding(
-        self, mm_hash: int, embedding: torch.Tensor, loc: Optional[torch.Tensor] = None
+        self,
+        mm_hash: int,
+        embedding: torch.Tensor,
+        mm_embedding_allocator: BaseTokenToKVPoolAllocator,
     ) -> bool:
         """
         Set the embedding to the pre-allocated locations with a hash id
@@ -86,6 +89,10 @@ class MultimodalCache(abc.ABC):
         raise NotImplementedError()
 
 
+def _get_tensor_size(embedding: torch.Tensor):
+    return embedding.element_size() * embedding.numel()
+
+
 class MultiModalStaticCache(MultimodalCache):
     """MultiModalStaticCache is used to store precomputed multimodal embeddings.
     Embeddings will be computed prior, and this cache does not really pre-alloc
@@ -113,7 +120,7 @@ class MultiModalStaticCache(MultimodalCache):
     ) -> bool:
         if mm_hash in self.mm_cache:
             return True
-        data_size = self._get_tensor_size(embedding)
+        data_size = _get_tensor_size(embedding)
         if self.current_size + data_size > self.max_size:
             return False
         self.mm_cache[mm_hash] = embedding
@@ -123,19 +130,18 @@ class MultiModalStaticCache(MultimodalCache):
     def has(self, mm_hash: int) -> bool:
         return mm_hash in self.mm_cache
 
-    def free(self, mm_hash: int) -> bool:
+    def free(
+        self, mm_hash: int, mm_embedding_allocator: BaseTokenToKVPoolAllocator
+    ) -> bool:
         if mm_hash not in self.mm_cache:
             return False
         old_embedding = self.mm_cache.pop(mm_hash)
-        self.current_size -= self._get_tensor_size(old_embedding)
+        self.current_size -= _get_tensor_size(old_embedding)
         return True
 
     def clear(self):
         self.mm_cache.clear()
         self.current_size = 0
-
-    def _get_tensor_size(self, embedding: torch.Tensor):
-        return embedding.element_size() * embedding.numel()
 
     def __len__(self):
         return len(self.mm_cache)
@@ -336,9 +342,6 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
 
     def __len__(self):
         return len(self.mm_hash_to_indices)
-
-    # def capacity(self) -> int:
-    #     return self.mm_buffer.size(0)
 
     def allocated(self) -> int:
         return self.used_size

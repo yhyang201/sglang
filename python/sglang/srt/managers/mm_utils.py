@@ -412,7 +412,7 @@ def _get_chunked_prefill_embedding(
                     raise RuntimeError("Non-Encode should not call data_embedding_func")
                 embedding_per_req = data_embedding_func(embedding_items_per_req)
                 if not embedding_cache.set_mm_embedding(
-                    combined_hash, embedding_per_req
+                    combined_hash, embedding_per_req, mm_embedding_allocator
                 ):
                     print_info_once(
                         "Multimodal embedding cache is full. Consider increasing the "

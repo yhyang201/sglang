@@ -554,17 +554,6 @@ class Scheduler(
         if get_bool_env_var("SGLANG_GC_LOG"):
             configure_gc_logger()
 
-        # epd related
-        # reqs which have already been bootstrapped
-
-        # a image-containing req should go to:
-        # 1. disagg_prefill_prealloc_queue -> disagg_prefill_receiving_queue -> mm_received_reqs
-        # 2. disagg_prefill_bootstrap_queue
-        # before going into waiting_queue
-        self.bootstrapped_queue: List[Req] = []
-        # reqs whose required mm embedding has already been received
-        self.embedding_received_queue: List[Req] = []
-
     def current_scheduler_metrics_enabled(self):
         return self.attn_tp_rank == 0 or self.enable_metrics_for_all_schedulers
 
@@ -857,6 +846,18 @@ class Scheduler(
                     # num_reserved_decode_tokens=self.server_args.num_reserved_decode_tokens,
                     transfer_backend=self.transfer_backend,
                 )
+
+                # epd related
+                # reqs which have already been bootstrapped
+
+                # a image-containing req should go to:
+                # 1. disagg_prefill_prealloc_queue -> disagg_prefill_receiving_queue -> mm_received_reqs
+                # 2. disagg_prefill_bootstrap_queue
+                # before going into waiting_queue
+                self.bootstrapped_queue: List[Req] = []
+                # reqs whose required mm embedding has already been received
+                self.embedding_received_queue: List[Req] = []
+
         elif self.disaggregation_mode == DisaggregationMode.ENCODE:
             assert self.model_config.vision_config is not None
             buffer_size = self.max_running_requests * 2

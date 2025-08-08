@@ -191,9 +191,8 @@ class TpModelWorker:
                 None,
                 None,
                 None,
-                # self.model_runner.mm_item_to_token_pool.size,
-                # self.model_runner.mm_item_to_token_pool.max_context_len,
-                # self.model_runner.mm_item_to_token_pool.size,
+                # self.model_runner.mm_embedding_pool.available_size(),
+                # self.model_runner.mm_embedding_pool.used_size,
             )
 
         return (
