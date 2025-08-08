@@ -512,24 +512,25 @@ class MooncakeKVManager(BaseKVManager):
         dst_mm_ptrs: List[int],
         dst_mm_indices: npt.NDArray[np.int32],
     ):
-        mm_indices
+        encode_mm_blocks, dst_mm_blocks = group_concurrent_contiguous(
+            mm_indices, dst_mm_indices
+        )
         item_len = self.kv_args.kv_item_lens[0]
 
-        src_addr = self.kv_args.kv_data_ptrs[0] + int(mm_indices[0]) * item_len
-        # print(f"{type(dst_mm_ptrs)=}, {dst_mm_ptrs=}")
-        # print(f"{type(dst_mm_indices)=}, {dst_mm_indices=}")
-        # print(f"{type(item_len)=}, {item_len=}")
-        dst_addr = dst_mm_ptrs[0] + int(dst_mm_indices[0]) * item_len
-        length = item_len * len(mm_indices)
-        logger.debug(
-            f"{len(dst_mm_ptrs)=} {len(dst_mm_indices)=} {len(mm_indices)=}, {item_len=}"
-        )
-
-        status = self.engine.transfer_sync(session_id, src_addr, dst_addr, length)
-        if status != 0:
-            logger.error(
-                f"Embedding transfer failed: session_id={session_id}, status={status}"
+        for encode_index, dst_index in zip(encode_mm_blocks, dst_mm_blocks):
+            src_addr = self.kv_args.kv_data_ptrs[0] + int(encode_index[0]) * item_len
+            dst_addr = dst_mm_ptrs[0] + int(dst_index[0]) * item_len
+            length = item_len * len(encode_index)
+            logger.debug(
+                f"{len(dst_mm_ptrs)=} {len(dst_mm_indices)=} {len(mm_indices)=}, {item_len=}"
             )
+            status = self.engine.transfer_sync(session_id, src_addr, dst_addr, length)
+            if status != 0:
+                logger.error(
+                    f"Embedding transfer failed: session_id={session_id}, status={status}"
+                )
+                break
+
         return status
 
     def sync_status_to_decode_endpoint(
