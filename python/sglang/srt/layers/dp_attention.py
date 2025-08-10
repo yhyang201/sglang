@@ -377,3 +377,7 @@ def attn_tp_all_gather_into_tensor(output: torch.Tensor, input: torch.Tensor):
 
 def attn_tp_all_gather(output_list: List[torch.Tensor], input: torch.Tensor):
     return get_attention_tp_group().all_gather(input, output_tensor_list=output_list)
+
+
+def attn_tp_all_reduce(input: torch.Tensor):
+    return get_attention_tp_group().all_reduce(input)

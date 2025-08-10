@@ -25,7 +25,11 @@ from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.attention.vision import VisionAttention
 from sglang.srt.layers.communicator import LayerCommunicator, LayerScatterModes
-from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size
+from sglang.srt.layers.dp_attention import (
+    attn_tp_all_reduce,
+    get_attention_tp_rank,
+    get_attention_tp_size,
+)
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
     ColumnParallelLinear,
@@ -553,6 +557,7 @@ class Step3VisionMLP(nn.Module):
             quant_config=quant_config,
             tp_rank=attn_tp_rank,
             tp_size=attn_tp_size,
+            reduce_results=False,
             prefix=add_prefix("down_proj", prefix),
         )
 
@@ -560,6 +565,7 @@ class Step3VisionMLP(nn.Module):
         hidden_states, _ = self.fc1(hidden_states)
         hidden_states = self.act(hidden_states)
         hidden_states, _ = self.fc2(hidden_states)
+        hidden_states = attn_tp_all_reduce(hidden_states)
         return hidden_states
 
 
@@ -576,13 +582,6 @@ class Step3VisionAttention(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-        self.out_proj = RowParallelLinear(
-            dim,
-            dim,
-            bias=True,
-            quant_config=quant_config,
-            prefix=add_prefix("out_proj", prefix),
-        )
         self.scale = self.head_dim**-0.5
 
         self.attn = VisionAttention(
