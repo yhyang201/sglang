@@ -445,7 +445,7 @@ def _get_chunked_prefill_embedding(
             else embedding_per_req.shape[0] * embedding_per_req.shape[1]
         )
         if end_index == embedding_per_req_length:
-            embedding_cache.free(combined_hash)
+            embedding_cache.free(combined_hash, None)
         embedding_list.append(embedding_per_req_chunk)
     if len(embedding_list) == 0:
         return None
