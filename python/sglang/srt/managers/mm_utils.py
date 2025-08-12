@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 import torch
+import time
 from torch import nn
 
 from sglang.srt.layers.multimodal import gpu_tensor_hash
@@ -410,7 +411,14 @@ def _get_chunked_prefill_embedding(
                 if disaggregation_mode != "encode" and disaggregation_mode != "null":
                     print("NO!!!!!!!!!!!!!!!!!")
                     raise RuntimeError("Non-Encode should not call data_embedding_func")
+
+                start_event = torch.cuda.Event(enable_timing=True)
+                end_event = torch.cuda.Event(enable_timing=True)
+                start_event.record()
                 embedding_per_req = data_embedding_func(embedding_items_per_req)
+                end_event.record()
+                torch.cuda.synchronize()
+                print(f"data_embedding_func time: {start_event.elapsed_time(end_event) / 1000:.6f} s")
                 if not embedding_cache.set_mm_embedding(
                     combined_hash, embedding_per_req, mm_embedding_allocator
                 ):
@@ -731,7 +739,10 @@ def general_mm_embed_routine(
 
     if disaggregation_mode == "encode":
         return inputs_embeds
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
 
+    start_event.record()
     hidden_states = language_model(
         input_ids=None,
         forward_batch=forward_batch,
@@ -739,6 +750,10 @@ def general_mm_embed_routine(
         positions=positions,
         # **kwargs,
     )
+    end_event.record()
+
+    torch.cuda.synchronize()  # 等 GPU 计算完
+    print(f"language_model time: {start_event.elapsed_time(end_event) / 1000:.6f} s, batch_size: {forward_batch.batch_size}")
     return hidden_states
 
 
