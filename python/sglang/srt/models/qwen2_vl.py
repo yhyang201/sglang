@@ -564,14 +564,14 @@ class Qwen2VLForConditionalGeneration(nn.Module):
                     )
         if forward_batch.forward_mode.is_prefill():
             print(f"{forward_batch.batch_size=}")
-            with CudaTimer(stream=torch.cuda.current_stream(), name="prefill"):
-                hidden_states = general_mm_embed_routine(
-                    input_ids=input_ids,
-                    forward_batch=forward_batch,
-                    language_model=self.model,
-                    multimodal_model=self,
-                    positions=positions,
-                )
+            # with CudaTimer(stream=torch.cuda.current_stream(), name="prefill"):
+            hidden_states = general_mm_embed_routine(
+                input_ids=input_ids,
+                forward_batch=forward_batch,
+                language_model=self.model,
+                multimodal_model=self,
+                positions=positions,
+            )
         else:
             hidden_states = general_mm_embed_routine(
                 input_ids=input_ids,
