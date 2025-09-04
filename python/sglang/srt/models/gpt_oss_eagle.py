@@ -1,4 +1,4 @@
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from transformers import LlamaConfig
@@ -8,37 +8,7 @@ from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.gpt_oss import GptOssSparseMoeBlock
-from sglang.srt.models.llama_eagle3 import (
-    LlamaDecoderLayer,
-    LlamaForCausalLMEagle3,
-    LlamaModel,
-)
-from sglang.srt.utils import add_prefix
-
-
-class GptOssDecoderLayer(LlamaDecoderLayer):
-    def __init__(
-        self,
-        config: LlamaConfig,
-        layer_id: int = 0,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__(config, layer_id, quant_config, prefix)
-        # Use the default settings for gptoss
-        config.swiglu_limit = 7.0
-        self.mlp = GptOssSparseMoeBlock(layer_id, config, quant_config, prefix)
-
-
-class GptOssModel(LlamaModel):
-    def __init__(
-        self,
-        config: LlamaConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__(config, quant_config, prefix)
-        self.midlayer = GptOssDecoderLayer(config, 0, quant_config, prefix)
+from sglang.srt.models.llama_eagle3 import LlamaForCausalLMEagle3
 
 
 class GptOssForCausalLMEagle3(LlamaForCausalLMEagle3):
@@ -49,9 +19,8 @@ class GptOssForCausalLMEagle3(LlamaForCausalLMEagle3):
         prefix: str = "",
     ):
         super().__init__(config, quant_config, prefix)
-        self.model = GptOssModel(
-            config, quant_config=quant_config, prefix=add_prefix("model", prefix)
-        )
+        config.swiglu_limit = 7.0
+        self.model.midlayer.mlp = GptOssSparseMoeBlock(0, config, quant_config, prefix)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> None:
         loaded_params = set()
@@ -138,6 +107,8 @@ class GptOssForCausalLMEagle3(LlamaForCausalLMEagle3):
                         raise ValueError(
                             f"Parameter {param_name} not found in params_dict"
                         )
+        print(f"a-b {loaded_params - set(params_dict.keys())}")
+        print(f"b-a {set(params_dict.keys()) - loaded_params}")
 
 
 EntryClass = GptOssForCausalLMEagle3
