@@ -1,5 +1,16 @@
 from __future__ import annotations
-
+from sglang.srt.utils import (
+    align,
+    direct_register_custom_op,
+    get_bool_env_var,
+    get_device_core_count,
+    get_device_name,
+    is_cpu,
+    is_cuda,
+    is_hip,
+    log_info_on_rank0,
+    supports_custom_op,
+)
 import copy
 import logging
 import os
@@ -520,6 +531,16 @@ class EagleVerifyInput:
         # Iterate every accepted token and check if req has finished after append the token
         # should be checked BEFORE free kv cache slots
         for i, (req, accept_index_row) in enumerate(zip(batch.reqs, accept_index_cpu)):
+            from sglang.srt.distributed import get_tensor_model_parallel_rank
+            if get_tensor_model_parallel_rank() == 0:
+                import json
+                import os
+                log_info_on_rank0(logger, f"line 538: {predict_cpu=}")
+                log_info_on_rank0(logger, f"line 538: {accept_index_row=}")
+                log_dir = "/sgl-workspace/expert_logs"
+                os.makedirs(log_dir, exist_ok=True)
+                with open("/sgl-workspace/expert_logs/accept_status.jsonl", "a") as f:
+                    f.write(json.dumps({"predict_cpu": predict_cpu, "accept_index_row": accept_index_row}) + "\n")
             for j, idx in enumerate(accept_index_row):
                 if idx == -1:
                     break

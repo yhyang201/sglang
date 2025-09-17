@@ -14,7 +14,18 @@
 
 
 """Inference-only GptOss model compatible with HuggingFace weights."""
-
+from sglang.srt.utils import (
+    align,
+    direct_register_custom_op,
+    get_bool_env_var,
+    get_device_core_count,
+    get_device_name,
+    is_cpu,
+    is_cuda,
+    is_hip,
+    log_info_on_rank0,
+    supports_custom_op,
+)
 import logging
 import math
 from collections.abc import Iterable
@@ -63,6 +74,7 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
@@ -179,7 +191,7 @@ class GptOssSparseMoeBlock(nn.Module):
         self,
         hidden_states: torch.Tensor,
         should_allreduce_fusion: bool = False,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         num_tokens, hidden_dim = hidden_states.shape
 
         router_logits, _ = self.router(hidden_states)
@@ -190,7 +202,7 @@ class GptOssSparseMoeBlock(nn.Module):
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
         ans = final_hidden_states.view(num_tokens, hidden_dim)
-        return ans
+        return ans, topk_output.topk_ids
 
 
 def _enable_fused_set_kv_buffer(forward_batch: ForwardBatch):
@@ -489,7 +501,7 @@ class GptOssDecoderLayer(nn.Module):
             )
         )
 
-        hidden_states = self.mlp(hidden_states, forward_batch, should_allreduce_fusion)
+        hidden_states, topk_ids = self.mlp(hidden_states, forward_batch, should_allreduce_fusion)
 
         if should_allreduce_fusion:
             hidden_states._sglang_needs_allreduce_fusion = True
@@ -499,7 +511,7 @@ class GptOssDecoderLayer(nn.Module):
                 hidden_states, residual, forward_batch
             )
 
-        return hidden_states, residual
+        return hidden_states, residual, topk_ids
 
 
 class GptOssModel(nn.Module):
@@ -566,14 +578,32 @@ class GptOssModel(nn.Module):
             residual = pp_proxy_tensors["residual"]
 
         aux_hidden_states = []
+        top_k_ids = []
         for i in range(self.start_layer, self.end_layer):
             with get_global_expert_distribution_recorder().with_current_layer(i):
                 if i in self.layers_to_capture:
                     aux_hidden_states.append(hidden_states + residual)
                 layer = self.layers[i]
-                hidden_states, residual = layer(
+                hidden_states, residual, topk_ids = layer(
                     positions, hidden_states, forward_batch, residual
                 )
+                top_k_ids.append(topk_ids)
+        assert len(top_k_ids) == (self.end_layer-self.start_layer)
+        if get_tensor_model_parallel_rank() == 0 and forward_batch.forward_mode == ForwardMode.TARGET_VERIFY:
+                top_k_ids = torch.stack(top_k_ids, dim=0)
+                print(f"{top_k_ids.shape=}", flush=True)
+                top_k_ids_dict = {
+                    str(i): top_k_ids[i].cpu().tolist() for i in range(top_k_ids.shape[0])
+                }
+                info = {"input_ids": input_ids.cpu().tolist(), "positions": positions.cpu().tolist(), "top_k_ids": top_k_ids_dict}
+                import json
+                import os
+                output_dir = "/sgl-workspace/expert_logs"
+                os.makedirs(output_dir, exist_ok=True)
+                output_path = os.path.join(output_dir, "topk.jsonl")
+                with open(output_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(info, ensure_ascii=False) + "\n")
+
         if not self.pp_group.is_last_rank:
             return PPProxyTensors(
                 {
