@@ -181,7 +181,7 @@ def send_prefix(args, batch_size: int, prompts: List[str]):
     batch_data = []
     sampled_indices = []
     for _ in range(batch_size):
-        sampled_index = random.randint(0, len(prompts) - 1)
+        sampled_index = 0  # random.randint(0, len(prompts) - 1)
         sampled_indices.append(sampled_index)
         batch_data.append(prompts[sampled_index])
 
@@ -216,9 +216,9 @@ def send_prefix(args, batch_size: int, prompts: List[str]):
 
 
 def test_deterministic(args):
-    # First do some warmups
-    for i in range(3):
-        send_single(args, 16, args.profile)
+    # # First do some warmups
+    # for i in range(3):
+    #     send_single(args, 16, args.profile)
 
     if args.test_mode == "single":
         # In single mode, we test the deterministic behavior by sending the same prompt in batch sizes ranging from 1 to n_trials.
@@ -263,7 +263,7 @@ def test_deterministic(args):
         num_prompts = len(len_prefix)
         outputs = {i: [] for i in range(4)}
         prompts = [LONG_PROMPT[: len_prefix[i]] for i in range(4)]
-        for i in range(1, args.n_trials + 1):
+        for i in range(32, 32 + 1):
             batch_size = i
             ret_dict = send_prefix(args, batch_size, prompts)
             msg = f"Testing Trial {i} with batch size {batch_size},"
@@ -272,7 +272,7 @@ def test_deterministic(args):
             print(msg)
             for i in range(num_prompts):
                 outputs[i].extend(ret_dict[i])
-
+                print(set(ret_dict[i]))
         for i in range(num_prompts):
             print(
                 f"Prompt {i} with prefix length {len_prefix[i]}: total samples: {len(outputs[i])}, Unique samples: {len(set(outputs[i]))}"

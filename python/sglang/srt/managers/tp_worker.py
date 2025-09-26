@@ -174,6 +174,7 @@ class TpModelWorker:
         self.worker = self
 
         self.hicache_layer_transfer_counter = None
+        self.num = 0
 
     def register_hicache_layer_transfer_counter(self, counter: LayerDoneCounter):
         self.hicache_layer_transfer_counter = counter
@@ -271,7 +272,12 @@ class TpModelWorker:
                     )
             else:
                 next_token_ids = self.model_runner.sample(logits_output, forward_batch)
-
+            if self.tp_rank == 0 and forward_batch.input_ids[0] == 18:
+                self.num += 1
+                print(
+                    f"{forward_batch.forward_mode=}, {forward_batch.input_ids.shape=}, {next_token_ids[0]=}",
+                    flush=True,
+                )
             return logits_output, next_token_ids, can_run_cuda_graph
         else:
             pp_proxy_tensors, can_run_cuda_graph = self.model_runner.forward(

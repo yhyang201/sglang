@@ -367,6 +367,8 @@ class Qwen3MoeAttention(nn.Module):
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.alt_stream = alt_stream
 
+        self.last_hidden_states = []
+
     def _apply_qk_norm(
         self, q: torch.Tensor, k: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -416,11 +418,20 @@ class Qwen3MoeAttention(nn.Module):
         inner_state = q, k, v, forward_batch
         return None, forward_batch, inner_state
 
-    def forward_core(self, intermediate_state):
+    def forward_core(self, intermediate_state, enable_debug: bool = False):
         hidden_states, forward_batch, inner_state = intermediate_state
         if inner_state is None:
             return hidden_states
         attn_output = self.attn(*inner_state)
+        if enable_debug:
+            q = attn_output
+            self.last_hidden_states.append(q[0].clone())
+            for i in range(len(self.last_hidden_states)):
+                for j in range(len(self.last_hidden_states)):
+                    print(
+                        f"attn forward core {i=}, {j=}, {(self.last_hidden_states[i] - self.last_hidden_states[j]).abs().max()}",
+                        flush=True,
+                    )
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -429,13 +440,15 @@ class Qwen3MoeAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
+        enable_debug: bool = False,
     ) -> torch.Tensor:
         s = self.forward_prepare(
             positions=positions,
             hidden_states=hidden_states,
             forward_batch=forward_batch,
         )
-        return self.forward_core(s)
+        result = self.forward_core(s, enable_debug)
+        return result
 
 
 class Qwen3MoeDecoderLayer(nn.Module):
@@ -514,6 +527,8 @@ class Qwen3MoeDecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
+        self.last_hidden_states = []
+
         self.layer_communicator = LayerCommunicator(
             layer_scatter_modes=self.layer_scatter_modes,
             input_layernorm=self.input_layernorm,
@@ -528,6 +543,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
+        enable_debug: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
         hidden_states, residual = self.layer_communicator.prepare_attn(
@@ -539,7 +555,17 @@ class Qwen3MoeDecoderLayer(nn.Module):
                 positions=positions,
                 hidden_states=hidden_states,
                 forward_batch=forward_batch,
+                enable_debug=enable_debug,
             )
+
+        if enable_debug:
+            self.last_hidden_states.append(hidden_states[0].clone())
+            for i in range(len(self.last_hidden_states)):
+                for j in range(len(self.last_hidden_states)):
+                    print(
+                        f"after attn {i=}, {j=}, {(self.last_hidden_states[i] - self.last_hidden_states[j]).abs().max()}",
+                        flush=True,
+                    )
 
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch

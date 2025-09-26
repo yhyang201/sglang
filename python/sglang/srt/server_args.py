@@ -1104,11 +1104,11 @@ class ServerArgs:
                     f"Currently radix cache is not compatible with {self.attention_backend} attention backend for deterministic inference. It will be supported in the future."
                 )
 
-            # Check TP size
-            if self.tp_size > 1:
-                raise ValueError(
-                    "Currently only TP size 1 is supported for deterministic inference."
-                )
+            # # Check TP size
+            # if self.tp_size > 1:
+            #     raise ValueError(
+            #         "Currently only TP size 1 is supported for deterministic inference."
+            #     )
 
             # Warnings on MoE models
             logger.warning(

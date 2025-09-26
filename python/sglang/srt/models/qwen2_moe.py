@@ -521,6 +521,9 @@ class Qwen2MoeModel(nn.Module):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.pp_group = get_pp_group()
+        self.num = 0
+        self.last_hidden_states = []
+        self.is_18 = False
 
         if self.pp_group.is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -547,6 +550,8 @@ class Qwen2MoeModel(nn.Module):
             pp_size=self.pp_group.world_size,
             prefix=add_prefix("layers", prefix),
         )
+        for i in range(len(self.layers)):
+            self.last_hidden_states.append([])
         if self.pp_group.is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
@@ -563,6 +568,13 @@ class Qwen2MoeModel(nn.Module):
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Union[torch.Tensor, PPProxyTensors]:
+        if input_ids[0] == 18:
+            if self.num == 6:
+                self.num = 0
+            self.num += 1
+            self.is_18 = True
+        else:
+            self.is_18 = False
         if self.pp_group.is_first_rank:
             if input_embeds is None:
                 hidden_states = self.embed_tokens(input_ids)
@@ -596,8 +608,21 @@ class Qwen2MoeModel(nn.Module):
                 with get_global_expert_distribution_recorder().with_current_layer(i):
                     layer = self.layers[i]
                     hidden_states, residual = layer(
-                        positions, hidden_states, forward_batch, residual
+                        positions,
+                        hidden_states,
+                        forward_batch,
+                        residual,
+                        True if self.num == 4 and self.is_18 and i == 6 else False,
                     )
+                    if self.num == 4 and self.is_18:
+                        self.last_hidden_states[i].append(hidden_states[0].clone())
+                        for k in range(len(self.last_hidden_states[i])):
+                            for j in range(len(self.last_hidden_states[i])):
+                                print(
+                                    f"{self.num=}, {i=}, {k=}, {j=}, {(self.last_hidden_states[i][k] - self.last_hidden_states[i][j]).abs().max()}",
+                                    flush=True,
+                                )
+
         if not self.pp_group.is_last_rank:
             return PPProxyTensors(
                 {
