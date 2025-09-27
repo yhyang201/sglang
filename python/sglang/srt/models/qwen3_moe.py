@@ -422,7 +422,7 @@ class Qwen3MoeAttention(nn.Module):
         hidden_states, forward_batch, inner_state = intermediate_state
         if inner_state is None:
             return hidden_states
-        attn_output = self.attn(*inner_state)
+        attn_output = self.attn(*inner_state, enable_debug=enable_debug)
         if enable_debug:
             q = attn_output
             self.last_hidden_states.append(q[0].clone())

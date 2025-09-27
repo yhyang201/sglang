@@ -658,6 +658,7 @@ class FlashAttentionBackend(AttentionBackend):
         q_rope: Optional[torch.Tensor] = None,
         k_rope: Optional[torch.Tensor] = None,
         sinks: Optional[torch.Tensor] = None,
+        enable_debug=False,
     ):
         if k is not None:
             assert v is not None
@@ -963,6 +964,7 @@ class FlashAttentionBackend(AttentionBackend):
         q_rope: Optional[torch.Tensor] = None,
         k_rope: Optional[torch.Tensor] = None,
         sinks: Optional[torch.Tensor] = None,
+        enable_debug=False,
     ) -> torch.Tensor:
         assert self.fa_impl_ver in [3], "Only FA3 support decoding"
         if k is not None:
@@ -1040,7 +1042,8 @@ class FlashAttentionBackend(AttentionBackend):
             value_cache = value_cache.view(
                 -1, self.page_size, layer.tp_v_head_num, layer.head_dim
             )
-
+            if enable_debug:
+                print(f"{use_local_attn=}, {use_cascade_attn=}")
             if layer.is_cross_attention:
                 # Always use non-chunked logic for cross-attention
                 o = flash_attn_with_kvcache(
@@ -1091,6 +1094,24 @@ class FlashAttentionBackend(AttentionBackend):
                 )
 
                 # Default: single-token self-attention
+                # if enable_debug:
+                #     print(f"{q_reshaped.shape=}")
+                #     print(f"{key_cache.shape=}")
+                #     print(f"{value_cache.shape=}")
+                #     print(f"{page_table.shape=}")
+                #     print(f"{cache_seqlens=}")
+                #     print(f"{metadata.cu_seqlens_q=}")
+                #     print(f"{cu_seqlens_k=}")
+                #     print(f"{max_seqlen_q=}")
+                #     print(f"{layer.scaling=}")
+                #     print(f"{False if use_cascade_attn else causal=}")
+                #     print(f"{window_size=}")
+                #     print(f"{layer.logit_cap=}")
+                #     print(f"{k_descale=}")
+                #     print(f"{v_descale=}")
+                #     print(f"{use_cascade_attn=}")
+                #     print(f"{self.num_splits=}")
+                #     print(f"{kwargs=}")
                 result = flash_attn_with_kvcache(
                     q=q_reshaped,
                     k_cache=key_cache,
@@ -1108,6 +1129,7 @@ class FlashAttentionBackend(AttentionBackend):
                     v_descale=v_descale,
                     return_softmax_lse=use_cascade_attn,
                     num_splits=self.num_splits,
+                    enable_debug=enable_debug,
                     **kwargs,
                 )
                 if use_cascade_attn:

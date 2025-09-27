@@ -612,7 +612,9 @@ class Qwen2MoeModel(nn.Module):
                         hidden_states,
                         forward_batch,
                         residual,
-                        True if self.num == 4 and self.is_18 and i == 6 else False,
+                        enable_debug=(
+                            True if self.num == 4 and self.is_18 and i == 6 else False
+                        ),
                     )
                     if self.num == 4 and self.is_18:
                         self.last_hidden_states[i].append(hidden_states[0].clone())
