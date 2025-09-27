@@ -327,11 +327,27 @@ class ChatCompletionMessageContentAudioPart(BaseModel):
     audio_url: ChatCompletionMessageContentAudioURL
 
 
+class InputAudio(BaseModel):
+    data: str  # base64 encoded audio
+    format: Literal["wav", "mp3", "m4a", "flac", "webm"] = "wav"
+
+
+class ChatCompletionMessageContentInputAudioPart(BaseModel):
+    type: Literal["input_audio"]
+    input_audio: InputAudio
+
+
+class AudioConfig(BaseModel):
+    voice: Literal["alloy", "echo", "fable", "onyx", "nova", "shimmer"] = "alloy"
+    format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm"] = "wav"
+
+
 ChatCompletionMessageContentPart = Union[
     ChatCompletionMessageContentTextPart,
     ChatCompletionMessageContentImagePart,
     ChatCompletionMessageContentVideoPart,
     ChatCompletionMessageContentAudioPart,
+    ChatCompletionMessageContentInputAudioPart,
 ]
 
 
@@ -454,6 +470,8 @@ class ChatCompletionRequest(BaseModel):
         "result in faster responses and fewer tokens used on reasoning in a response. "
         "Currently only supported for OpenAI models in the harmony path, i.e GPT-OSS models.",
     )
+    modalities: Optional[List[Literal["text", "audio"]]] = None
+    audio: Optional[AudioConfig] = None
 
     @model_validator(mode="before")
     @classmethod

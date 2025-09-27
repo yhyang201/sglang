@@ -168,6 +168,15 @@ def process_content_for_template_format(
                     audio_data.append(chunk["audio_url"]["url"])
                     # Normalize to simple 'audio' type
                     processed_content_parts.append({"type": "audio"})
+                elif chunk_type == "input_audio":
+                    # Handle base64 encoded audio input
+                    audio_base64 = chunk["input_audio"]["data"]
+                    format = chunk["input_audio"].get("format", "wav")
+                    # Construct data URI for load_audio to handle automatically
+                    data_uri = f"data:audio/{format};base64,{audio_base64}"
+                    audio_data.append(data_uri)
+                    # Normalize to simple 'audio' type
+                    processed_content_parts.append({"type": "audio"})
                 else:
                     # Keep other content as-is (text, etc.)
                     processed_content_parts.append(chunk)
