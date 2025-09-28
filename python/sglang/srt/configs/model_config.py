@@ -185,9 +185,14 @@ class ModelConfig:
         self.is_image_gen = enable_multimodal and is_image_gen_model(
             self.hf_config.architectures
         )
-        self.is_audio_model = enable_multimodal and is_audio_model(
-            self.hf_config.architectures
+        self.is_audio = enable_multimodal and is_audio_input_model(
+            self.hf_config.architectures, self.hf_config
         )
+        self.is_audio_gen = enable_multimodal and is_audio_gen_model(
+            self.hf_config.architectures, self.hf_config
+        )
+        # Backward compatibility
+        self.is_audio_model = self.is_audio
         self.is_multimodal_chunked_prefill_supported = (
             enable_multimodal
             and is_multimodal_chunked_prefill_supported(self.hf_config.architectures)
@@ -779,8 +784,50 @@ def is_image_gen_model(model_architectures: List[str]):
     return False
 
 
-def is_audio_model(model_architectures: List[str]):
-    return False
+def is_audio_input_model(model_architectures: List[str], hf_config=None):
+    """Check if the model supports audio input."""
+    # Architecture-based detection (fallback)
+    audio_input_architectures = [
+        "StepAudio2ForCausalLM",
+        "Qwen2AudioForConditionalGeneration",
+        "Gemma3nAudioForCausalLM",
+    ]
+
+    # If HF config is provided, try dynamic detection
+    if hf_config is not None:
+        # Check for audio-related config attributes
+        audio_indicators = [
+            "audio_config",
+            "audio_encoder",
+            "n_audio_state",
+            "n_audio_ctx",
+            "n_mels",
+        ]
+        if any(hasattr(hf_config, attr) for attr in audio_indicators):
+            return True
+
+    return any(arch in model_architectures for arch in audio_input_architectures)
+
+
+def is_audio_gen_model(model_architectures: List[str], hf_config=None):
+    """Check if the model supports TTS/audio output."""
+    # Architecture-based detection (fallback)
+    tts_architectures = [
+        "MiniCPMOForConditionalChatGeneration",
+    ]
+
+    # If HF config is provided, try dynamic detection
+    if hf_config is not None:
+        # Check for TTS-related config attributes
+        tts_indicators = [
+            "tts_config",
+            "chat_tts_config",
+            "audio_generation_config",
+        ]
+        if any(hasattr(hf_config, attr) for attr in tts_indicators):
+            return True
+
+    return any(arch in model_architectures for arch in tts_architectures)
 
 
 def is_encoder_decoder_model(model_architectures: List[str]):

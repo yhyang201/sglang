@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, final
 
-from sglang.srt.entrypoints.openai.protocol import UsageInfo
+from sglang.srt.entrypoints.openai.protocol import (
+    CompletionTokensDetails,
+    PromptTokensDetails,
+    UsageInfo,
+)
 
 
 @final
@@ -71,11 +75,37 @@ class UsageProcessor:
         prompt_tokens: int,
         completion_tokens: int,
         cached_tokens: Optional[Dict[str, int]] = None,
+        audio_prompt_tokens: int = 0,
+        audio_completion_tokens: int = 0,
+        image_prompt_tokens: int = 0,
+        reasoning_tokens: int = 0,
     ) -> UsageInfo:
-        """Calculate token usage information"""
+        """Calculate token usage information with detailed breakdown"""
+
+        # Calculate text tokens by subtraction
+        cached_count = cached_tokens.get("cached_tokens", 0) if cached_tokens else 0
+        text_prompt_tokens = prompt_tokens - audio_prompt_tokens - image_prompt_tokens
+        text_completion_tokens = completion_tokens - audio_completion_tokens - reasoning_tokens
+
+        # Build detailed usage
+        completion_details = CompletionTokensDetails(
+            audio_tokens=audio_completion_tokens,
+            text_tokens=text_completion_tokens,
+            reasoning_tokens=reasoning_tokens,
+        )
+
+        prompt_details = PromptTokensDetails(
+            audio_tokens=audio_prompt_tokens,
+            text_tokens=text_prompt_tokens,
+            image_tokens=image_prompt_tokens,
+            cached_tokens=cached_count,
+        )
+
         return UsageInfo(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=prompt_tokens + completion_tokens,
-            prompt_tokens_details=cached_tokens,
+            completion_tokens_details=completion_details,
+            prompt_tokens_details=prompt_details,
+            reasoning_tokens=reasoning_tokens,
         )

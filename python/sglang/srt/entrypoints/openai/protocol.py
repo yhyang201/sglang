@@ -89,13 +89,30 @@ class ChoiceLogprobs(BaseModel):
     content: List[ChatCompletionTokenLogprob]
 
 
+class CompletionTokensDetails(BaseModel):
+    """Detailed breakdown of completion tokens."""
+    audio_tokens: Optional[int] = 0
+    text_tokens: Optional[int] = 0
+    reasoning_tokens: Optional[int] = 0
+    accepted_prediction_tokens: Optional[int] = 0
+    rejected_prediction_tokens: Optional[int] = 0
+
+
+class PromptTokensDetails(BaseModel):
+    """Detailed breakdown of prompt tokens."""
+    audio_tokens: Optional[int] = 0
+    text_tokens: Optional[int] = 0
+    image_tokens: Optional[int] = 0
+    cached_tokens: Optional[int] = 0
+
+
 class UsageInfo(BaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: Optional[int] = 0
-    # only used to return cached tokens when --enable-cache-report is set
-    prompt_tokens_details: Optional[Dict[str, int]] = None
-    reasoning_tokens: Optional[int] = 0
+    completion_tokens_details: Optional[CompletionTokensDetails] = None
+    prompt_tokens_details: Optional[PromptTokensDetails] = None
+    reasoning_tokens: Optional[int] = 0  # Keep for backward compatibility
 
 
 class StreamOptions(BaseModel):
@@ -342,6 +359,12 @@ class AudioConfig(BaseModel):
     format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm"] = "wav"
 
 
+class AudioOutput(BaseModel):
+    """Audio output for chat completion responses."""
+    id: str = Field(description="Unique identifier for the audio")
+    data: str = Field(description="Base64-encoded audio data")
+
+
 ChatCompletionMessageContentPart = Union[
     ChatCompletionMessageContentTextPart,
     ChatCompletionMessageContentImagePart,
@@ -575,6 +598,7 @@ class ChatCompletionRequest(BaseModel):
 class ChatMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
+    audio: Optional[AudioOutput] = None
     reasoning_content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
 
@@ -612,6 +636,7 @@ class ChatCompletionResponse(BaseModel):
 class DeltaMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
+    audio: Optional[AudioOutput] = None
     reasoning_content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
     hidden_states: Optional[object] = None

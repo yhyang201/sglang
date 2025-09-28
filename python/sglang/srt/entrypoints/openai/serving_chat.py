@@ -11,6 +11,7 @@ from fastapi import Request
 from fastapi.responses import ORJSONResponse, StreamingResponse
 
 from sglang.srt.entrypoints.openai.protocol import (
+    AudioOutput,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
@@ -61,6 +62,24 @@ class OpenAIServingChat(OpenAIServingBase):
 
     def _request_id_prefix(self) -> str:
         return "chatcmpl-"
+
+    def _supports_audio_output(self) -> bool:
+        """Check if the loaded model supports audio output."""
+        return self.tokenizer_manager.model_config.is_audio_gen
+
+    async def _generate_audio_output(
+        self,
+        text: str,
+        request: ChatCompletionRequest
+    ) -> Optional[AudioOutput]:
+        """Generate audio if requested and supported."""
+        if not request.modalities or "audio" not in request.modalities:
+            return None
+        if not self._supports_audio_output():
+            return None
+
+        # TODO: Move actual TTS implementation to dedicated audio module
+        return None
 
     def _validate_request(self, request: ChatCompletionRequest) -> Optional[str]:
         """Validate that the input is valid."""
@@ -689,7 +708,7 @@ class OpenAIServingChat(OpenAIServingBase):
         if not isinstance(ret, list):
             ret = [ret]
 
-        response = self._build_chat_response(
+        response = await self._build_chat_response(
             request,
             ret,
             int(time.time()),
@@ -697,7 +716,7 @@ class OpenAIServingChat(OpenAIServingBase):
 
         return response
 
-    def _build_chat_response(
+    async def _build_chat_response(
         self,
         request: ChatCompletionRequest,
         ret: List[Dict[str, Any]],
@@ -752,11 +771,17 @@ class OpenAIServingChat(OpenAIServingBase):
                     text, request.tools, finish_reason
                 )
 
+            # Handle audio output generation
+            audio_output = None
+            if request.modalities and "audio" in request.modalities:
+                audio_output = await self._generate_audio_output(text, request)
+
             choice_data = ChatCompletionResponseChoice(
                 index=idx,
                 message=ChatMessage(
                     role="assistant",
                     content=text if text else None,
+                    audio=audio_output,
                     tool_calls=tool_calls,
                     reasoning_content=reasoning_text if reasoning_text else None,
                 ),
