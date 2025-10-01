@@ -1042,8 +1042,8 @@ class FlashAttentionBackend(AttentionBackend):
             value_cache = value_cache.view(
                 -1, self.page_size, layer.tp_v_head_num, layer.head_dim
             )
-            if enable_debug:
-                print(f"{use_local_attn=}, {use_cascade_attn=}")
+            # if enable_debug:
+            #     print(f"{use_local_attn=}, {use_cascade_attn=}")
             if layer.is_cross_attention:
                 # Always use non-chunked logic for cross-attention
                 o = flash_attn_with_kvcache(
@@ -1129,7 +1129,6 @@ class FlashAttentionBackend(AttentionBackend):
                     v_descale=v_descale,
                     return_softmax_lse=use_cascade_attn,
                     num_splits=self.num_splits,
-                    enable_debug=enable_debug,
                     **kwargs,
                 )
                 if use_cascade_attn:

@@ -621,7 +621,7 @@ class Qwen2MoeModel(nn.Module):
                         for k in range(len(self.last_hidden_states[i])):
                             for j in range(len(self.last_hidden_states[i])):
                                 print(
-                                    f"{self.num=}, {i=}, {k=}, {j=}, {(self.last_hidden_states[i][k] - self.last_hidden_states[i][j]).abs().max()}",
+                                    f"{self.num=}, layer: {i}, {k=}, {j=}, {(self.last_hidden_states[i][k] - self.last_hidden_states[i][j]).abs().max()}",
                                     flush=True,
                                 )
 

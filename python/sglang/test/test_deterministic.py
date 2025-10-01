@@ -263,7 +263,7 @@ def test_deterministic(args):
         num_prompts = len(len_prefix)
         outputs = {i: [] for i in range(4)}
         prompts = [LONG_PROMPT[: len_prefix[i]] for i in range(4)]
-        for i in range(32, 32 + 1):
+        for i in range(32, 33 + 1):
             batch_size = i
             ret_dict = send_prefix(args, batch_size, prompts)
             msg = f"Testing Trial {i} with batch size {batch_size},"
