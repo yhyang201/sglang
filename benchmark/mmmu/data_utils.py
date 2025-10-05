@@ -130,12 +130,16 @@ def process_single_sample(data):
             "question_type": data["question_type"],
         }
     else:
+        image = []
+        for i in range(1, 8):
+            if data[f"image_{i}"] is not None:
+                image.append(data[f"image_{i}"])
         return {
             "id": data["id"],
             "question": question,
             "options": data["options"],
             "answer": data["answer"],
-            "image": data["image_1"],
+            "image": image,
             "question_type": data["question_type"],
         }
 

@@ -77,29 +77,50 @@ async def process_sample(
     client: Any, sample: dict, sampling_params: dict, lora_path: Optional[str] = None
 ) -> Tuple[dict, str]:
     """Send a single sample to the LLM and return (sample, response)."""
-    prompt = sample["final_input_prompt"]
-    prefix, suffix = _get_prefix_suffix(prompt)
+    # prompt = sample["final_input_prompt"]
+    # prefix, suffix = _get_prefix_suffix(prompt)
+    assert "question" in sample
+    assert "image" in sample
+    assert "answer" in sample
+
+    question = sample["question"]
+    print(f"{sample['options']=}", flush=True)
+    options = eval(sample["options"])
+    options_prompt = "Options:\n"
+    print(f"{options=}", flush=True)
+    start_chr = ord("A")
+    for ans_str in options:
+        key = chr(start_chr)
+        options_prompt += f"{key}. {ans_str}\n"
+        start_chr += 1
+    print(options_prompt, flush=True)
+    prompt = ""
+    prompt += f"Question: {question}\n"
+    if len(options) > 0:
+        prompt += options_prompt
+        prompt += "Please select the correct answer from the options above. \n"
+
     image = sample["image"]
     assert image is not None
     image_path = sample["image_path"]
     extra_body = None if lora_path is None else {"lora_path": lora_path}
+    msgs = [{"role": "user", "content": []}]
+    for im in image_path:
+        msgs[0]["content"].append({"type": "image_url", "image_url": {"url": im}})
+    msgs[0]["content"].append({"type": "text", "text": prompt})
+    print(f"{len(image_path)=}", flush=True)
     response = await client.chat.completions.create(
         model="default",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prefix},
-                    {"type": "image_url", "image_url": {"url": image_path}},
-                    {"type": "text", "text": suffix},
-                ],
-            }
-        ],
+        messages=msgs,
         temperature=0,
         max_completion_tokens=sampling_params["max_new_tokens"],
         max_tokens=sampling_params["max_new_tokens"],
         extra_body=extra_body,
     )
+    print(f"{msgs=}", flush=True)
+    print(f"{response.choices[0].message.content=}", flush=True)
+    print(f"{sample['question_type']=}", flush=True)
+    print()
     return sample, response.choices[0].message.content
 
 

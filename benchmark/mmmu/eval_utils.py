@@ -36,7 +36,7 @@ class EvalArgs:
     profile: bool = False
     profile_number: int = 5
     concurrency: int = 1
-    max_new_tokens: int = 30
+    max_new_tokens: int = 65536
     response_answer_regex: str = "(.*)"
     lora_path: Optional[str] = None
 
@@ -203,13 +203,16 @@ def prepare_samples(eval_args: EvalArgs):
         sample = process_single_sample(sample)
         sample = construct_prompt(sample, eval_args.config)
         image = sample["image"]
-        width, height = image.size
-        if 0 < eval_args.image_pixels_limit <= width * height:
-            return None, True
+        # width, height = image.size
+        # if 0 < eval_args.image_pixels_limit <= width * height:
+        #     return None, True
         # Use a unique identifier for the image path to avoid potential collisions if indices reset
-        image_path = f"{images_path}/image_{sample['id']}.png"
-        if not os.path.exists(image_path):
-            image.save(image_path)
+        image_path = []
+        for id, im in enumerate(image):
+            image_path_single = f"{images_path}/image_{sample['id']}_{id}.png"
+            if not os.path.exists(image_path_single):
+                im.save(image_path_single)
+            image_path.append(image_path_single)
         sample["image_path"] = image_path
         return sample, False
 
@@ -231,7 +234,7 @@ def prepare_samples(eval_args: EvalArgs):
             elif sample:
                 samples.append(sample)
 
-    samples.sort(key=lambda x: x["final_input_prompt"])
+    # samples.sort(key=lambda x: x["final_input_prompt"])
 
     print(
         f"Skipping {skip_count} samples with large images, {round((float(skip_count) / len(dataset)) * 100, 2)}% of dataset"
