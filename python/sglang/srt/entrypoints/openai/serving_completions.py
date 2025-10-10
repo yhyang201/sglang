@@ -291,6 +291,7 @@ class OpenAIServingCompletion(OpenAIServingBase):
                     cached_tokens,
                     n_choices=request.n,
                     enable_cache_report=self.tokenizer_manager.server_args.enable_cache_report,
+                    audio_prompt_tokens=0,  # Completions API typically doesn't support audio
                 )
                 final_usage_chunk = CompletionStreamResponse(
                     id=content["meta_info"]["id"],
@@ -399,7 +400,8 @@ class OpenAIServingCompletion(OpenAIServingBase):
         # Calculate usage
         cache_report = self.tokenizer_manager.server_args.enable_cache_report
         usage = UsageProcessor.calculate_response_usage(
-            ret, n_choices=request.n, enable_cache_report=cache_report
+            ret, n_choices=request.n, enable_cache_report=cache_report,
+            audio_prompt_tokens=0,  # Completions API typically doesn't support audio
         )
 
         return CompletionResponse(

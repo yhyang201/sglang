@@ -23,6 +23,7 @@ class UsageProcessor:
         responses: List[Dict[str, Any]],
         n_choices: int = 1,
         enable_cache_report: bool = False,
+        audio_prompt_tokens: int = 0,
     ) -> UsageInfo:
         completion_tokens = sum(r["meta_info"]["completion_tokens"] for r in responses)
 
@@ -42,6 +43,7 @@ class UsageProcessor:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             cached_tokens=cached_details,
+            audio_prompt_tokens=audio_prompt_tokens,
         )
 
     @staticmethod
@@ -51,6 +53,7 @@ class UsageProcessor:
         cached_tokens: Mapping[int, int],
         n_choices: int,
         enable_cache_report: bool = False,
+        audio_prompt_tokens: int = 0,
     ) -> UsageInfo:
         # index % n_choices == 0 marks the first choice of a prompt
         total_prompt_tokens = sum(
@@ -68,6 +71,7 @@ class UsageProcessor:
             prompt_tokens=total_prompt_tokens,
             completion_tokens=total_completion_tokens,
             cached_tokens=cached_details,
+            audio_prompt_tokens=audio_prompt_tokens,
         )
 
     @staticmethod

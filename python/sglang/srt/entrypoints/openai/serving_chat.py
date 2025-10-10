@@ -81,6 +81,35 @@ class OpenAIServingChat(OpenAIServingBase):
         # TODO: Move actual TTS implementation to dedicated audio module
         return None
 
+    def _calculate_audio_prompt_tokens(self, ret: List[Dict[str, Any]]) -> int:
+        """Calculate total audio prompt tokens from response metadata."""
+        # Try to extract audio token count from mm_items if available
+        # This is a placeholder - actual implementation depends on where
+        # audio_feature_lens information is stored in the response
+        total_audio_tokens = 0
+
+        for response in ret:
+            # Check if there's multimodal information in the response
+            if "mm_items" in response:
+                mm_items = response["mm_items"]
+                if mm_items:
+                    for item in mm_items:
+                        if hasattr(item, 'audio_feature_lens') and item.audio_feature_lens is not None:
+                            if hasattr(item.audio_feature_lens, 'sum'):
+                                total_audio_tokens += item.audio_feature_lens.sum().item()
+                            else:
+                                total_audio_tokens += sum(item.audio_feature_lens)
+
+        return total_audio_tokens
+
+    def _calculate_streaming_audio_tokens(self, request: ChatCompletionRequest) -> int:
+        """Calculate audio tokens for streaming requests."""
+        # For streaming, we need to get audio token count from the request
+        # In a real implementation, this would extract from the multimodal processor
+        # For now, we'll return 0 as a placeholder
+        # TODO: Extract actual audio token count from request processing
+        return 0
+
     def _validate_request(self, request: ChatCompletionRequest) -> Optional[str]:
         """Validate that the input is valid."""
         if not request.messages:
@@ -669,12 +698,14 @@ class OpenAIServingChat(OpenAIServingBase):
 
             # Additional usage chunk
             if request.stream_options and request.stream_options.include_usage:
+                audio_prompt_tokens = self._calculate_streaming_audio_tokens(request)
                 usage = UsageProcessor.calculate_streaming_usage(
                     prompt_tokens,
                     completion_tokens,
                     cached_tokens,
                     n_choices=request.n,
                     enable_cache_report=self.tokenizer_manager.server_args.enable_cache_report,
+                    audio_prompt_tokens=audio_prompt_tokens,
                 )
                 usage_chunk = ChatCompletionStreamResponse(
                     id=content["meta_info"]["id"],
@@ -797,10 +828,12 @@ class OpenAIServingChat(OpenAIServingBase):
             choices.append(choice_data)
 
         # Calculate usage
+        audio_prompt_tokens = self._calculate_audio_prompt_tokens(ret)
         usage = UsageProcessor.calculate_response_usage(
             ret,
             n_choices=request.n,
             enable_cache_report=self.tokenizer_manager.server_args.enable_cache_report,
+            audio_prompt_tokens=audio_prompt_tokens,
         )
 
         return ChatCompletionResponse(
