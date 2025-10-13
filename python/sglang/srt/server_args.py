@@ -242,6 +242,11 @@ class ServerArgs:
     tool_call_parser: Optional[str] = None
     tool_server: Optional[str] = None
 
+    # Audio generation (TTS)
+    enable_tts_engine: bool = False
+    tts_model_path: Optional[str] = None
+    default_prompt_wav: Optional[str] = None
+
     # Data parallelism
     dp_size: int = 1
     load_balance_method: str = "round_robin"
@@ -1599,6 +1604,26 @@ class ServerArgs:
             type=str,
             default=None,
             help="Either 'demo' or a comma-separated list of tool server urls to use for the model. If not specified, no tool server will be used.",
+        )
+
+        # Audio generation (TTS)
+        parser.add_argument(
+            "--enable-tts-engine",
+            action="store_true",
+            default=ServerArgs.enable_tts_engine,
+            help="Enable text-to-speech (TTS) engine for audio generation in chat completions.",
+        )
+        parser.add_argument(
+            "--tts-model-path",
+            type=str,
+            default=ServerArgs.tts_model_path,
+            help="The path to the TTS model for audio generation. Required if --enable-tts-engine is set.",
+        )
+        parser.add_argument(
+            "--default-prompt-wav",
+            type=str,
+            default=ServerArgs.default_prompt_wav,
+            help="The default prompt audio file path for voice cloning in TTS.",
         )
 
         # Data parallelism
