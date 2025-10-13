@@ -360,9 +360,19 @@ class AudioConfig(BaseModel):
 
 
 class AudioOutput(BaseModel):
-    """Audio output for chat completion responses."""
+    """Audio output for chat completion responses.
+
+    Reference: OpenAI Audio API
+    https://platform.openai.com/docs/guides/audio
+
+    Note: This is a simplified implementation. OpenAI's full spec may include
+    additional fields like transcript, expires_at, etc.
+    """
     id: str = Field(description="Unique identifier for the audio")
-    data: str = Field(description="Base64-encoded audio data")
+    data: str = Field(description="Base64-encoded audio data in WAV format")
+    # TODO: Add optional fields if needed:
+    # transcript: Optional[str] = None
+    # expires_at: Optional[int] = None
 
 
 ChatCompletionMessageContentPart = Union[

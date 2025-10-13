@@ -1,8 +1,13 @@
 """
 OpenAI Audio API Implementation
 
-This module implements OpenAI-compatible audio endpoints for chat completions.
-Reference: https://platform.openai.com/docs/guides/audio
+**DEPRECATED**: This module is deprecated and kept for reference only.
+Audio functionality has been integrated directly into OpenAIServingChat.
+
+For the current implementation, see:
+- sglang/srt/entrypoints/openai/serving_chat.py (_generate_audio_output method)
+
+This file is retained for historical reference and may be removed in a future release.
 """
 
 import logging

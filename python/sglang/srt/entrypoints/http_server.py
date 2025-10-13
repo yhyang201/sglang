@@ -215,12 +215,36 @@ async def lifespan(fast_api_app: FastAPI):
             ),
         )
 
-    # Initialize OpenAI serving handlers
+    server_args: ServerArgs = fast_api_app.server_args
+
+    # Initialize TTS Engine if enabled (must be done before OpenAIServingChat)
+    tts_engine = None
+    if server_args.enable_tts_engine:
+        if server_args.tts_model_path is None:
+            logger.warning(
+                "TTS engine is enabled but tts_model_path is not provided. "
+                "Audio generation will not be available."
+            )
+        else:
+            try:
+                from sglang.srt.tts.step_audio2.step_audio2_tts import StepAudio2TTS
+
+                logger.info(f"Loading TTS model from {server_args.tts_model_path}")
+                tts_engine = StepAudio2TTS(server_args.tts_model_path)
+                logger.info("TTS engine initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize TTS engine: {e}")
+                logger.warning("Audio generation will not be available")
+
+    # Store TTS engine in app state for serving handlers to access
+    fast_api_app.state.tts_engine = tts_engine
+
+    # Initialize OpenAI serving handlers (after TTS engine is initialized)
     fast_api_app.state.openai_serving_completion = OpenAIServingCompletion(
         _global_state.tokenizer_manager, _global_state.template_manager
     )
     fast_api_app.state.openai_serving_chat = OpenAIServingChat(
-        _global_state.tokenizer_manager, _global_state.template_manager
+        _global_state.tokenizer_manager, _global_state.template_manager, tts_engine
     )
     fast_api_app.state.openai_serving_embedding = OpenAIServingEmbedding(
         _global_state.tokenizer_manager, _global_state.template_manager
@@ -231,8 +255,6 @@ async def lifespan(fast_api_app: FastAPI):
     fast_api_app.state.openai_serving_rerank = OpenAIServingRerank(
         _global_state.tokenizer_manager
     )
-
-    server_args: ServerArgs = fast_api_app.server_args
 
     tool_server = None
     if server_args.tool_server == "demo":
@@ -278,6 +300,15 @@ async def lifespan(fast_api_app: FastAPI):
     try:
         yield
     finally:
+        # Cleanup TTS engine if it was loaded
+        if tts_engine is not None:
+            try:
+                logger.info("Unloading TTS model...")
+                tts_engine.unload_model()
+                logger.info("TTS model unloaded successfully")
+            except Exception as e:
+                logger.error(f"Error unloading TTS model: {e}")
+
         if server_args.tokenizer_worker_num > 1:
             pid = os.getpid()
             logger.info(f"uvicorn worker {pid} ending...")

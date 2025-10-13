@@ -1,8 +1,16 @@
 """
 Audio Server - Manages SGLang Engine and TTS Engine integration
 
-This server coordinates between the text generation engine (SGLang) and
-the audio generation engine (TTS) to provide audio output capabilities.
+**DEPRECATED**: This module is deprecated and kept for reference only.
+Audio functionality has been integrated directly into OpenAIServingChat
+in sglang/srt/entrypoints/openai/serving_chat.py.
+
+For the current implementation, see:
+- TTS Engine initialization: sglang/srt/entrypoints/http_server.py (lifespan function)
+- Audio generation logic: sglang/srt/entrypoints/openai/serving_chat.py (_generate_audio_output method)
+- Audio token parsing: sglang/srt/parser/audio_token_parser.py
+
+This file is retained for historical reference and may be removed in a future release.
 """
 
 import base64

@@ -55,10 +55,12 @@ class OpenAIServingChat(OpenAIServingBase):
         self,
         tokenizer_manager: TokenizerManager,
         template_manager: TemplateManager,
+        tts_engine=None,
     ):
         super().__init__(tokenizer_manager)
         self.template_manager = template_manager
         self.tool_call_parser = self.tokenizer_manager.server_args.tool_call_parser
+        self.tts_engine = tts_engine
 
     def _request_id_prefix(self) -> str:
         return "chatcmpl-"
@@ -71,15 +73,73 @@ class OpenAIServingChat(OpenAIServingBase):
         self,
         text: str,
         request: ChatCompletionRequest
-    ) -> Optional[AudioOutput]:
-        """Generate audio if requested and supported."""
-        if not request.modalities or "audio" not in request.modalities:
-            return None
-        if not self._supports_audio_output():
-            return None
+    ) -> tuple[Optional[AudioOutput], str]:
+        """Generate audio if requested and supported.
 
-        # TODO: Move actual TTS implementation to dedicated audio module
-        return None
+        Returns:
+            A tuple of (audio_output, clean_text) where audio_output is the generated audio
+            and clean_text is the text with audio tokens removed.
+        """
+        if not request.modalities or "audio" not in request.modalities:
+            return None, text
+        if not self.tts_engine:
+            logger.warning("Audio output requested but TTS engine is not available")
+            return None, text
+
+        try:
+            # Import audio token parser
+            from sglang.srt.parser.audio_token_parser import AudioTokenParser
+
+            # Parse audio tokens from the generated text
+            parser = AudioTokenParser()
+            clean_text, audio_tokens = parser.parse_non_stream(text)
+
+            if not audio_tokens:
+                logger.debug("No audio tokens found in generated text")
+                return None, clean_text
+
+            logger.info(f"Generating audio from {len(audio_tokens)} tokens")
+
+            # Get prompt_wav from request if available
+            prompt_wav = None
+            if request.audio and hasattr(request.audio, 'voice'):
+                # Use voice as prompt_wav path if provided
+                # TODO: Map voice names to actual wav file paths
+                prompt_wav = None
+
+            # Use default prompt_wav from server args if not specified
+            if prompt_wav is None:
+                prompt_wav = self.tokenizer_manager.server_args.default_prompt_wav
+
+            # Generate audio using TTS engine
+            audio_bytes = self.tts_engine.generate(
+                audio_tokens=audio_tokens,
+                prompt_wav=prompt_wav
+            )
+
+            if not audio_bytes:
+                logger.warning("TTS engine returned empty audio")
+                return None, clean_text
+
+            # Encode audio to base64
+            import base64
+            audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+
+            # Generate unique audio ID
+            import uuid
+            audio_id = f"audio_{uuid.uuid4().hex[:16]}"
+
+            logger.info(f"Generated audio output: {len(audio_bytes)} bytes")
+
+            return AudioOutput(
+                id=audio_id,
+                data=audio_base64
+            ), clean_text
+
+        except Exception as e:
+            logger.error(f"Failed to generate audio output: {e}", exc_info=True)
+            # Return None and original text to allow text-only fallback
+            return None, text
 
     def _calculate_audio_prompt_tokens(self, ret: List[Dict[str, Any]]) -> int:
         """Calculate total audio prompt tokens from response metadata."""
@@ -805,7 +865,7 @@ class OpenAIServingChat(OpenAIServingBase):
             # Handle audio output generation
             audio_output = None
             if request.modalities and "audio" in request.modalities:
-                audio_output = await self._generate_audio_output(text, request)
+                audio_output, text = await self._generate_audio_output(text, request)
 
             choice_data = ChatCompletionResponseChoice(
                 index=idx,
