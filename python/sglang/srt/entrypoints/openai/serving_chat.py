@@ -236,11 +236,15 @@ class OpenAIServingChat(OpenAIServingBase):
                 tool_call_constraint = parser.get_structure_constraint(
                     request.tool_choice
                 )
+                print(f"{tool_call_constraint=}")
 
         # Use chat template
+        print(f"{self.template_manager.chat_template_name=}")
         if self.template_manager.chat_template_name is None:
+            print("branch1")
             result = self._apply_jinja_template(request, tools, is_multimodal)
         else:
+            print(f"branch2")
             result = self._apply_conversation_template(request, is_multimodal)
 
         result.tool_call_constraint = tool_call_constraint
@@ -278,6 +282,8 @@ class OpenAIServingChat(OpenAIServingBase):
                 modalities,
             )
 
+            print(f"{processed_msg=}")
+
             # per the Transformers docs & maintainers, tool call arguments in
             # assistant-role messages with tool_calls need to be dicts not JSON str -
             # this is how tool-use chat templates will expect them moving forwards
@@ -309,6 +315,7 @@ class OpenAIServingChat(OpenAIServingBase):
                 openai_compatible_messages = openai_compatible_messages[:-1]
 
         try:
+            print(f"{openai_compatible_messages=}")
             prompt_ids = self.tokenizer_manager.tokenizer.apply_chat_template(
                 openai_compatible_messages,
                 tokenize=True,

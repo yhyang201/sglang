@@ -221,8 +221,9 @@ class TokenizerManager(TokenizerCommunicatorMixin):
             if server_args.skip_tokenizer_init:
                 self.tokenizer = self.processor = None
             else:
-                self.processor = _processor
+                self.processor = self.mm_processor._processor
                 self.tokenizer = get_tokenizer_from_processor(self.processor)
+                print(f"get_tokenizer_from_processor {self.tokenizer=}")
                 os.environ["TOKENIZERS_PARALLELISM"] = "false"
         else:
             self.mm_processor = self.processor = None
@@ -570,6 +571,8 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         # Tokenize
         input_embeds = None
         input_text = obj.text
+        print(f"{obj=}")
+        print(f"{input_text=}")
         token_type_ids = None
         is_cross_encoder_request = (
             isinstance(obj, EmbeddingReqInput) and obj.is_cross_encoder_request

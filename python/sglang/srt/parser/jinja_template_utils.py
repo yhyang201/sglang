@@ -89,6 +89,7 @@ def detect_jinja_template_content_format(chat_template: str) -> str:
     - If template has loops like {%- for content in message['content'] -%} → 'openai'
     - Otherwise → 'string'
     """
+    print(f"92 {chat_template=}")
     jinja_ast = _try_extract_ast(chat_template)
     if jinja_ast is None:
         return "string"
@@ -137,13 +138,15 @@ def process_content_for_template_format(
         Processed message dictionary
     """
     if not isinstance(msg_dict.get("content"), list):
+        print(f"wrong::140")
         # Already a string or None, no processing needed
         return {k: v for k, v in msg_dict.items() if v is not None}
-
+    print(f"{content_format=}")
     if content_format == "openai":
         # OpenAI format: preserve structured content list, normalize types
         processed_content_parts = []
         for chunk in msg_dict["content"]:
+            print(f"{chunk}")
             if isinstance(chunk, dict):
                 chunk_type = chunk.get("type")
 
@@ -165,6 +168,7 @@ def process_content_for_template_format(
                     # Normalize to simple 'video' type for template compatibility
                     processed_content_parts.append({"type": "video"})
                 elif chunk_type == "audio_url":
+                    print(f"168 {chunk=}")
                     audio_data.append(chunk["audio_url"]["url"])
                     # Normalize to simple 'audio' type
                     processed_content_parts.append({"type": "audio"})

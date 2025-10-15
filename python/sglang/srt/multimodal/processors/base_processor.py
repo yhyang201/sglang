@@ -650,5 +650,5 @@ class BaseMultimodalProcessor(ABC):
                 input_ids=input_ids,
                 mm_token_id=mm_token_id,
             )
-
+        print(f"653 {ret=}")
         return all_collected_items, input_ids, ret

@@ -971,18 +971,18 @@ register_conv_template(
 )
 
 
-register_conv_template(
-    Conversation(
-        name="step_audio_2",
-        system_template="<|BOT|>system\n{system_message}",
-        system_message="You are a helpful assistant.",
-        roles=("<|BOT|>human", "<|BOT|>assistant"),
-        sep="<|EOT|>",
-        sep_style=SeparatorStyle.STEP_AUDIO2,
-        stop_str=["<|EOT|>"],
-        audio_token="<audio_start><audio_patch><audio_end>",
-    )
-)
+# register_conv_template(
+#     Conversation(
+#         name="step_audio_2",
+#         system_template="<|BOT|>system\n{system_message}",
+#         system_message="You are a helpful assistant.",
+#         roles=("<|BOT|>human", "<|BOT|>assistant"),
+#         sep="<|EOT|>",
+#         sep_style=SeparatorStyle.STEP_AUDIO2,
+#         stop_str=["<|EOT|>"],
+#         audio_token="<audio_start><audio_patch><audio_end>",
+#     )
+# )
 
 MODEL_TYPE_TO_TEMPLATE = {
     "internvl_chat": "internvl-2-5",
@@ -1063,10 +1063,10 @@ def match_phi_4_mm(model_path: str):
     return MODEL_TYPE_TO_TEMPLATE.get(model_type)
 
 
-@register_conv_template_matching_function
-def match_step2_audio(model_path: str):
-    print(f"{model_path=}")
-    if "step-audio" in model_path.lower():
-        return "step_audio_2"
-    model_type = get_model_type(model_path)
-    return MODEL_TYPE_TO_TEMPLATE.get(model_type)
+# @register_conv_template_matching_function
+# def match_step2_audio(model_path: str):
+#     print(f"{model_path=}")
+#     if "step-audio" in model_path.lower():
+#         return "step_audio_2"
+#     model_type = get_model_type(model_path)
+#     return MODEL_TYPE_TO_TEMPLATE.get(model_type)
