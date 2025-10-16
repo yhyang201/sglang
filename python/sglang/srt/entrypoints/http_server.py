@@ -27,6 +27,7 @@ import tempfile
 import threading
 import time
 from http import HTTPStatus
+from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
 
 from sglang.srt.tracing.trace import process_tracing_init, trace_set_thread_info
@@ -46,6 +47,28 @@ from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse, Response, StreamingResponse
+
+
+def _prepare_cache_env() -> None:
+    cache_root = Path(os.environ.get("SGLANG_CACHE_ROOT", "/data/cache"))
+    cache_root.mkdir(parents=True, exist_ok=True)
+
+    def assign_env(env_key: str, subdir: str) -> None:
+        current = os.environ.get(env_key)
+        if current is None or current.startswith("/root/.cache"):
+            target = cache_root / subdir
+            target.mkdir(parents=True, exist_ok=True)
+            os.environ.setdefault(env_key, str(target))
+
+    assign_env("HF_HOME", "huggingface")
+    assign_env("TRANSFORMERS_CACHE", "huggingface")
+    assign_env("HUGGINGFACE_HUB_CACHE", "huggingface")
+    assign_env("TORCH_HOME", "torch")
+    assign_env("FLASHINFER_WORKSPACE_BASE", "flashinfer")
+    assign_env("XDG_CACHE_HOME", "xdg")
+
+
+_prepare_cache_env()
 
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST, DisaggregationMode
 from sglang.srt.entrypoints.engine import _launch_subprocesses
