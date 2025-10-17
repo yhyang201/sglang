@@ -306,10 +306,9 @@ class StepAudio2Tokenizer(Qwen2TokenizerFast):
             list[int]: Sequence of token IDs
         """
 
-        print("apply_chat_template_trans_ta4")
+
         result = []
         messages = conversation
-        print(f"209 {messages=}")
 
         if continue_final_message and add_generation_prompt:
             raise ValueError(
@@ -399,17 +398,6 @@ class StepAudio2Tokenizer(Qwen2TokenizerFast):
                     last_index = i
                     break  # 找到后立即退出循环
             result = result[:last_index + 1]
-        print(f"402 {result=}")
-        result = """<|BOT|>system
-            你的名字叫做小跃，是由阶跃星辰公司训练出来的语音大模型。
-            你具备调用工具解决问题的能力，你需要根据用户的需求和上下文情景，自主选择是否调用系统提供的工具来协助用户。
-            你情感细腻，观察能力强，擅长分析用户的内容，并作出善解人意的回复，说话的过程中时刻注意用户的感受，富有同理心，提供多样的情绪价值。
-            今天是2025年8月28日，星期四
-            请用默认女声与用户交流<|EOT|><|BOT|>tool_json_schemas
-            [{"type": "function", "function": {"name": "search", "description": "搜索工具", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "搜索关键词"}}, "required": ["query"], "additionalProperties": false}}}]<|EOT|><|BOT|>human
-            <audio_start><audio_patch><audio_end>
-            <|EOT|><|BOT|>assistant
-            <tts_start><|EOT|>"""
         trans_token_ids = self.trans_text_audio_to_ta4(result)
         return trans_token_ids
 
@@ -637,7 +625,6 @@ class StepAudio2MultimodalProcessor(BaseMultimodalProcessor):
         input_text,
         **kwargs,
     ):
-        print(f"629 {audio_data=}")
         base_output = self.load_mm_data(
             prompt=input_text,
             audio_data=audio_data,
@@ -645,11 +632,9 @@ class StepAudio2MultimodalProcessor(BaseMultimodalProcessor):
         )
         if base_output is None:
             return None
-        print(f"632 {base_output=} {self.mm_tokens=}")
         mm_items, input_ids, ret = self.process_and_combine_mm_data(
             base_output, self.mm_tokens
         )
-        print(f"636 {ret=}")
 
         mm_items[0].audio_feature_lens = ret["audio_lens"]
 
