@@ -595,12 +595,19 @@ class ChatCompletionRequest(BaseModel):
     bootstrap_room: Optional[Union[List[int], int]] = None
 
 
+class TTSContent(BaseModel):
+    """TTS content containing text and audio tokens."""
+    tts_text: Optional[str] = None
+    tts_audio: Optional[str] = None
+
+
 class ChatMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
     audio: Optional[AudioOutput] = None
     reasoning_content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
+    tts_content: Optional[TTSContent] = None
 
 
 class ChatCompletionResponseChoice(BaseModel):
@@ -639,6 +646,7 @@ class DeltaMessage(BaseModel):
     audio: Optional[AudioOutput] = None
     reasoning_content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
+    tts_content: Optional[TTSContent] = None
     hidden_states: Optional[object] = None
 
     @model_serializer(mode="wrap")

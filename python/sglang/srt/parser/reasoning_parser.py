@@ -270,6 +270,7 @@ class ReasoningParser:
         "qwen3": Qwen3Detector,
         "qwen3-thinking": Qwen3Detector,
         "step3": DeepSeekR1Detector,
+        "step-audio2": DeepSeekR1Detector,  # Uses same </think> format as DeepSeek-R1
     }
 
     def __init__(

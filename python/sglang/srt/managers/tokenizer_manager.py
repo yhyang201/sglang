@@ -250,6 +250,11 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         else:
             self.async_dynamic_batch_tokenizer = None
 
+        # Initialize TTS engine if enabled
+        self.tts_engine = None
+        if server_args.enable_tts_engine:
+            self._initialize_tts_engine()
+
         # Init inter-process communication
         context = zmq.asyncio.Context(2)
         self.recv_from_detokenizer = get_zmq_socket(
@@ -424,6 +429,33 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                     obj, request, created_time
                 ):
                     yield response
+
+    def _initialize_tts_engine(self):
+        """Initialize TTS engine (Token2wav) for audio generation."""
+        try:
+            from sglang.srt.tts.step_audio2.step_audio2_tts import StepAudio2TTS
+
+            tts_model_path = self.server_args.tts_model_path
+            if not tts_model_path:
+                logger.warning(
+                    "TTS engine enabled but tts_model_path not specified. "
+                    "Trying to use default path from model config."
+                )
+                # Try to infer from model path
+                model_path = self.server_args.model_path
+                tts_model_path = f"{model_path}/token2wav"
+
+            logger.info(f"Loading TTS engine from: {tts_model_path}")
+            self.tts_engine = StepAudio2TTS(
+                model_path=tts_model_path,
+                float16=True  # Use FP16 for efficiency
+            )
+            logger.info("TTS engine initialized successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to initialize TTS engine: {e}")
+            logger.warning("TTS engine will be disabled")
+            self.tts_engine = None
 
     def _detect_input_format(
         self, texts: Union[str, List[str]], is_cross_encoder: bool

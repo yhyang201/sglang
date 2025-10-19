@@ -242,7 +242,8 @@ class ServerArgs:
     tool_call_parser: Optional[str] = None
     tool_server: Optional[str] = None
 
-    # Audio generation (TTS)
+    # Audio parsing and generation (TTS)
+    audio_parser: Optional[str] = None
     enable_tts_engine: bool = False
     tts_model_path: Optional[str] = None
     default_prompt_wav: Optional[str] = None
@@ -1013,6 +1014,19 @@ class ServerArgs:
                     f"Currently only {DETERMINISTIC_ATTENTION_BACKEND_CHOICES} attention backends are supported for deterministic inference."
                 )
 
+        # Validate TTS engine configuration
+        if self.enable_tts_engine:
+            if not self.audio_parser:
+                raise ValueError(
+                    "TTS engine requires audio_parser to be configured. "
+                    "Please set --audio-parser (e.g., --audio-parser step_audio_2) "
+                    "when using --enable-tts-engine."
+                )
+            logger.info(
+                f"TTS engine enabled with audio_parser={self.audio_parser}, "
+                f"tts_model_path={self.tts_model_path}"
+            )
+
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
         # Model and tokenizer
@@ -1605,25 +1619,29 @@ class ServerArgs:
             default=None,
             help="Either 'demo' or a comma-separated list of tool server urls to use for the model. If not specified, no tool server will be used.",
         )
-
-        # Audio generation (TTS)
+        parser.add_argument(
+            "--audio-parser",
+            type=str,
+            default=ServerArgs.audio_parser,
+            help="Specify the parser for extracting audio/TTS content from model output. Currently supports: 'step_audio_2'.",
+        )
         parser.add_argument(
             "--enable-tts-engine",
             action="store_true",
             default=ServerArgs.enable_tts_engine,
-            help="Enable text-to-speech (TTS) engine for audio generation in chat completions.",
+            help="Enable TTS engine to generate actual audio from audio tokens. Requires --audio-parser to be set.",
         )
         parser.add_argument(
             "--tts-model-path",
             type=str,
             default=ServerArgs.tts_model_path,
-            help="The path to the TTS model for audio generation. Required if --enable-tts-engine is set.",
+            help="Path to the TTS model (Token2wav) for audio generation. Only used when --enable-tts-engine is set.",
         )
         parser.add_argument(
             "--default-prompt-wav",
             type=str,
             default=ServerArgs.default_prompt_wav,
-            help="The default prompt audio file path for voice cloning in TTS.",
+            help="Default prompt audio file path for TTS voice cloning. Optional.",
         )
 
         # Data parallelism

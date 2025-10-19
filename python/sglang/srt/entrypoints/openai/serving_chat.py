@@ -67,19 +67,192 @@ class OpenAIServingChat(OpenAIServingBase):
         """Check if the loaded model supports audio output."""
         return self.tokenizer_manager.model_config.is_audio_gen
 
+    def _parse_tts_content(
+        self,
+        text: str,
+        ret_item: Dict[str, Any],
+        audio_parser_name: str
+    ) -> Optional[Dict[str, str]]:
+        """
+        Parse TTS content from model output using audio parser.
+
+        Args:
+            text: The decoded output text
+            ret_item: The full generation result item
+            audio_parser_name: Name of the audio parser to use (e.g., "step_audio_2")
+
+        Returns:
+            Dictionary with tts_text, tts_audio, and remaining text, or None
+        """
+        try:
+            from sglang.srt.parser.audio_parser import AudioParserManager
+
+            # Create audio parser
+            parser = AudioParserManager.create_parser(
+                audio_parser_name,
+                self.tokenizer_manager.tokenizer
+            )
+
+            # Re-tokenize the output text to get token IDs
+            # This is a workaround since we don't have direct access to output_token_ids
+            output_tokens = self.tokenizer_manager.tokenizer.encode(text, add_special_tokens=False)
+
+            # Check if this is TTS output by looking at the prompt
+            # For Step-Audio2, if the prompt ends with <tts_start>, it's TTS output
+            prompt_ids = ret_item.get("prompt_token_ids", [])
+            if not prompt_ids:
+                # Try to get from input_ids in meta_info
+                meta_info = ret_item.get("meta_info", {})
+                prompt_ids = meta_info.get("prompt_token_ids", [])
+
+            is_tts_output = parser.is_tts_output(prompt_ids) if prompt_ids else False
+
+            if not is_tts_output:
+                return None
+
+            # Parse TTS content
+            text_tokens, audio_tokens, other_tokens = parser.extract_tts_content_nonstreaming(
+                output_tokens,
+                is_tts_ta4_output=is_tts_output
+            )
+
+            # Convert tokens back to text
+            tts_text = self.tokenizer_manager.tokenizer.decode(text_tokens, skip_special_tokens=True)
+            # Convert audio tokens to string format: <audio_123><audio_456>...
+            tts_audio = "".join([
+                f"<audio_{token_id - parser.first_audio_token_id}>"
+                for token_id in audio_tokens
+            ])
+            remaining_text = self.tokenizer_manager.tokenizer.decode(other_tokens, skip_special_tokens=True)
+
+            return {
+                "tts_text": tts_text if tts_text else None,
+                "tts_audio": tts_audio if tts_audio else None,
+                "text": remaining_text if remaining_text else None,
+            }
+
+        except Exception as e:
+            logger.error(f"Error parsing TTS content: {e}")
+            return None
+
+    async def _generate_audio_from_tokens(
+        self,
+        tts_audio_str: str,
+        prompt_wav: Optional[str] = None
+    ) -> Optional[AudioOutput]:
+        """
+        Generate audio from audio token string.
+
+        Args:
+            tts_audio_str: Audio tokens in format "<audio_0><audio_1>..."
+            prompt_wav: Optional path to prompt audio file for voice cloning
+
+        Returns:
+            AudioOutput object with base64-encoded audio, or None on error
+        """
+        try:
+            import base64
+            import re
+            import uuid
+
+            # Check if TTS engine is available
+            if not hasattr(self.tokenizer_manager, 'tts_engine'):
+                logger.warning("TTS engine not initialized, skipping audio generation")
+                return None
+
+            tts_engine = self.tokenizer_manager.tts_engine
+            if tts_engine is None:
+                logger.warning("TTS engine is None, skipping audio generation")
+                return None
+
+            # Extract audio token IDs from string format
+            # Format: "<audio_0><audio_1><audio_2>..."
+            audio_token_ids = [
+                int(x) for x in re.findall(r'<audio_(\d+)>', tts_audio_str)
+            ]
+
+            if not audio_token_ids:
+                logger.warning("No audio tokens found in tts_audio string")
+                return None
+
+            logger.info(f"Generating audio from {len(audio_token_ids)} tokens")
+
+            # Generate audio using TTS engine
+            # The TTS engine (Token2wav) returns raw audio bytes
+            audio_bytes = tts_engine.generate(
+                audio_tokens=audio_token_ids,
+                prompt_wav=prompt_wav
+            )
+
+            if not audio_bytes:
+                logger.warning("TTS engine returned empty audio")
+                return None
+
+            # Encode to base64 for transmission
+            audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+
+            # Generate unique ID for this audio
+            audio_id = f"audio_{uuid.uuid4().hex[:12]}"
+
+            return AudioOutput(
+                id=audio_id,
+                data=audio_base64
+            )
+
+        except Exception as e:
+            logger.error(f"Error generating audio from tokens: {e}")
+            return None
+
     async def _generate_audio_output(
         self,
         text: str,
-        request: ChatCompletionRequest
+        request: ChatCompletionRequest,
+        tts_content: Optional[Dict[str, str]] = None
     ) -> Optional[AudioOutput]:
-        """Generate audio if requested and supported."""
+        """
+        Generate audio if requested and supported.
+
+        Args:
+            text: The text content
+            request: The chat completion request
+            tts_content: Parsed TTS content with tts_text and tts_audio
+
+        Returns:
+            AudioOutput object or None
+        """
+        # Check if audio output is requested
         if not request.modalities or "audio" not in request.modalities:
             return None
+
+        # Check if model supports audio output
         if not self._supports_audio_output():
+            logger.warning("Model does not support audio output")
             return None
 
-        # TODO: Move actual TTS implementation to dedicated audio module
-        return None
+        # Check if TTS engine is enabled
+        enable_tts = getattr(
+            self.tokenizer_manager.server_args, "enable_tts_engine", False
+        )
+        if not enable_tts:
+            logger.info("TTS engine not enabled, skipping audio generation")
+            return None
+
+        # TTS content is required for audio generation
+        if not tts_content or not tts_content.get("tts_audio"):
+            logger.warning("No TTS content available for audio generation")
+            return None
+
+        # Extract prompt_wav from request if provided
+        # TODO: Parse from request.audio or request.messages
+        prompt_wav = None
+        if hasattr(request, 'audio') and request.audio:
+            prompt_wav = getattr(request.audio, 'voice', None)
+
+        # Generate audio from tokens
+        return await self._generate_audio_from_tokens(
+            tts_content["tts_audio"],
+            prompt_wav=prompt_wav
+        )
 
     def _calculate_audio_prompt_tokens(self, ret: List[Dict[str, Any]]) -> int:
         """Calculate total audio prompt tokens from response metadata."""
@@ -809,10 +982,29 @@ class OpenAIServingChat(OpenAIServingBase):
                     text, request.tools, finish_reason
                 )
 
+            # Handle TTS content parsing (Step-Audio2)
+            tts_content = None
+            audio_parser_name = getattr(
+                self.tokenizer_manager.server_args, "audio_parser", None
+            )
+            if audio_parser_name and text:
+                tts_content = self._parse_tts_content(
+                    text, ret_item, audio_parser_name
+                )
+                # If TTS content is parsed, update the text to exclude audio tokens
+                if tts_content and tts_content.get("tts_text"):
+                    # The normal text should be what's after TTS content
+                    text = tts_content.get("text", text)
+
             # Handle audio output generation
             audio_output = None
             if request.modalities and "audio" in request.modalities:
-                audio_output = await self._generate_audio_output(text, request)
+                audio_output = await self._generate_audio_output(
+                    text, request, tts_content
+                )
+
+            # Import TTSContent for response
+            from sglang.srt.entrypoints.openai.protocol import TTSContent
 
             choice_data = ChatCompletionResponseChoice(
                 index=idx,
@@ -822,6 +1014,7 @@ class OpenAIServingChat(OpenAIServingBase):
                     audio=audio_output,
                     tool_calls=tool_calls,
                     reasoning_content=reasoning_text if reasoning_text else None,
+                    tts_content=TTSContent(**tts_content) if tts_content else None,
                 ),
                 logprobs=choice_logprobs,
                 finish_reason=finish_reason["type"] if finish_reason else None,
