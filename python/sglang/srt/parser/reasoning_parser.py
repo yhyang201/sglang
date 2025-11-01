@@ -229,7 +229,7 @@ class StepAudio2Detector(BaseReasoningFormatDetector):
         Returns (cleaned_text, protected_content).
         """
         if not text:
-            return text, ""
+            return "", ""
 
         protected_parts = []
         remaining_text = text

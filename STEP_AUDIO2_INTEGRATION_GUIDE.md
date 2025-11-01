@@ -26,23 +26,23 @@ python -m sglang.launch_server \
 
 #### Text-to-Speech (TTS) Example
 
+**Recommended Method (Using `tts_output` parameter):**
+
 ```python
 import requests
 
 url = "http://localhost:8000/v1/chat/completions"
 
-# Request with TTS output
-messages = [
-    {"role": "system", "content": "You are a helpful assistant."},
-    {"role": "user", "content": "Tell me about Paris."},
-    {"role": "assistant", "content": "<tts_start>", "eot": False}
-]
-
+# Request with TTS output using the tts_output parameter
 response = requests.post(
     url,
     json={
         "model": "step-audio-2-mini",
-        "messages": messages,
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Tell me about Paris."}
+        ],
+        "tts_output": True,  # Enable TTS output
         "max_tokens": 2048,
         "temperature": 0.7
     }
@@ -54,6 +54,27 @@ result = response.json()
 tts_content = result["choices"][0]["message"]["tts_content"]
 print("TTS Text:", tts_content["tts_text"])
 print("TTS Audio Tokens:", tts_content["tts_audio"])
+```
+
+**Alternative Method (Legacy - Manual <tts_start> token):**
+
+```python
+# This method still works but is not recommended
+messages = [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": "Tell me about Paris."},
+    {"role": "assistant", "content": "<tts_start>", "eot": False}  # Manual token
+]
+
+response = requests.post(
+    url,
+    json={
+        "model": "step-audio-2-mini",
+        "messages": messages,
+        "max_tokens": 2048,
+        "temperature": 0.7
+    }
+)
 ```
 
 **Expected Response Structure:**
@@ -282,11 +303,10 @@ tools = [{
     }
 }]
 
-# First request: User asks a question
+# First request: User asks a question with TTS output
 messages = [
     {"role": "system", "content": "You are a helpful assistant."},
-    {"role": "user", "content": "Search for information about the Eiffel Tower"},
-    {"role": "assistant", "content": "<tts_start>", "eot": False}
+    {"role": "user", "content": "Search for information about the Eiffel Tower"}
 ]
 
 response = requests.post(
@@ -295,6 +315,7 @@ response = requests.post(
         "model": "step-audio-2-mini",
         "messages": messages,
         "tools": tools,
+        "tts_output": True,  # Enable TTS output
         "max_tokens": 4096,
         "temperature": 0.7
     }
@@ -334,9 +355,11 @@ grep "Parser initialized" server.log
 ### TTS Content Not Parsed
 
 If `tts_content` is always `null`:
-1. Ensure `--audio-parser step_audio_2` is set
-2. Verify the prompt ends with `<tts_start>`
-3. Check that the model output includes TTS tokens
+1. Ensure `--audio-parser step_audio_2` is set in server configuration
+2. Verify `"tts_output": true` is included in the request (recommended method)
+   - OR ensure the last message has `"content": "<tts_start>"` (legacy method)
+3. Check that the model output includes audio tokens (`<audio_XXX>`)
+4. Review server logs for TTS parser initialization errors
 
 ### Tool Calls Not Detected
 
@@ -345,11 +368,30 @@ If tool calls are not parsed:
 2. Verify tools are provided in the request
 3. Check the model output format matches `<tool_call>function\n...`
 
-## Limitations (Current MVP)
+## Limitations
 
 1. **No Streaming for Audio Parser**: TTS content parsing only works in non-streaming mode
-2. **Re-tokenization Overhead**: Output text is re-tokenized for audio parsing (workaround until token IDs are directly accessible)
-3. **Simplified Streaming for Tool Parser**: Tool parser has basic streaming support
+   - Streaming requests will not parse TTS content
+   - Use non-streaming mode for TTS output
+2. **Re-tokenization Overhead**: Output text is re-tokenized for audio parsing
+   - Workaround until output token IDs are directly accessible
+   - Minor performance impact
+3. **Parser Execution Order**: Parsers run in fixed order (Audio → Tool → Reasoning)
+   - Designed to prevent content interference
+   - Cannot customize order per request
+
+## Recent Improvements
+
+1. **✓ Fixed Parser Conflict Issue**: Reasoning parser no longer consumes audio/tool content
+   - Created dedicated `StepAudio2Detector` with `force_reasoning=False`
+   - Implements content protection for tool calls and TTS markers
+2. **✓ Added `tts_output` Parameter**: Simplified TTS usage
+   - No need to manually add `<tts_start>` to messages
+   - Server automatically handles token insertion
+3. **✓ Improved Parser Execution Order**: Fixed parser interaction issues
+   - Audio parser runs first to extract TTS content
+   - Tool parser runs second
+   - Reasoning parser runs last
 
 ## Next Steps
 
@@ -357,6 +399,7 @@ If tool calls are not parsed:
 2. Optimize by accessing output token IDs directly without re-tokenization
 3. Add comprehensive integration tests
 4. Add audio generation endpoint (Token2wav integration)
+5. Support mixed-mode outputs (e.g., reasoning + TTS in same response)
 
 ## API Reference
 
@@ -371,16 +414,34 @@ If tool calls are not parsed:
 - `--reasoning-parser <name>`: Reasoning parser to use
   - Options: `step-audio2`, `deepseek-r1`, `qwen3`, etc.
 
+### Request Parameters
+
+#### ChatCompletionRequest
+
+Standard OpenAI-compatible parameters, plus:
+
+- `tts_output` (bool, default: `false`): Enable text-to-speech output
+  - When `true`, automatically appends `<tts_start>` token to the prompt
+  - Model generates audio tokens in response
+  - Parsed audio content is returned in `tts_content` field
+
+- `separate_reasoning` (bool, default: `false`): Separate reasoning content from normal output
+  - When `true`, reasoning/thinking content is extracted to `reasoning_content` field
+  - Requires `--reasoning-parser` to be configured
+
+- `tools` (array, optional): Function calling tools
+  - Requires `--tool-call-parser` to be configured
+
 ### Response Fields
 
 #### ChatMessage
 
 - `content`: Main text content (after TTS extraction)
-- `tts_content`: TTS content object
+- `tts_content`: TTS content object (only present when TTS is detected)
   - `tts_text`: Text to be spoken
-  - `tts_audio`: Audio tokens as string
-- `tool_calls`: Array of tool call objects
-- `reasoning_content`: Thinking/reasoning text
+  - `tts_audio`: Audio tokens as string (format: `<audio_0><audio_1>...`)
+- `tool_calls`: Array of tool call objects (only present when tools are called)
+- `reasoning_content`: Thinking/reasoning text (only present when `separate_reasoning=true`)
 
 ## Support
 
