@@ -77,6 +77,8 @@ class StepAudio2Detector(BaseFormatDetector):
 
     def has_tool_call(self, text: str) -> bool:
         """Check if the text contains a Step-Audio2 format tool call."""
+        if not text:
+            return False
         return self.tool_call_start in text
 
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
@@ -90,7 +92,7 @@ class StepAudio2Detector(BaseFormatDetector):
         Returns:
             StreamingParseResult containing parsed tool calls and remaining content
         """
-        if self.tool_call_start not in text:
+        if not text or self.tool_call_start not in text:
             return StreamingParseResult(normal_text=text, calls=[])
 
         # Split text into before tool calls, tool calls section, and after

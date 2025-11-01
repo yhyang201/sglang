@@ -1013,7 +1013,7 @@ class OpenAIServingChat(OpenAIServingBase):
                 # If TTS content is parsed (has audio tokens), update the text to exclude them
                 if tts_content and tts_content.get("tts_audio"):
                     # The normal text should be what's after TTS content (without audio tokens)
-                    text = tts_content.get("text", "")
+                    text = tts_content.get("text") or ""
 
             # Handle tool calls - RUN SECOND
             tool_calls = None
