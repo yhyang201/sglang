@@ -14,7 +14,7 @@ python -m sglang.launch_server \
     --audio-parser step_audio_2 \
     --tool-call-parser step_audio_2 \
     --reasoning-parser step-audio2 \
-    --port 8000
+    --port 30000
 ```
 
 **Configuration Parameters:**

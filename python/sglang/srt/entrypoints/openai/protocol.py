@@ -495,6 +495,10 @@ class ChatCompletionRequest(BaseModel):
     )
     modalities: Optional[List[Literal["text", "audio"]]] = None
     audio: Optional[AudioConfig] = None
+    tts_output: bool = Field(
+        default=False,
+        description="Enable text-to-speech output. When True, automatically appends <tts_start> to prompt.",
+    )
 
     @model_validator(mode="before")
     @classmethod

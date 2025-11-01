@@ -192,6 +192,96 @@ class KimiDetector(BaseReasoningFormatDetector):
         )
 
 
+class StepAudio2Detector(BaseReasoningFormatDetector):
+    """
+    Detector for Step-Audio-2 model.
+    Assumes reasoning format:
+      <think>(.*)</think>
+
+    Unlike DeepSeekR1Detector, this detector:
+    - Does NOT use force_reasoning (only treats content between <think></think> as reasoning)
+    - Skips content inside <tool_call>...</tool_call> markers
+    - Skips content between <tts_start>...<tts_end> markers
+
+    This prevents the reasoning parser from consuming audio or tool call content.
+
+    Args:
+        stream_reasoning (bool): If False, accumulates reasoning content until the end tag.
+            If True, streams reasoning content as it arrives.
+    """
+
+    def __init__(self, stream_reasoning: bool = True, force_reasoning: bool = False):
+        super().__init__(
+            "<think>",
+            "</think>",
+            force_reasoning=False,  # Never force reasoning mode
+            stream_reasoning=stream_reasoning,
+        )
+        # Markers to skip
+        self.tool_call_start = "<tool_call>"
+        self.tool_call_end = "</tool_call>"
+        self.tts_start = "<tts_start>"
+        self.tts_end = "<tts_end>"
+
+    def _remove_protected_content(self, text: str) -> Tuple[str, str]:
+        """
+        Remove tool call and TTS content from text to prevent reasoning parser from consuming it.
+        Returns (cleaned_text, protected_content).
+        """
+        if not text:
+            return text, ""
+
+        protected_parts = []
+        remaining_text = text
+
+        # Extract and preserve tool call blocks
+        while self.tool_call_start in remaining_text:
+            start_idx = remaining_text.find(self.tool_call_start)
+            end_idx = remaining_text.find(self.tool_call_end, start_idx)
+
+            if end_idx == -1:
+                # Incomplete tool call, keep it
+                break
+
+            end_idx += len(self.tool_call_end)
+            protected_parts.append(remaining_text[start_idx:end_idx])
+            remaining_text = remaining_text[:start_idx] + remaining_text[end_idx:]
+
+        # Extract and preserve TTS blocks
+        while self.tts_start in remaining_text:
+            start_idx = remaining_text.find(self.tts_start)
+            end_idx = remaining_text.find(self.tts_end, start_idx)
+
+            if end_idx == -1:
+                # Incomplete TTS block, keep it
+                break
+
+            end_idx += len(self.tts_end)
+            protected_parts.append(remaining_text[start_idx:end_idx])
+            remaining_text = remaining_text[:start_idx] + remaining_text[end_idx:]
+
+        protected_content = "".join(protected_parts)
+        return remaining_text, protected_content
+
+    def detect_and_parse(self, text: str) -> StreamingParseResult:
+        """
+        Override to skip tool call and TTS content before parsing reasoning.
+        """
+        # Remove protected content first
+        cleaned_text, protected_content = self._remove_protected_content(text)
+
+        # Parse reasoning from cleaned text
+        result = super().detect_and_parse(cleaned_text)
+
+        # Add protected content back to normal_text
+        if protected_content and result.normal_text:
+            result.normal_text = result.normal_text + protected_content
+        elif protected_content:
+            result.normal_text = protected_content
+
+        return result
+
+
 class GptOssDetector(BaseReasoningFormatDetector):
     """
     Detector for T4-style reasoning format (GPT-OSS), using the HarmonyParser.
@@ -270,7 +360,7 @@ class ReasoningParser:
         "qwen3": Qwen3Detector,
         "qwen3-thinking": Qwen3Detector,
         "step3": DeepSeekR1Detector,
-        "step-audio2": DeepSeekR1Detector,  # Uses same </think> format as DeepSeek-R1
+        "step-audio2": StepAudio2Detector,  # Custom detector that doesn't consume tool/audio content
     }
 
     def __init__(

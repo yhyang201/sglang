@@ -71,7 +71,8 @@ class OpenAIServingChat(OpenAIServingBase):
         self,
         text: str,
         ret_item: Dict[str, Any],
-        audio_parser_name: str
+        audio_parser_name: str,
+        request: Optional[ChatCompletionRequest] = None,
     ) -> Optional[Dict[str, str]]:
         """
         Parse TTS content from model output using audio parser.
@@ -80,6 +81,7 @@ class OpenAIServingChat(OpenAIServingBase):
             text: The decoded output text
             ret_item: The full generation result item
             audio_parser_name: Name of the audio parser to use (e.g., "step_audio_2")
+            request: The chat completion request (used to extract prompt token IDs)
 
         Returns:
             Dictionary with tts_text, tts_audio, and remaining text, or None
@@ -105,15 +107,40 @@ class OpenAIServingChat(OpenAIServingBase):
                 meta_info = ret_item.get("meta_info", {})
                 prompt_ids = meta_info.get("prompt_token_ids", [])
 
-            is_tts_output = parser.is_tts_output(prompt_ids) if prompt_ids else False
+            # Check if TTS output is expected
+            # Priority 1: Check if request has tts_output parameter set
+            if request and request.tts_output:
+                is_tts_output = True
+            else:
+                # Priority 2: Check if prompt ends with <tts_start> token by examining prompt_ids
+                if not prompt_ids and request:
+                    try:
+                        # Convert messages to format suitable for chat template
+                        messages = [{"role": m.role, "content": m.content} for m in request.messages]
+                        # Apply chat template to get prompt_ids
+                        prompt_ids = self.tokenizer_manager.tokenizer.apply_chat_template(
+                            messages,
+                            tokenize=True,
+                            add_generation_prompt=False,
+                            tools=request.tools if request.tools else None,
+                        )
+                    except Exception as e:
+                        logger.debug(f"Failed to tokenize messages for TTS detection: {e}")
+
+                is_tts_output = parser.is_tts_output(prompt_ids) if prompt_ids else False
+
+            logger.info(f"[TTS] is_tts_output: {is_tts_output}, from_request: {request.tts_output if request else False}")
 
             if not is_tts_output:
                 return None
 
             # Parse TTS content
-            text_tokens, audio_tokens, other_tokens = parser.extract_tts_content_nonstreaming(
+            # When <tts_start> is in the prompt, the output doesn't contain markers
+            # We need to extract audio tokens directly from the output
+            text_tokens, audio_tokens, other_tokens = parser.extract_tts_content(
                 output_tokens,
-                is_tts_ta4_output=is_tts_output
+                has_tts_start=False,  # <tts_start> is in prompt, not in output
+                has_tts_end=False     # Output usually doesn't have <tts_end> when prompted with <tts_start>
             )
 
             # Convert tokens back to text
@@ -525,6 +552,16 @@ class OpenAIServingChat(OpenAIServingBase):
                 encoded = encoded[1:]
             prompt_ids += encoded
 
+        # Handle TTS output: automatically append <tts_start> token if tts_output=True
+        if request.tts_output:
+            tts_start_token = "<tts_start>"
+            tts_start_id = self.tokenizer_manager.tokenizer.vocab.get(tts_start_token)
+            if tts_start_id is not None:
+                prompt_ids.append(tts_start_id)
+                logger.info(f"TTS output enabled: appended <tts_start> token (id={tts_start_id}) to prompt")
+            else:
+                logger.warning(f"TTS output requested but <tts_start> token not found in vocabulary")
+
         if is_multimodal:
             prompt = self.tokenizer_manager.tokenizer.decode(prompt_ids)
 
@@ -754,7 +791,17 @@ class OpenAIServingChat(OpenAIServingBase):
                 delta = content["text"][len(stream_buffer) :]
                 stream_buffers[index] = stream_buffer + delta
 
-                # Handle reasoning content
+                # PARSER EXECUTION ORDER (IMPORTANT):
+                # For streaming, we need to process parsers in the right order
+                # to prevent reasoning parser from consuming tool call content.
+                # Audio streaming is not implemented (TTS requires complete output).
+                #
+                # The StepAudio2Detector now skips tool call content internally,
+                # but we still want reasoning to process first to avoid it seeing
+                # partial tool call markers in the stream.
+
+                # Handle reasoning content - Process but skip protected content
+                # The new StepAudio2Detector will preserve tool call content
                 if (
                     self.tokenizer_manager.server_args.reasoning_parser
                     and request.separate_reasoning
@@ -948,7 +995,38 @@ class OpenAIServingChat(OpenAIServingBase):
             finish_reason = ret_item["meta_info"]["finish_reason"]
             text = ret_item["text"]
 
-            # Handle reasoning content
+            # PARSER EXECUTION ORDER (IMPORTANT):
+            # 1. Audio parser runs FIRST to extract TTS content
+            # 2. Tool parser runs SECOND to extract tool calls
+            # 3. Reasoning parser runs LAST to extract reasoning
+            # This prevents reasoning parser from consuming audio/tool content
+
+            # Handle TTS content parsing (Step-Audio2) - RUN FIRST
+            tts_content = None
+            audio_parser_name = getattr(
+                self.tokenizer_manager.server_args, "audio_parser", None
+            )
+            if audio_parser_name and text:
+                tts_content = self._parse_tts_content(
+                    text, ret_item, audio_parser_name, request
+                )
+                # If TTS content is parsed (has audio tokens), update the text to exclude them
+                if tts_content and tts_content.get("tts_audio"):
+                    # The normal text should be what's after TTS content (without audio tokens)
+                    text = tts_content.get("text", "")
+
+            # Handle tool calls - RUN SECOND
+            tool_calls = None
+            if (
+                request.tool_choice != "none"
+                and request.tools
+                and self.tool_call_parser
+            ):
+                tool_calls, text, finish_reason = self._process_tool_calls(
+                    text, request.tools, finish_reason
+                )
+
+            # Handle reasoning content - RUN LAST
             reasoning_text = None
             reasoning_parser = self.tokenizer_manager.server_args.reasoning_parser
             if reasoning_parser and request.separate_reasoning:
@@ -970,31 +1048,6 @@ class OpenAIServingChat(OpenAIServingBase):
                         err_type="InternalServerError",
                         status_code=500,
                     )
-
-            # Handle tool calls
-            tool_calls = None
-            if (
-                request.tool_choice != "none"
-                and request.tools
-                and self.tool_call_parser
-            ):
-                tool_calls, text, finish_reason = self._process_tool_calls(
-                    text, request.tools, finish_reason
-                )
-
-            # Handle TTS content parsing (Step-Audio2)
-            tts_content = None
-            audio_parser_name = getattr(
-                self.tokenizer_manager.server_args, "audio_parser", None
-            )
-            if audio_parser_name and text:
-                tts_content = self._parse_tts_content(
-                    text, ret_item, audio_parser_name
-                )
-                # If TTS content is parsed, update the text to exclude audio tokens
-                if tts_content and tts_content.get("tts_text"):
-                    # The normal text should be what's after TTS content
-                    text = tts_content.get("text", text)
 
             # Handle audio output generation
             audio_output = None
