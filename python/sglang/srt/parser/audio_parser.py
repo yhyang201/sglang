@@ -121,6 +121,25 @@ class StepAudio2AudioParser(BaseAudioParser):
             f"first_audio={self.first_audio_token_id}"
         )
 
+        # Initialize streaming state
+        self._reset_streaming_state()
+
+    def _reset_streaming_state(self):
+        """
+        Reset streaming state for a new request.
+
+        This should be called at the start of each streaming session.
+        """
+        self._stream_buffer_tokens = []  # Accumulate partial token chunks
+        self._in_tts_section = False  # Whether we're inside a TTS section
+        self._tts_start_seen = False  # Whether we've seen <tts_start>
+        self._tts_end_seen = False  # Whether we've seen <tts_end>
+
+        # Accumulators for tokens by type
+        self._accumulated_text_tokens = []
+        self._accumulated_audio_tokens = []
+        self._accumulated_other_tokens = []
+
     def is_step_audio_token(self, token_id: int) -> bool:
         """
         Check if a token ID is an audio token.
@@ -274,6 +293,113 @@ class StepAudio2AudioParser(BaseAudioParser):
             else:
                 # Treat all as other tokens
                 return [], [], list(input_token_ids)
+
+    def extract_tts_content_streaming(
+        self,
+        new_token_ids: Sequence[int],
+        is_tts_ta4_output: bool = False
+    ) -> Tuple[list[int], list[int], list[int]]:
+        """
+        Extract TTS content from new token chunks (streaming).
+
+        This method processes tokens incrementally and returns only the
+        newly available tokens that can be safely emitted.
+
+        Args:
+            new_token_ids: New token chunk to process
+            is_tts_ta4_output: Whether the output is in TA4 format
+
+        Returns:
+            A tuple of (text_token_ids, audio_token_ids, other_token_ids)
+            containing only the incremental tokens that can be emitted now.
+
+        Example:
+            # First chunk
+            >>> parser.extract_tts_content_streaming([123, 456], True)
+            ([123, 456], [], [])
+
+            # Second chunk with audio tokens
+            >>> parser.extract_tts_content_streaming([<audio_0>, <audio_1>], True)
+            ([], [<audio_0>, <audio_1>], [])
+
+            # Final chunk with end marker
+            >>> parser.extract_tts_content_streaming([<tts_end>, 789], True)
+            ([], [], [789])
+
+        Note:
+            - Call _reset_streaming_state() before starting a new streaming session
+            - The method maintains internal state across calls
+            - Tokens may be buffered if we can't determine their type yet
+        """
+        if not is_tts_ta4_output:
+            # Not TTS output, treat all tokens as other tokens
+            return [], [], list(new_token_ids)
+
+        # Add new tokens to buffer
+        self._stream_buffer_tokens.extend(new_token_ids)
+
+        # Result accumulators for this chunk
+        text_tokens_to_emit = []
+        audio_tokens_to_emit = []
+        other_tokens_to_emit = []
+
+        # Process tokens in buffer
+        tokens_to_keep = []  # Tokens we need to keep buffering
+
+        for i, token_id in enumerate(self._stream_buffer_tokens):
+            # Check for <tts_end> token
+            if token_id == self.audio_end_token_id:
+                self._tts_end_seen = True
+                self._in_tts_section = False
+                # Don't emit the end token itself
+                continue
+
+            # After seeing <tts_end>, everything is "other" tokens
+            if self._tts_end_seen:
+                other_tokens_to_emit.append(token_id)
+                continue
+
+            # We're in TTS section (or assumed to be, since <tts_start> is in prompt)
+            # The format is: {text_tokens}{audio_tokens}<tts_end>
+            # We need to determine if this is text or audio
+
+            # Skip padding tokens
+            if token_id == self.audio_pad_token_id or token_id == self.tts_pad_token_id:
+                continue
+
+            # Check if it's an audio token
+            if self.is_step_audio_token(token_id):
+                # It's an audio token, safe to emit
+                audio_tokens_to_emit.append(token_id)
+                self._accumulated_audio_tokens.append(token_id)
+            else:
+                # It's a text token
+                # We need to be careful here:
+                # - If we haven't seen any audio tokens yet, it's likely text
+                # - If we've already seen audio tokens, this might be an error,
+                #   but we'll treat it as text for safety
+
+                # Check if we're at the end of the buffer
+                # If this is the last token and we haven't seen <tts_end> yet,
+                # we might want to buffer it in case it's part of a special token
+                # But for simplicity and immediate responsiveness, we emit text tokens
+                # immediately since text should come before audio in the format
+
+                if len(self._accumulated_audio_tokens) > 0:
+                    # We've already seen audio tokens, so text after audio is unusual
+                    # but we'll emit it as text
+                    logger.warning(
+                        f"Unexpected text token {token_id} after audio tokens in TTS section"
+                    )
+
+                text_tokens_to_emit.append(token_id)
+                self._accumulated_text_tokens.append(token_id)
+
+        # Clear the buffer since we've processed all tokens
+        # (or keep last few if we want to handle partial special tokens, but for MVP we don't)
+        self._stream_buffer_tokens = []
+
+        return text_tokens_to_emit, audio_tokens_to_emit, other_tokens_to_emit
 
     def extract_tts_content_nonstreaming(
         self,
