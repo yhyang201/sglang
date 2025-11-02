@@ -279,7 +279,9 @@ parser = ReasoningParser(
 reasoning_text, normal_text = parser.parse_non_stream(full_text)
 ```
 
-## Complete Example: Speech-to-Speech with Tool Calling
+## Complete Example: Mixed Content (TTS + Tool Calling)
+
+Step-Audio2 supports **simultaneous** TTS output and tool calling in a single response. The boundary detection logic automatically separates TTS content from tool call markers.
 
 ```python
 import requests
@@ -292,21 +294,22 @@ tools = [{
     "type": "function",
     "function": {
         "name": "search",
-        "description": "Search for information",
+        "description": "搜索工具",
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search query"}
+                "query": {"type": "string", "description": "搜索关键词"}
             },
-            "required": ["query"]
+            "required": ["query"],
+            "additionalProperties": False
         }
     }
 }]
 
-# First request: User asks a question with TTS output
+# Request with both TTS output and tool calling enabled
 messages = [
-    {"role": "system", "content": "You are a helpful assistant."},
-    {"role": "user", "content": "Search for information about the Eiffel Tower"}
+    {"role": "system", "content": "你的名字叫做小跃，是由阶跃星辰公司训练出来的语音大模型。"},
+    {"role": "user", "content": "帮我查一下今天沪深300的开盘价是多少"}
 ]
 
 response = requests.post(
@@ -324,8 +327,21 @@ response = requests.post(
 result = response.json()
 message = result["choices"][0]["message"]
 
+# Both fields are populated in the same response!
 print("TTS Content:", message.get("tts_content"))
 print("Tool Calls:", message.get("tool_calls"))
+
+# Example output:
+# TTS Content: {
+#   "tts_text": "好的,我查查沪深300的开盘价",  # Clean text without tool call markers
+#   "tts_audio": "<audio_1499><audio_2187>..."
+# }
+# Tool Calls: [{
+#   "function": {
+#     "name": "search",
+#     "arguments": '{"query": "2025年8月28日 沪深300 开盘价"}'
+#   }
+# }]
 
 # Extract audio tokens if present
 if message.get("tts_content") and message["tts_content"]["tts_audio"]:
@@ -337,6 +353,29 @@ if message.get("tts_content") and message["tts_content"]["tts_audio"]:
     # token2wav = Token2wav('path/to/model')
     # audio_bytes = token2wav(audio_tokens, prompt_wav='default_voice.wav')
 ```
+
+### How Mixed Content Works
+
+The audio parser uses **boundary detection** to separate different content types:
+
+1. **TTS Content Detection**: Extracts text and audio tokens between TTS markers
+2. **Protected Region Detection**: Identifies `<tool_call>...</tool_call>` and `<think>...</think>` markers
+3. **Automatic Separation**:
+   - TTS text excludes tool call markers → goes to `tts_content.tts_text`
+   - Tool call markers → extracted and parsed → goes to `tool_calls` array
+   - Remaining text → goes to `content` field
+
+**Model Output Example**:
+```
+好的,我查查沪深300的开盘价<audio_1499><audio_2187>...<tool_call>function
+search
+{"query": "2025年8月28日 沪深300 开盘价"}</tool_call>
+```
+
+**Parsed Result**:
+- `tts_text`: "好的,我查查沪深300的开盘价" (without `<tool_call>` markers)
+- `tts_audio`: "<audio_1499><audio_2187>..."
+- `tool_calls`: `[{"name": "search", "arguments": "..."}]`
 
 ## Troubleshooting
 
@@ -368,27 +407,76 @@ If tool calls are not parsed:
 2. Verify tools are provided in the request
 3. Check the model output format matches `<tool_call>function\n...`
 
+## Boundary Detection Implementation
+
+### How It Works
+
+The audio parser (`audio_parser.py:276-364`) implements boundary detection to handle mixed content:
+
+1. **Decode Output Tokens**: Converts token IDs to text using the tokenizer
+2. **Pattern Matching**: Uses regex to find protected regions:
+   - `<tool_call>.*?</tool_call>` - Tool call markers
+   - `<think>.*?</think>` - Reasoning markers
+3. **Content Segmentation**:
+   - Identifies all protected regions and their positions
+   - Splits text into TTS segments (between protected regions)
+   - Keeps protected segments separate
+4. **Re-tokenization**:
+   - TTS-only text is re-encoded → split into text tokens and audio tokens
+   - Protected content is re-encoded → returned as `other_tokens`
+5. **Downstream Processing**:
+   - `other_tokens` are passed to tool parser and reasoning parser
+   - Each parser extracts its relevant content
+
+### Code Reference
+
+See `/sgl-workspace/sglang/python/sglang/srt/parser/audio_parser.py:276-364` for the implementation:
+
+```python
+# Detect protected content markers (<tool_call>, <think>)
+tool_call_pattern = r'<tool_call>.*?</tool_call>'
+think_pattern = r'<think>.*?</think>'
+
+has_protected = (
+    re.search(tool_call_pattern, full_text, re.DOTALL) or
+    re.search(think_pattern, full_text, re.DOTALL)
+)
+
+if has_protected:
+    # Extract and separate TTS segments from protected segments
+    # Re-tokenize separately
+    # Return protected content in other_tokens
+```
+
 ## Limitations
 
 1. **No Streaming for Audio Parser**: TTS content parsing only works in non-streaming mode
    - Streaming requests will not parse TTS content
    - Use non-streaming mode for TTS output
 2. **Re-tokenization Overhead**: Output text is re-tokenized for audio parsing
-   - Workaround until output token IDs are directly accessible
-   - Minor performance impact
+   - Required for boundary detection to work correctly
+   - Minor performance impact (decode → regex → re-encode)
 3. **Parser Execution Order**: Parsers run in fixed order (Audio → Tool → Reasoning)
    - Designed to prevent content interference
    - Cannot customize order per request
+4. **Mixed Content Complexity**: Boundary detection adds processing overhead
+   - Only activates when protected markers are detected
+   - Negligible impact for pure TTS or pure tool call responses
 
 ## Recent Improvements
 
-1. **✓ Fixed Parser Conflict Issue**: Reasoning parser no longer consumes audio/tool content
+1. **✓ Mixed Content Support (TTS + Tool Calls + Reasoning)**: Boundary detection implementation
+   - Audio parser detects and extracts protected regions (`<tool_call>`, `<think>`)
+   - TTS content is automatically cleaned of tool call and reasoning markers
+   - All three content types can coexist in a single response
+   - See audio_parser.py:276-364 for implementation details
+2. **✓ Fixed Parser Conflict Issue**: Reasoning parser no longer consumes audio/tool content
    - Created dedicated `StepAudio2Detector` with `force_reasoning=False`
    - Implements content protection for tool calls and TTS markers
-2. **✓ Added `tts_output` Parameter**: Simplified TTS usage
+3. **✓ Added `tts_output` Parameter**: Simplified TTS usage
    - No need to manually add `<tts_start>` to messages
    - Server automatically handles token insertion
-3. **✓ Improved Parser Execution Order**: Fixed parser interaction issues
+4. **✓ Improved Parser Execution Order**: Fixed parser interaction issues
    - Audio parser runs first to extract TTS content
    - Tool parser runs second
    - Reasoning parser runs last
@@ -397,9 +485,9 @@ If tool calls are not parsed:
 
 1. Implement full streaming support for audio parser
 2. Optimize by accessing output token IDs directly without re-tokenization
-3. Add comprehensive integration tests
+3. Add comprehensive integration tests for all parser combinations
 4. Add audio generation endpoint (Token2wav integration)
-5. Support mixed-mode outputs (e.g., reasoning + TTS in same response)
+5. Optimize boundary detection performance (consider caching patterns)
 
 ## API Reference
 

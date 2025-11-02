@@ -276,20 +276,89 @@ class StepAudio2AudioParser(BaseAudioParser):
         else:
             # No markers present
             if is_text_audio_section:
-                # Assume all content is TTS content
-                for token_id in input_token_ids:
-                    if not include_pad_token and (
-                        token_id == self.audio_pad_token_id or
-                        token_id == self.tts_pad_token_id
-                    ):
-                        continue
+                # Check for protected content markers (<tool_call>, <think>) that should not be in TTS
+                # Decode to text first to detect boundaries
+                import re
+                full_text = self.tokenizer.decode(input_token_ids, skip_special_tokens=False)
 
-                    if self.is_step_audio_token(token_id):
-                        tts_audio_token_ids.append(token_id)
-                    else:
-                        tts_text_token_ids.append(token_id)
+                # Detect protected regions (tool calls and reasoning)
+                tool_call_pattern = r'<tool_call>.*?</tool_call>'
+                think_pattern = r'<think>.*?</think>'
 
-                return tts_text_token_ids, tts_audio_token_ids, other_token_ids
+                has_protected = (
+                    re.search(tool_call_pattern, full_text, re.DOTALL) or
+                    re.search(think_pattern, full_text, re.DOTALL)
+                )
+
+                if has_protected:
+                    # Extract protected regions and process TTS content separately
+                    protected_regions = []
+
+                    # Find all tool call regions
+                    for match in re.finditer(tool_call_pattern, full_text, re.DOTALL):
+                        protected_regions.append((match.start(), match.end()))
+
+                    # Find all reasoning regions
+                    for match in re.finditer(think_pattern, full_text, re.DOTALL):
+                        protected_regions.append((match.start(), match.end()))
+
+                    # Sort by start position
+                    protected_regions.sort()
+
+                    # Build TTS text (exclude protected regions)
+                    tts_segments = []
+                    protected_segments = []
+                    last_end = 0
+
+                    for start, end in protected_regions:
+                        if start > last_end:
+                            # This segment is TTS content
+                            tts_segments.append(full_text[last_end:start])
+                        # Save protected content
+                        protected_segments.append(full_text[start:end])
+                        last_end = end
+
+                    # Add remaining text after last protected region
+                    if last_end < len(full_text):
+                        tts_segments.append(full_text[last_end:])
+
+                    # Re-tokenize TTS segments only
+                    tts_text_only = ''.join(tts_segments)
+                    tts_tokens = self.tokenizer.encode(tts_text_only, add_special_tokens=False) if tts_text_only.strip() else []
+
+                    # Separate text and audio tokens in TTS content
+                    for token_id in tts_tokens:
+                        if not include_pad_token and (
+                            token_id == self.audio_pad_token_id or
+                            token_id == self.tts_pad_token_id
+                        ):
+                            continue
+
+                        if self.is_step_audio_token(token_id):
+                            tts_audio_token_ids.append(token_id)
+                        else:
+                            tts_text_token_ids.append(token_id)
+
+                    # Re-tokenize protected content for other_tokens
+                    protected_text = ''.join(protected_segments)
+                    other_token_ids = self.tokenizer.encode(protected_text, add_special_tokens=False) if protected_text.strip() else []
+
+                    return tts_text_token_ids, tts_audio_token_ids, other_token_ids
+                else:
+                    # No protected content, treat all as TTS content (original logic)
+                    for token_id in input_token_ids:
+                        if not include_pad_token and (
+                            token_id == self.audio_pad_token_id or
+                            token_id == self.tts_pad_token_id
+                        ):
+                            continue
+
+                        if self.is_step_audio_token(token_id):
+                            tts_audio_token_ids.append(token_id)
+                        else:
+                            tts_text_token_ids.append(token_id)
+
+                    return tts_text_token_ids, tts_audio_token_ids, other_token_ids
             else:
                 # Treat all as other tokens
                 return [], [], list(input_token_ids)
