@@ -6,11 +6,16 @@ import subprocess
 import sys
 import time
 import unittest
+import tempfile
+import uuid
 
 from PIL import Image
 
 from sglang.multimodal_gen.configs.sample.base import DataType
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from contextlib import contextmanager
+from pathlib import Path
+from urllib.request import urlopen
 
 logger = init_logger(__name__)
 
@@ -74,6 +79,29 @@ def check_image_size(ut, image, width, height):
     # check image size
     ut.assertEqual(image.size, (width, height))
 
+def wait_for_video_completion(client, video_id, timeout=300, check_interval=3):
+    start = time.time()
+    video = client.videos.retrieve(video_id)
+
+    while video.status not in ("completed", "failed"):
+        time.sleep(check_interval)
+        video = client.videos.retrieve(video_id)
+        assert time.time() - start < timeout, "video generate timeout"
+
+    return video
+
+@contextmanager
+def downloaded_temp_file(url: str, prefix: str = "i2v_input_", suffix: str = ".jpg"):
+    tmp_path = Path(tempfile.gettempdir()) / f"{prefix}{uuid.uuid4().hex}{suffix}"
+    with urlopen(url) as resp:
+        tmp_path.write_bytes(resp.read())
+    try:
+        yield tmp_path
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 class TestCLIBase(unittest.TestCase):
     model_path: str = None

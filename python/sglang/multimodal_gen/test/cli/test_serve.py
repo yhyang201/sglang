@@ -3,44 +3,14 @@
 import asyncio
 import base64
 import subprocess
-import tempfile
-import time
 import unittest
-import uuid
-from contextlib import contextmanager
-from pathlib import Path
-from urllib.request import urlopen
 
 from openai import OpenAI
 
 from sglang.multimodal_gen.runtime.utils.common import kill_process_tree
-from sglang.multimodal_gen.test.test_utils import is_mp4, is_png, wait_for_port
+from sglang.multimodal_gen.test.test_utils import is_mp4, is_png, wait_for_port, wait_for_video_completion
+from sglang.multimodal_gen.test.test_utils import downloaded_temp_file
 
-
-@contextmanager
-def downloaded_temp_file(url: str, prefix: str = "i2v_input_", suffix: str = ".jpg"):
-    tmp_path = Path(tempfile.gettempdir()) / f"{prefix}{uuid.uuid4().hex}{suffix}"
-    with urlopen(url) as resp:
-        tmp_path.write_bytes(resp.read())
-    try:
-        yield tmp_path
-    finally:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-
-def wait_for_video_completion(client, video_id, timeout=300, check_interval=3):
-    start = time.time()
-    video = client.videos.retrieve(video_id)
-
-    while video.status not in ("completed", "failed"):
-        time.sleep(check_interval)
-        video = client.videos.retrieve(video_id)
-        assert time.time() - start < timeout, "video generate timeout"
-
-    return video
 
 
 class TestVideoHttpServer(unittest.TestCase):
@@ -297,5 +267,4 @@ class TestImageHttpServer(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    # del TestPerform·anceBase
     unittest.main()

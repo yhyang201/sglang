@@ -297,7 +297,7 @@ def maybe_download_model_index(model_name_or_path: str) -> dict[str, Any]:
             model_index_path = hf_hub_download(
                 repo_id=model_name_or_path,
                 filename="model_index.json",
-                local_dir=tmp_dir,
+                # local_dir=tmp_dir,
             )
 
             # Load the model_index.json
