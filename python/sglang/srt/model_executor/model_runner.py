@@ -2106,6 +2106,8 @@ class ModelRunner:
         skip_attn_backend_init: bool = False,
         pp_proxy_tensors=None,
     ) -> Union[LogitsProcessorOutput, PPProxyTensors]:
+        input_embeds = self.model.get_input_embeddings()(forward_batch.input_ids)
+        forward_batch.input_embeds = input_embeds
         kwargs = {}
         if self.support_pp:
             kwargs["pp_proxy_tensors"] = pp_proxy_tensors

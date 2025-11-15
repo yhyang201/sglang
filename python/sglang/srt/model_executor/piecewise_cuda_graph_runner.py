@@ -139,6 +139,8 @@ class PiecewiseCudaGraphRunner:
 
         set_torch_compile_config()
 
+        self.use_embeds = True
+
         assert (
             self.model_runner.server_args.piecewise_cuda_graph_tokens is not None
         ), "piecewise_cuda_graph_tokens is not set"
@@ -169,6 +171,7 @@ class PiecewiseCudaGraphRunner:
         # Graph inputs
         with torch.device(self.device):
             self.input_ids = torch.zeros((self.max_num_tokens,), dtype=torch.int64)
+            self.input_embeds = torch.zeros((self.max_num_tokens, self.model_runner.model_config.hidden_size), dtype=self.model_runner.model_config.dtype)
             self.out_cache_loc = torch.zeros(
                 (self.max_num_tokens,), dtype=self._cache_loc_dtype()
             )
@@ -216,7 +219,8 @@ class PiecewiseCudaGraphRunner:
             forward_batch = ForwardBatch(
                 forward_mode=ForwardMode.EXTEND,
                 batch_size=1,
-                input_ids=torch.randint(0, 100, (num_tokens,), device=self.device),
+                input_ids=torch.randint(0, 100, (num_tokens,), device=self.device) if not self.use_embeds else None,
+                input_embeds=torch.zeros((num_tokens, self.model_runner.model_config.hidden_size), dtype=self.model_runner.model_config.dtype) if self.use_embeds else None,
                 req_pool_indices=torch.arange(1, device=self.device),
                 seq_lens=torch.tensor([num_tokens], device=self.device),
                 next_token_logits_buffer=None,
@@ -271,7 +275,7 @@ class PiecewiseCudaGraphRunner:
         return torch.int64
 
     def can_run(self, forward_batch: ForwardBatch):
-        num_tokens = len(forward_batch.input_ids)
+        num_tokens = len(forward_batch.input_ids) if not self.use_embeds else len(forward_batch.input_embeds)
         # TODO(yuwei): support return input_ids' logprob
         if forward_batch.return_logprob:
             for start_len, seq_len in zip(
@@ -326,7 +330,8 @@ class PiecewiseCudaGraphRunner:
         bs = 1
 
         # Graph inputs
-        input_ids = self.input_ids[:num_tokens]
+        input_ids = self.input_ids[:num_tokens] if not self.use_embeds else None
+        input_embeds = self.input_embeds[:num_tokens] if self.use_embeds else None
         out_cache_loc = self.out_cache_loc[:num_tokens]
         out_cache_loc_swa = self.out_cache_loc_swa[:num_tokens]
         positions = self.positions[:num_tokens]
@@ -350,7 +355,8 @@ class PiecewiseCudaGraphRunner:
             forward_batch = ForwardBatch(
                 forward_mode=ForwardMode.EXTEND,
                 batch_size=bs,
-                input_ids=input_ids,
+                input_ids=input_ids if not self.use_embeds else None,
+                input_embeds=input_embeds if self.use_embeds else None,
                 req_pool_indices=torch.arange(bs, device=self.device),
                 seq_lens=torch.tensor([num_tokens], device=self.device),
                 next_token_logits_buffer=None,
@@ -428,7 +434,7 @@ class PiecewiseCudaGraphRunner:
         forward_batch: ForwardBatch,
         **kwargs,
     ):
-        num_tokens = len(forward_batch.input_ids)
+        num_tokens = len(forward_batch.input_ids) if not self.use_embeds else len(forward_batch.input_embeds)
         index = bisect.bisect_left(self.capture_num_tokens, num_tokens)
         static_num_tokens = self.capture_num_tokens[index]
         self.raw_num_tokens = num_tokens
@@ -438,11 +444,13 @@ class PiecewiseCudaGraphRunner:
         bs = forward_batch.batch_size
 
         self.input_ids[:num_tokens].copy_(forward_batch.input_ids)
+        self.input_embeds[:num_tokens].copy_(forward_batch.input_embeds)
         self.positions[:num_tokens].copy_(forward_batch.positions)
         self.out_cache_loc[:num_tokens].copy_(forward_batch.out_cache_loc)
         if forward_batch.out_cache_loc_swa is not None:
             self.out_cache_loc_swa[:num_tokens].copy_(forward_batch.out_cache_loc_swa)
         input_ids = self.input_ids[:static_num_tokens]
+        input_embeds = self.input_embeds[:static_num_tokens]
         positions = self.positions[:static_num_tokens]
         out_cache_loc = self.out_cache_loc[:static_num_tokens]
 
@@ -458,7 +466,8 @@ class PiecewiseCudaGraphRunner:
         static_forward_batch = ForwardBatch(
             forward_mode=forward_batch.forward_mode,
             batch_size=bs,
-            input_ids=input_ids,
+            input_ids=input_ids if not self.use_embeds else None,
+            input_embeds=input_embeds if self.use_embeds else None,
             req_pool_indices=forward_batch.req_pool_indices,
             seq_lens=forward_batch.seq_lens,
             next_token_logits_buffer=next_token_logits_buffer,
