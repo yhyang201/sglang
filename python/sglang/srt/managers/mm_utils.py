@@ -847,6 +847,7 @@ def should_use_external_mm_preprocess(multimodal_model: nn.Module) -> bool:
         "Qwen2_5_VLForConditionalGeneration",
         "Qwen3VLForConditionalGeneration",
         "Qwen3VLMoeForConditionalGeneration",
+        "Qwen3OmniMoeForConditionalGeneration",
     }
 
     return cls_name in qwen_vl_classes
