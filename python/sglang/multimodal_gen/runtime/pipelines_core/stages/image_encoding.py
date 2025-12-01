@@ -227,7 +227,7 @@ class ImageVAEEncodingStage(PipelineStage):
             return batch
 
         assert batch.condition_image is not None and isinstance(
-            batch.condition_image, PIL.Image.Image
+            batch.condition_image[0], PIL.Image.Image
         )
         assert batch.height is not None and isinstance(batch.height, int)
         assert batch.width is not None and isinstance(batch.width, int)
@@ -237,7 +237,7 @@ class ImageVAEEncodingStage(PipelineStage):
 
         self.vae = self.vae.to(get_local_torch_device())
 
-        image = batch.condition_image
+        image_list = batch.condition_image
 
         # Setup VAE precision
         vae_dtype = PRECISION_TO_TYPE[server_args.pipeline_config.vae_precision]
@@ -248,32 +248,20 @@ class ImageVAEEncodingStage(PipelineStage):
         if server_args.pipeline_config.vae_tiling:
             self.vae.enable_tiling()
 
-        if isinstance(server_args.pipeline_config, QwenImageEditPlusPipelineConfig):
-            images = image if isinstance(image, list) else [image]
-            all_latent_conditions = []
+        all_latent_conditions = []
 
-            for img in images:
-                latent = self._process_single_image(
-                    img,
-                    num_frames,
-                    vae_dtype,
-                    vae_autocast_enabled,
-                    batch.generator,
-                    server_args.pipeline_config,
-                )
-                all_latent_conditions.append(latent)
-
-            latent_condition = all_latent_conditions
-
-        else:
-            latent_condition = self._process_single_image(
-                image,
+        for img in image_list:
+            latent = self._process_single_image(
+                img,
                 num_frames,
                 vae_dtype,
                 vae_autocast_enabled,
                 batch.generator,
                 server_args.pipeline_config,
             )
+            all_latent_conditions.append(latent)
+
+        latent_condition = all_latent_conditions
 
         batch_size = batch.batch_size
 

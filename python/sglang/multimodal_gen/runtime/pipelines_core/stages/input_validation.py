@@ -202,15 +202,21 @@ class InputValidationStage(PipelineStage):
         # for i2v, get image from image_path
         # @TODO(Wei) hard-coded for wan2.2 5b ti2v for now. Should put this in image_encoding stage
         if batch.image_path is not None:
-            if batch.image_path.endswith(".mp4"):
-                image = load_video(batch.image_path)[0]
-            else:
-                image = load_image(batch.image_path)
+            image_list = []
+            for image_path in batch.image_path:
+                if image_path.endswith(".mp4"):
+                    image = load_video(image_path)[0]
+                else:
+                    image = load_image([image_path])[0]
 
-            if not isinstance(image, list):
-                image = [image]
+                image_list.append(image)
+
+            image = image_list
+
+            assert isinstance(image, list)
 
             batch.condition_image = image
+            # TODO: should we
             condition_image_width, condition_image_height = (
                 image[0].width,
                 image[0].height,
@@ -221,6 +227,8 @@ class InputValidationStage(PipelineStage):
         # NOTE: condition image resizing is only allowed to do in InputValidationStage
         if server_args.pipeline_config.task_type == ModelTaskType.I2I:
             if batch.condition_image is not None:
+                assert batch.image_path is not None
+
                 # calculate new condition image size
                 calculated_size = (
                     server_args.pipeline_config.calculate_condition_image_size(
