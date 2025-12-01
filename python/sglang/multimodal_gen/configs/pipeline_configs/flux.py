@@ -453,32 +453,40 @@ class Flux2PipelineConfig(FluxPipelineConfig):
     def get_neg_prompt_embeds(self, batch):
         return batch.negative_prompt_embeds[0]
 
-    def calculate_condition_image_size(
-        self, image, width, height
-    ) -> Optional[tuple[int, int]]:
+    def calculate_condition_image_size(self, images) -> Optional[tuple[int, int]]:
+        width, height = [], []
         target_area: int = 1024 * 1024
-        if width is not None and height is not None:
-            if width * height > target_area:
-                scale = math.sqrt(target_area / (width * height))
-                width = int(width * scale)
-                height = int(height * scale)
-                return width, height
+        for image in images:
+            w, h = image.size
+            if w * h > target_area:
+                scale = math.sqrt(target_area / (w * h))
+                w = int(w * scale)
+                h = int(h * scale)
+                width.append(w)
+                height.append(h)
+        return width, height
 
         return None
 
     def preprocess_condition_image(
-        self, image, target_width, target_height, vae_image_processor: VaeImageProcessor
+        self, images, target_width, target_height, vae_image_processor: VaeImageProcessor
     ):
-        img = image.resize((target_width, target_height), PIL.Image.Resampling.LANCZOS)
-        image_width, image_height = img.size
-        vae_scale_factor = self.vae_config.arch_config.vae_scale_factor
-        multiple_of = vae_scale_factor * 2
-        image_width = (image_width // multiple_of) * multiple_of
-        image_height = (image_height // multiple_of) * multiple_of
-        img = vae_image_processor.preprocess(
-            img, height=image_height, width=image_width, resize_mode="crop"
-        )
-        return img, (image_width, image_height)
+        new_images = []
+        new_image_widths, new_image_heights = [], []
+        for image, width, height in zip(images, target_width, target_height):
+            img = image.resize((target_width, target_height), PIL.Image.Resampling.LANCZOS)
+            image_width, image_height = img.size
+            vae_scale_factor = self.vae_config.arch_config.vae_scale_factor
+            multiple_of = vae_scale_factor * 2
+            image_width = (image_width // multiple_of) * multiple_of
+            image_height = (image_height // multiple_of) * multiple_of
+            img = vae_image_processor.preprocess(
+                img, height=image_height, width=image_width, resize_mode="crop"
+            )
+            new_images.append(img)
+            new_image_widths.append(image_width)
+            new_image_heights.append(image_height)
+        return new_images, (new_image_widths, new_image_heights)
 
     def postprocess_image_latent(self, latent_condition, batch):
         batch_size = batch.batch_size

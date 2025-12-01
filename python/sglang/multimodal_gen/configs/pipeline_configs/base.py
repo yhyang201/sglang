@@ -173,16 +173,26 @@ class PipelineConfig:
     # Wan2.2 TI2V parameters
     boundary_ratio: float | None = None
 
+    # i2i, i2v
+    multi_image_input: bool = False
+
     # Compilation
     # enable_torch_compile: bool = False
 
     # calculate the adjust size for condition image
     # width: original condition image width
     # height: original condition image height
-    def calculate_condition_image_size(self, image, width, height) -> tuple[int, int]:
-        vae_scale_factor = self.vae_config.arch_config.spatial_compression_ratio
-        height, width = get_default_height_width(image, vae_scale_factor, height, width)
+    def calculate_condition_image_size(self, images) -> tuple[int, int]:
+        width, height = [], []
+        for image in images:
+            vae_scale_factor = self.vae_config.arch_config.spatial_compression_ratio
+            h, w = get_default_height_width(image, vae_scale_factor)
+            height.append(h)
+            width.append(w)
         return width, height
+
+    def support_multi_image_input(self) -> bool:
+        return self.multi_image_input
 
     ## For timestep preparation stage
 
@@ -191,14 +201,20 @@ class PipelineConfig:
 
     ## For ImageVAEEncodingStage
     def preprocess_condition_image(
-        self, image, target_width, target_height, _vae_image_processor
+        self, images, target_width, target_height, _vae_image_processor
     ):
         """
         preprocess the condition image, returns (image, final_image_width, final_image_height)
         """
-        return image.resize(
-            (target_width, target_height), PIL.Image.Resampling.LANCZOS
-        ), (target_width, target_height)
+        new_images = []
+        new_image_widths, new_image_heights = [], []
+        for image, width, height in zip(images, target_width, target_height):
+            new_images.append(
+                image.resize((width, height), PIL.Image.Resampling.LANCZOS)
+            )
+            new_image_widths.append(width)
+            new_image_heights.append(height)
+        return new_images
 
     def prepare_image_processor_kwargs(self, batch):
         return {}
@@ -268,6 +284,9 @@ class PipelineConfig:
         if shift_factor is None:
             shift_factor = getattr(vae, "shift_factor", None)
         return scaling_factor, shift_factor
+
+    def preprocess_image(self, image, image_processor):
+        return image
 
     # called after latents are prepared
     def maybe_pack_latents(self, latents, batch_size, batch):
