@@ -197,6 +197,9 @@ class InputValidationStage(PipelineStage):
         # for i2v, get image from image_path
         # @TODO(Wei) hard-coded for wan2.2 5b ti2v for now. Should put this in image_encoding stage
         if batch.image_path is not None:
+            if isinstance(batch.image_path, list):
+                image = batch.image_path[0]
+
             if batch.image_path.endswith(".mp4"):
                 image = load_video(batch.image_path)[0]
             else:

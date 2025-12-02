@@ -57,9 +57,13 @@ class ParallelExecutor(PipelineExecutor):
         rank = get_classifier_free_guidance_rank()
         cfg_rank = get_classifier_free_guidance_rank()
         cfg_group = get_cfg_group()
-
+        print(f"60 {stages=}")
         # TODO: decide when to gather on main when CFG_PARALLEL -> MAIN_RANK_ONLY
         for stage in stages:
+            print(f"61 {stage=}")
+            print(f"62 {stage.__class__}")
+            print(f"63 {stage.__class__.__name__}")
+            print(f"64 {stage.parallelism_type=}")
             with Timer(stage.__class__.__name__):
                 paradigm = stage.parallelism_type
 
@@ -87,6 +91,7 @@ class ParallelExecutor(PipelineExecutor):
                     torch.distributed.barrier()
 
                 elif paradigm == StageParallelismType.REPLICATED:
+                    print(f"{stage.__class__.__name__} replicated", flush=True)
                     batch = stage(batch, server_args)
 
         return batch

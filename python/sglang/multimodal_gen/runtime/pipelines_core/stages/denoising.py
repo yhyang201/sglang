@@ -457,6 +457,30 @@ class DenoisingStage(PipelineStage):
         else:
             neg_cond_kwargs = {}
 
+        def _print_var(name, var):
+            if var is None:
+                print(f"{name}=None")
+            elif isinstance(var, torch.Tensor):
+                print(f"{name}.shape={var.shape}")
+            elif isinstance(var, list):
+                _print_var(f"{name}[0]", var[0])
+            else:
+                print(f"{name}={var}")
+
+        _print_var("459 timesteps", timesteps)
+        _print_var("460 num_inference_steps", num_inference_steps)
+        _print_var("461 num_warmup_steps", num_warmup_steps)
+        _print_var("462 image_kwargs", image_kwargs)
+        _print_var("463 pos_cond_kwargs", pos_cond_kwargs)
+        _print_var("464 neg_cond_kwargs", neg_cond_kwargs)
+        _print_var("465 latents", latents)
+        _print_var("466 prompt_embeds", prompt_embeds)
+        _print_var("467 neg_prompt_embeds", neg_prompt_embeds)
+        _print_var("468 boundary_timestep", boundary_timestep)
+        _print_var("469 z_sp", z_sp)
+        _print_var("470 reserved_frames_mask_sp", reserved_frames_mask_sp)
+        _print_var("471 seq_len", seq_len)
+        _print_var("472 guidance", guidance)
         return {
             "extra_step_kwargs": extra_step_kwargs,
             "target_dtype": target_dtype,

@@ -21,6 +21,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.denoising_dmd import (
     DmdDenoisingStage,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.encoding import EncodingStage
+from sglang.multimodal_gen.runtime.pipelines_core.stages.general_before_denoising import (
+    GeneralBeforeDenoisingStage,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.image_encoding import (
     ImageEncodingStage,
     ImageVAEEncodingStage,

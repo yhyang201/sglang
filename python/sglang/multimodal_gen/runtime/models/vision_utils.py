@@ -108,6 +108,7 @@ def load_image(
         `PIL.Image.Image`:
             A PIL Image.
     """
+    print(f"111 load_image {image}", flush=True)
     if isinstance(image, str):
         if image.startswith("http://") or image.startswith("https://"):
             with suppress_other_loggers(not_suppress_on_main_rank=True):

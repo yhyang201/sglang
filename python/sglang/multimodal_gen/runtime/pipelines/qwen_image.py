@@ -10,6 +10,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages import (
     DecodingStage,
     DenoisingStage,
+    GeneralBeforeDenoisingStage,
     ImageEncodingStage,
     ImageVAEEncodingStage,
     InputValidationStage,
@@ -184,4 +185,48 @@ class QwenImageEditPipeline(LoRAPipeline, ComposedPipelineBase):
         )
 
 
-EntryClass = [QwenImagePipeline, QwenImageEditPipeline]
+class QwenImageEditPlusPipeline(LoRAPipeline, ComposedPipelineBase):
+    pipeline_name = "QwenImageEditPlusPipeline"
+
+    _required_config_modules = [
+        "processor",
+        "scheduler",
+        "text_encoder",
+        "tokenizer",
+        "transformer",
+        "vae",
+    ]
+
+    def create_pipeline_stages(self, server_args: ServerArgs):
+        print(f"QwenImageEditPlusPipeline create_pipeline_stages", flush=True)
+        print(
+            f"self.get_module('processor')={self.get_module('processor')}", flush=True
+        )
+        print(
+            f"self.get_module('text_encoder')={self.get_module('text_encoder')}",
+            flush=True,
+        )
+        self.add_stage(
+            stage_name="general_before_denoising_stage",
+            stage=GeneralBeforeDenoisingStage(
+                processor=self.get_module("processor"),
+                text_encoder=self.get_module("text_encoder"),
+            ),
+        )
+        print(
+            f"QwenImageEditPlusPipeline add_stage general_before_denoising_stage",
+            flush=True,
+        )
+        self.add_stage(
+            stage_name="denoising_stage",
+            stage=DenoisingStage(
+                transformer=self.get_module("transformer"),
+                scheduler=self.get_module("scheduler"),
+            ),
+        )
+        self.add_stage(
+            stage_name="decoding_stage", stage=DecodingStage(vae=self.get_module("vae"))
+        )
+
+
+EntryClass = [QwenImagePipeline, QwenImageEditPipeline, QwenImageEditPlusPipeline]

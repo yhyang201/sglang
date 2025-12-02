@@ -30,6 +30,7 @@ from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
 from sglang.multimodal_gen.configs.pipeline_configs.flux import Flux2PipelineConfig
 from sglang.multimodal_gen.configs.pipeline_configs.qwen_image import (
     QwenImageEditPipelineConfig,
+    QwenImageEditPlusPipelineConfig,
     QwenImagePipelineConfig,
 )
 from sglang.multimodal_gen.configs.pipeline_configs.wan import (
@@ -249,7 +250,8 @@ def get_model_info(model_path: str) -> Optional[ModelInfo]:
     if not pipeline_class_name:
         logger.error(f"'_class_name' not found in model_index.json for '{model_path}'")
         return None
-
+    print(f"pipeline_class_name: {pipeline_class_name}")
+    print(f"{_PIPELINE_REGISTRY=}")
     pipeline_cls = _PIPELINE_REGISTRY.get(pipeline_class_name)
     if not pipeline_cls:
         logger.error(
@@ -417,6 +419,11 @@ def _register_configs():
         sampling_param_cls=QwenImageSamplingParams,
         pipeline_config_cls=QwenImageEditPipelineConfig,
         hf_model_paths=["Qwen/Qwen-Image-Edit"],
+    )
+    register_configs(
+        sampling_param_cls=QwenImageSamplingParams,
+        pipeline_config_cls=QwenImageEditPlusPipelineConfig,
+        hf_model_paths=["Qwen/Qwen-Image-Edit-2509"],
     )
 
 
