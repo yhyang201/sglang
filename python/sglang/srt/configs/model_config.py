@@ -358,7 +358,7 @@ class ModelConfig:
                 mscale_all_dim = self.hf_config.rope_scaling.get(
                     "mscale_all_dim", False
                 )
-                scaling_factor = self.hf_config.rope_scaling.get("factor")
+                scaling_factor = self.hf_config.rope_scaling.get("factor", None)
                 if scaling_factor is not None:
                     mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
                     self.scaling = self.scaling * mscale * mscale
