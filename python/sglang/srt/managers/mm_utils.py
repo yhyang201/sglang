@@ -393,6 +393,34 @@ def get_embedding_chunk(
     return embedding_chunk, start_index, end_index
 
 
+def get_visible_items_in_chunk(
+    embedding_items: List[MultimodalDataItem],
+    items_offset: List[Tuple[int, int]],
+    extend_prefix_len: int,
+    extend_seq_len: int,
+) -> List[MultimodalDataItem]:
+    """
+    Get the multimodal items that are visible in the current chunk.
+
+    Args:
+        embedding_items: List of multimodal items
+        items_offset: List of [start, end] offset ranges for multimodal items in the input sequence
+        extend_prefix_len: The starting position (prefix length) for extraction
+        extend_seq_len: The number of tokens to extract
+
+    Returns:
+        List of visible multimodal items
+    """
+    visible_items = []
+    chunk_start = extend_prefix_len
+    chunk_end = extend_prefix_len + extend_seq_len - 1
+
+    for item, (start, end) in zip(embedding_items, items_offset):
+        if max(chunk_start, start) <= min(chunk_end, end):
+            visible_items.append(item)
+
+    return visible_items
+
 def _get_precomputed_embedding(
     items: List[MultimodalDataItem],
 ) -> Optional[torch.Tensor]:
@@ -435,11 +463,26 @@ def _get_chunked_prefill_embedding(
         # if all items has been prefixed, we do not need to calculate embedding
         if all([offset_end < prefix_length[i] for _, offset_end in items_offset]):
             continue
-        item_hashes = [item.hash for item in embedding_items_per_req]
+
+        # Get visible items for the current chunk
+        curr_prefix = prefix_length[i]
+        curr_extend = extend_length[i] if i < len(extend_length) else 0
+        visible_items = get_visible_items_in_chunk(
+            embedding_items=embedding_items_per_req,
+            items_offset=items_offset,
+            extend_prefix_len=curr_prefix,
+            extend_seq_len=curr_extend,
+        )
+
+        if not visible_items:
+            continue
+        
+        # Calculate embedding only for visible items
+        item_hashes = [item.hash for item in visible_items]
         embedding_items_hash = MultiModalStaticCache.combine_hashes(item_hashes)
         embedding_per_req = embedding_cache.get(item_hashes)
         if embedding_per_req is None:
-            embedding_per_req = data_embedding_func(embedding_items_per_req)
+            embedding_per_req = data_embedding_func(visible_items)
             if not embedding_cache.set(embedding_items_hash, embedding_per_req):
                 print_warning_once(
                     "Multimodal embedding cache is full. This typically occurs when a single "
@@ -447,12 +490,21 @@ def _get_chunked_prefill_embedding(
                     "`SGLANG_VLM_CACHE_SIZE_MB` environment variable or reducing the input "
                     "embedding size."
                 )
+        
+        # Filter items_offset for get_embedding_chunk
+        chunk_start = curr_prefix
+        chunk_end = curr_prefix + curr_extend - 1
+        visible_items_offset = [
+            (start, end)
+            for start, end in items_offset
+            if max(chunk_start, start) <= min(chunk_end, end)
+        ]
 
         embedding_per_req_chunk, _, _ = get_embedding_chunk(
             embedding=embedding_per_req,
-            extend_prefix_len=prefix_length[i],
-            extend_seq_len=extend_length[i] if i < len(extend_length) else 0,
-            items_offset=items_offset,
+            extend_prefix_len=curr_prefix,
+            extend_seq_len=curr_extend,
+            items_offset=visible_items_offset,
         )
         embedding_list.append(embedding_per_req_chunk)
     if len(embedding_list) == 0:
