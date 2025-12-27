@@ -119,26 +119,7 @@ class CudaPlatformBase(Platform):
         dtype: torch.dtype,
     ) -> str:
         # TODO(will): maybe come up with a more general interface for local attention
-        # if distributed is False, we always try to use Flash attn
-        if selected_backend == AttentionBackendEnum.SLIDING_TILE_ATTN:
-            try:
-                from st_attn import sliding_tile_attention  # noqa: F401
-
-                from sglang.multimodal_gen.runtime.layers.attention.backends.sliding_tile_attn import (  # noqa: F401
-                    SlidingTileAttentionBackend,
-                )
-
-                logger.info("Using Sliding Tile Attention backend")
-
-                return "sglang.multimodal_gen.runtime.layers.attention.backends.sliding_tile_attn.SlidingTileAttentionBackend"
-            except ImportError as e:
-                logger.error(
-                    "Failed to import Sliding Tile Attention backend: %s", str(e)
-                )
-                raise ImportError(
-                    "Sliding Tile Attention backend is not installed. "
-                ) from e
-        elif selected_backend == AttentionBackendEnum.SAGE_ATTN:
+        if selected_backend == AttentionBackendEnum.SAGE_ATTN:
             try:
                 from sageattention import sageattn  # noqa: F401
 

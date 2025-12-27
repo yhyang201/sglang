@@ -133,7 +133,6 @@ class DmdDenoisingStage(DenoisingStage):
                     ):
                         attn_metadata = self._build_attn_metadata(i, batch, server_args)
 
-                        batch.is_cfg_negative = False
                         with set_forward_context(
                             current_timestep=i,
                             attn_metadata=attn_metadata,

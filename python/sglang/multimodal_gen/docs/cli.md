@@ -83,7 +83,6 @@ Example configuration file (config.json):
         "fp16",
         "fp16"
     ],
-    "mask_strategy_file_path": null,
     "enable_torch_compile": false
 }
 ```
@@ -115,7 +114,6 @@ vae_config:
 text_encoder_precisions:
   - "fp16"
   - "fp16"
-mask_strategy_file_path: null
 enable_torch_compile: false
 ```
 
