@@ -86,8 +86,6 @@ class Req:
     prompt_template: dict[str, Any] | None = None
     do_classifier_free_guidance: bool = False
 
-    # Batch info
-    num_outputs_per_prompt: int = 1
     seed: int | None = None
     seeds: list[int] | None = None
     generator_device: str = (
@@ -193,8 +191,6 @@ class Req:
         else:
             batch_size = self.prompt_embeds[0].shape[0]
 
-        # Adjust batch size for number of videos per prompt
-        batch_size *= self.num_outputs_per_prompt
         return batch_size
 
     def output_file_path(self, num_outputs=1, output_idx=None):
@@ -247,7 +243,6 @@ class Req:
                   neg_prompt: {self.negative_prompt}
                         seed: {self.seed}
                  infer_steps: {self.num_inference_steps}
-      num_outputs_per_prompt: {self.num_outputs_per_prompt}
               guidance_scale: {self.guidance_scale}
      embedded_guidance_scale: {server_args.pipeline_config.embedded_cfg_scale}
                     n_tokens: {self.n_tokens}

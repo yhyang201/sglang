@@ -100,7 +100,6 @@ class SamplingParams:
     output_file_name: str | None = None
 
     # Batch info
-    num_outputs_per_prompt: int = 1
     seed: int = 1024
     generator_device: str = "cuda"  # Device for random generator: "cuda" or "cpu"
 
@@ -436,12 +435,6 @@ class SamplingParams:
             type=str,
             default=SamplingParams.output_file_name,
             help="Name of the output file",
-        )
-        parser.add_argument(
-            "--num-outputs-per-prompt",
-            type=int,
-            default=SamplingParams.num_outputs_per_prompt,
-            help="Number of outputs to generate per prompt",
         )
         parser.add_argument(
             "--seed",

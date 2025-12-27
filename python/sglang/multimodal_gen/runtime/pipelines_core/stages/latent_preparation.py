@@ -140,9 +140,6 @@ class LatentPreparationStage(PipelineStage):
             or V.list_not_empty(batch.prompt_embeds),
         )
         result.add_check("prompt_embeds", batch.prompt_embeds, V.list_of_tensors)
-        result.add_check(
-            "num_videos_per_prompt", batch.num_outputs_per_prompt, V.positive_int
-        )
         result.add_check("generator", batch.generator, V.generator_or_list_generators)
         result.add_check("num_frames", batch.num_frames, V.positive_int)
         result.add_check("height", batch.height, V.positive_int)

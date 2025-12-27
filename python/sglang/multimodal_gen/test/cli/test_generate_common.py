@@ -53,7 +53,6 @@ class TestGenerate(TestCLIBase):
             f"--model-path={self.model_path}",
             "--save-output",
             f"--output-file-name={self.output_name}",
-            "--num-outputs-per-prompt=2",
             "--width=720",
             "--height=720",
         ]
@@ -91,7 +90,6 @@ class TestWanGenerate(TestGenerate):
             f"--model-path={self.model_path}",
             "--save-output",
             f"--output-file-name={self.output_name}",
-            "--num-outputs-per-prompt=2",
             "--width=720",
             "--height=720",
         ]

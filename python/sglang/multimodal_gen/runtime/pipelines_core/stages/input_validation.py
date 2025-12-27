@@ -49,10 +49,9 @@ class InputValidationStage(PipelineStage):
     def _generate_seeds(self, batch: Req, server_args: ServerArgs):
         """Generate seeds for the inference"""
         seed = batch.seed
-        num_videos_per_prompt = batch.num_outputs_per_prompt
 
         assert seed is not None
-        seeds = [seed + i for i in range(num_videos_per_prompt)]
+        seeds = [seed]
         batch.seeds = seeds
 
         # Create generators based on generator_device parameter
@@ -272,9 +271,6 @@ class InputValidationStage(PipelineStage):
         """Verify input validation stage inputs."""
         result = VerificationResult()
         result.add_check("seed", batch.seed, [V.not_none, V.non_negative_int])
-        result.add_check(
-            "num_videos_per_prompt", batch.num_outputs_per_prompt, V.positive_int
-        )
         result.add_check(
             "prompt_or_embeds",
             None,
