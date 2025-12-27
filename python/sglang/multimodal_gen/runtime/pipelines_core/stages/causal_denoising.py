@@ -93,10 +93,6 @@ class CausalDMDDenoisingStage(DenoisingStage):
             },
         )
 
-        # STA
-        if self.attn_backend.get_enum() == AttentionBackendEnum.SLIDING_TILE_ATTN:
-            self.prepare_sta_param(batch, server_args)
-
         # Latents and prompts
         assert batch.latents is not None, "latents must be provided"
         latents = batch.latents  # [B, C, T, H, W]

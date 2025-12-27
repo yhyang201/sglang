@@ -47,7 +47,7 @@ class ModelConfig:
     arch_config: ArchConfig = field(default_factory=ArchConfig)
 
     # sglang-diffusion-specific parameters here
-    # i.e. STA, quantization, teacache
+    # i.e. Quantization, teacache
 
     def __getattr__(self, name):
         # Only called if 'name' is not found in ModelConfig directly

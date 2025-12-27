@@ -217,11 +217,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, sgl_diffusion will trace function calls
     # Useful for debugging
     "SGLANG_DIFFUSION_TRACE_FUNCTION": _lazy_int("SGLANG_DIFFUSION_TRACE_FUNCTION", 0),
-    # Path to the attention configuration file. Only used for sliding tile
-    # attention for now.
-    "SGLANG_DIFFUSION_ATTENTION_CONFIG": _lazy_path(
-        "SGLANG_DIFFUSION_ATTENTION_CONFIG"
-    ),
     # Optional override to force a specific attention backend (e.g. "aiter")
     "SGLANG_DIFFUSION_ATTENTION_BACKEND": _lazy_str(
         "SGLANG_DIFFUSION_ATTENTION_BACKEND"
