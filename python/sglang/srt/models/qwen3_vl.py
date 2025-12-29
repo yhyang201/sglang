@@ -32,7 +32,7 @@ from sglang.srt.distributed import (
 )
 from sglang.srt.distributed.parallel_state import get_pp_group
 from sglang.srt.environ import envs
-from sglang.srt.layers.attention.vision import VisionAttention
+from sglang.srt.layers.attention.vision import VisionAttention, resolve_seqlens
 from sglang.srt.layers.linear import ColumnParallelLinear, RowParallelLinear
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.pooler import Pooler, PoolingType
@@ -191,6 +191,8 @@ class Qwen3_VisionBlock(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         output_ws: Optional[torch.Tensor] = None,
+        seq_lens: torch.Tensor = None,
+        max_seqlen: int = None,
     ) -> torch.Tensor:
         hidden_states = self.norm1(x)
         hidden_states = rearrange(hidden_states, "s b ... -> b s ...")
@@ -200,6 +202,8 @@ class Qwen3_VisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             output_ws=output_ws,
+            seq_lens=seq_lens,
+            max_seqlen=max_seqlen,
         )
         attn = rearrange(attn, "b s ... -> s b ...")
         x += attn
@@ -493,12 +497,21 @@ class Qwen3VLMoeVisionModel(nn.Module, RotaryPosMixin):
         deepstack_feature_lists = []
         num_deepstack_captured = 0
 
+        seq_len, bsz = x.shape[0], x.shape[1]
+        cu_seqlens = resolve_seqlens(cu_seqlens, bsz, seq_len, device=x.device).to(
+            torch.int32
+        )
+        seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
+        max_seqlen = seq_lens.max().item()
+
         for layer_num, blk in enumerate(self.blocks):
             x = blk(
                 x,
                 cu_seqlens=cu_seqlens,
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
+                seq_lens=seq_lens,
+                max_seqlen=max_seqlen,
             )
 
             if layer_num in self.deepstack_visual_indexes:

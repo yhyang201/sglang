@@ -17,6 +17,7 @@ import dataclasses
 import logging
 import os
 import signal
+import time
 from collections import OrderedDict
 from typing import Dict, List, Union
 
@@ -140,7 +141,19 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
                 recv_obj = self.recv_from_scheduler.recv_pyobj()
             output = self._request_dispatcher(recv_obj)
             if output is not None:
+                now = time.time()
+                now_str = time.strftime(
+                    "%H:%M:%S", time.localtime(now)
+                ) + ".%03d" % int((now % 1) * 1000)
                 self.send_to_tokenizer.send_pyobj(output)
+                now = time.time()
+                now_str2 = time.strftime(
+                    "%H:%M:%S", time.localtime(now)
+                ) + ".%03d" % int((now % 1) * 1000)
+                print(
+                    f"147 {now_str} {now_str2} send_to_tokenizer {len(output.output_strs)} {output.rids=}",
+                    flush=True,
+                )
             self.soft_watchdog.feed()
 
     def trim_matched_stop(

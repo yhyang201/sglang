@@ -322,6 +322,8 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         self.event_loop = None
         self.asyncio_tasks = set()
 
+        self.input_processing_sem = asyncio.Semaphore(1)
+
         # Health check
         self.server_status = ServerStatus.Starting
         self.gracefully_exit = False
@@ -691,13 +693,25 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                         prompt=(input_text or input_ids),
                     )
                 if mm_inputs is None:
-                    mm_inputs: Dict = await self.mm_data_processor.process(
-                        image_data=obj.image_data,
-                        audio_data=obj.audio_data,
-                        input_text_or_ids=(input_text or input_ids),
-                        request_obj=obj,
-                        max_req_input_len=self.max_req_input_len,
-                    )
+                    async with self.input_processing_sem:
+                        await asyncio.sleep(0)
+
+                        st = time.time()
+                        mm_inputs: Dict = await self.mm_data_processor.process(
+                            image_data=obj.image_data,
+                            audio_data=obj.audio_data,
+                            input_text_or_ids=(input_text or input_ids),
+                            request_obj=obj,
+                            max_req_input_len=self.max_req_input_len,
+                        )
+                        now = time.time()
+                        now_str = time.strftime(
+                            "%H:%M:%S", time.localtime(now)
+                        ) + ".%03d" % int((now % 1) * 1000)
+                        print(
+                            f"1438 process {now_str} {time.time() - st:.4f} seconds",
+                            flush=True,
+                        )
 
             if mm_inputs and "input_ids" in mm_inputs:
                 input_ids = mm_inputs["input_ids"]
@@ -1434,12 +1448,36 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
 
     async def handle_loop(self):
         """The event loop that handles requests"""
+        poll_timeout_ms = 500
         while True:
-            with self.soft_watchdog.disable():
-                recv_obj = await self.recv_from_detokenizer.recv_pyobj()
-            self._result_dispatcher(recv_obj)
-            self.last_receive_tstamp = time.time()
-            self.soft_watchdog.feed()
+            try:
+                now = time.time()
+                now_str1 = time.strftime(
+                    "%H:%M:%S", time.localtime(now)
+                ) + ".%03d" % int((now % 1) * 1000)
+                with self.soft_watchdog.disable():
+                    recv_obj = await asyncio.wait_for(
+                        self.recv_from_detokenizer.recv_pyobj(), timeout=2
+                    )
+                now = time.time()
+                now_str2 = time.strftime(
+                    "%H:%M:%S", time.localtime(now)
+                ) + ".%03d" % int((now % 1) * 1000)
+                if isinstance(recv_obj, BatchStrOutput):
+                    print(
+                        f"1459 {now_str1} {now_str2} handle_loop {type(recv_obj)} {len(recv_obj.output_strs)} {recv_obj.rids=}",
+                        flush=True,
+                    )
+                self._result_dispatcher(recv_obj)
+                self.last_receive_tstamp = time.time()
+                self.soft_watchdog.feed()
+
+            except asyncio.TimeoutError:
+                # 超时了，说明没有收到消息。
+                # 可以在这里打印日志或者 yield 控制权
+                await asyncio.sleep(1)  # 显式让出，虽然 wait_for 内部已经涉及调度
+                print(f"1468 timeout", flush=True)
+                continue
 
     def _handle_batch_output(
         self,

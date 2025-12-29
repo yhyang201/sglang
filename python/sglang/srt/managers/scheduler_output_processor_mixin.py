@@ -1052,6 +1052,10 @@ class SchedulerOutputProcessorMixin:
             if self.model_config.is_multimodal_gen:
                 return
 
+            now = time.time()
+            now_str1 = time.strftime("%H:%M:%S", time.localtime(now)) + ".%03d" % int(
+                (now % 1) * 1000
+            )
             self.send_to_detokenizer.send_output(
                 BatchTokenIDOutput(
                     rids=rids,
@@ -1095,6 +1099,11 @@ class SchedulerOutputProcessorMixin:
                     load=load,
                 )
             )
+            now = time.time()
+            now_str2 = time.strftime("%H:%M:%S", time.localtime(now)) + ".%03d" % int(
+                (now % 1) * 1000
+            )
+            print(f"1102 {now_str1} {now_str2} send_to_detokenizer {rids=}", flush=True)
 
     def stream_output_embedding(self: Scheduler, reqs: List[Req]):
         rids = []

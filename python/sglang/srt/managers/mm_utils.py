@@ -566,12 +566,7 @@ def _get_chunked_prefill_embedding(
         if embedding_per_req is None:
             embedding_per_req = data_embedding_func(embedding_items_per_req)
             if not embedding_cache.set(embedding_items_hash, embedding_per_req):
-                print_warning_once(
-                    "Multimodal embedding cache is full. This typically occurs when a single "
-                    "embedding exceeds the cache size limit. Consider increasing the "
-                    "`SGLANG_VLM_CACHE_SIZE_MB` environment variable or reducing the input "
-                    "embedding size."
-                )
+                pass
 
         embedding_per_req_chunk, _, _ = get_embedding_chunk(
             embedding=embedding_per_req,
@@ -758,11 +753,7 @@ def _get_chunked_prefill_embedding_for_chunked_items(
 
             embedding_for_cache = embedding_per_chunk.detach().cpu()
             if not embedding_cache.set(embedding_items_hash, embedding_for_cache):
-                print(
-                    "[WARN] Multimodal embedding cache is full. "
-                    "Consider increasing `SGLANG_VLM_CACHE_SIZE_MB` or reducing "
-                    "video frame count / resolution for a single request."
-                )
+                pass
         else:
             target_device = embedding_items_per_req[0].feature.device
             if embedding_per_chunk.device != target_device:

@@ -1754,6 +1754,7 @@ def launch_server(
                 log_level=server_args.log_level_http or server_args.log_level,
                 timeout_keep_alive=5,
                 loop="uvloop",
+                access_log=False,
             )
         else:
             # Multiple tokenizer and http processes
@@ -1775,6 +1776,7 @@ def launch_server(
                 timeout_keep_alive=5,
                 loop="uvloop",
                 workers=server_args.tokenizer_worker_num,
+                access_log=False,
             )
     finally:
         if server_args.tokenizer_worker_num > 1:

@@ -499,6 +499,10 @@ class OpenAIServingChat(OpenAIServingBase):
         raw_request: Request,
     ) -> AsyncGenerator[str, None]:
         """Generate streaming chat completion response"""
+        # Record start time for TTFT (Time To First Token) measurement
+        stream_start_time = time.perf_counter()
+        first_chunk_sent = False
+
         # Parsers for tool calls and reasoning
         parser_dict = {}
         reasoning_parser_dict = {}
@@ -560,6 +564,21 @@ class OpenAIServingChat(OpenAIServingBase):
                         choices=[choice_data],
                         model=request.model,
                     )
+
+                    # Log TTFT (Time To First Token) for the first chunk
+                    if not first_chunk_sent:
+                        first_chunk_sent = True
+                        ttft_ms = (time.perf_counter() - stream_start_time) * 1000
+                        now = time.time()
+                        now_str = time.strftime(
+                            "%H:%M:%S", time.localtime(now)
+                        ) + ".%03d" % int((now % 1) * 1000)
+                        print(
+                            f"[{now_str}] TTFT (Time To First Token): {ttft_ms:.2f}ms, "
+                            f"request_id={content['meta_info']['id']}",
+                            flush=True,
+                        )
+
                     yield f"data: {chunk.model_dump_json()}\n\n"
 
                 stream_buffer = stream_buffers.get(index, "")

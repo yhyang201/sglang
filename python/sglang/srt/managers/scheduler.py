@@ -1084,8 +1084,19 @@ class Scheduler(
 
             # Launch the current batch
             if batch:
+                st = time.time()
                 result = self.run_batch(batch)
                 self.process_batch_result(batch, result)
+                if batch.forward_mode.name in ["EXTEND"]:
+                    now = time.time()
+                    now_str = time.strftime(
+                        "%H:%M:%S", time.localtime(now)
+                    ) + ".%03d" % int((now % 1) * 1000)
+                    print(
+                        f"{now_str} "
+                        f"[Batch Info] type: {batch.forward_mode.name} | num: {len(batch.reqs)} | run_batch time: {time.time() - st:.4f} seconds",
+                        flush=True,
+                    )
             else:
                 # When the server is idle, do self-check and re-init some states
                 self.self_check_during_idle()

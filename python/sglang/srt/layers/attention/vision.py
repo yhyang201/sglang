@@ -360,6 +360,8 @@ class VisionFlash3Attention(nn.Module):
         cu_seqlens: torch.Tensor | SingletonCache | None,
         bsz: int,
         seq_len: int,
+        seq_lens: torch.Tensor,
+        max_seqlen: int,
         **kwargs,
     ) -> torch.Tensor:
         r"""
@@ -380,10 +382,10 @@ class VisionFlash3Attention(nn.Module):
                 max_seqlen_k=max_seqlen,
             )
         else:
-            cu_seqlens = resolve_seqlens(cu_seqlens, bsz, seq_len, device=q.device)
-            cu_seqlens = cu_seqlens.to(dtype=torch.int32).to(q.device)
-            seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
-            max_seqlen = seq_lens.max().item()
+            # cu_seqlens = resolve_seqlens(cu_seqlens, bsz, seq_len, device=q.device)
+            # cu_seqlens = cu_seqlens.to(dtype=torch.int32).to(q.device)
+            # seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
+            # max_seqlen = seq_lens.max().item()
 
             output = flash_attn_varlen_func(
                 q,
@@ -707,6 +709,8 @@ class VisionAttention(nn.Module):
         rotary_pos_emb_cos: Optional[torch.Tensor] = None,
         rotary_pos_emb_sin: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        seq_lens: torch.Tensor = None,
+        max_seqlen: int = None,
         **kwargs,
     ) -> torch.Tensor:
         r"""
@@ -811,6 +815,8 @@ class VisionAttention(nn.Module):
             cu_seqlens=cu_seqlens,
             attention_mask=attention_mask,
             output_ws=attn_output_ws,
+            seq_lens=seq_lens,
+            max_seqlen=max_seqlen,
         )
 
         assert output.dim() == 3, output.shape
