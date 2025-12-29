@@ -1443,7 +1443,20 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         while True:
             if await self.recv_from_detokenizer.poll(timeout=500):
                 with self.soft_watchdog.disable():
+                    now = time.time()
+                    now_str = time.strftime(
+                        "%H:%M:%S", time.localtime(now)
+                    ) + ".%03d" % int((now % 1) * 1000)
                     recv_obj = await self.recv_from_detokenizer.recv_pyobj()
+                    now = time.time()
+                    now_str2 = time.strftime(
+                        "%H:%M:%S", time.localtime(now)
+                    ) + ".%03d" % int((now % 1) * 1000)
+                    if isinstance(recv_obj, BatchStrOutput):
+                        print(
+                            f"1450 {now_str} {now_str2} handle_loop {type(recv_obj)} {len(recv_obj.output_strs)} {recv_obj.rids=}",
+                            flush=True,
+                        )
                     self._result_dispatcher(recv_obj)
                     self.last_receive_tstamp = time.time()
                     self.soft_watchdog.feed()
