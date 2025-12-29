@@ -1450,34 +1450,28 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         """The event loop that handles requests"""
         poll_timeout_ms = 500
         while True:
-            try:
+            if await self.recv_from_detokenizer.poll(timeout=500):
                 now = time.time()
-                now_str1 = time.strftime(
+                now_str = time.strftime(
                     "%H:%M:%S", time.localtime(now)
                 ) + ".%03d" % int((now % 1) * 1000)
                 with self.soft_watchdog.disable():
-                    recv_obj = await asyncio.wait_for(
-                        self.recv_from_detokenizer.recv_pyobj(), timeout=2
-                    )
+                    recv_obj = await self.recv_from_detokenizer.recv_pyobj()
                 now = time.time()
                 now_str2 = time.strftime(
                     "%H:%M:%S", time.localtime(now)
                 ) + ".%03d" % int((now % 1) * 1000)
                 if isinstance(recv_obj, BatchStrOutput):
                     print(
-                        f"1459 {now_str1} {now_str2} handle_loop {type(recv_obj)} {len(recv_obj.output_strs)} {recv_obj.rids=}",
+                        f"1450 {now_str} {now_str2} handle_loop {type(recv_obj)} {len(recv_obj.output_strs)} {recv_obj.rids=}",
                         flush=True,
                     )
                 self._result_dispatcher(recv_obj)
                 self.last_receive_tstamp = time.time()
                 self.soft_watchdog.feed()
-
-            except asyncio.TimeoutError:
-                # 超时了，说明没有收到消息。
-                # 可以在这里打印日志或者 yield 控制权
-                await asyncio.sleep(1)  # 显式让出，虽然 wait_for 内部已经涉及调度
-                print(f"1468 timeout", flush=True)
-                continue
+            else:
+                self.soft_watchdog.feed()
+                await asyncio.sleep(0)
 
     def _handle_batch_output(
         self,
