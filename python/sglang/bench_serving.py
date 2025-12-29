@@ -429,6 +429,7 @@ async def async_request_openai_chat_completions(
                                     if ttft == 0.0:
                                         ttft = timestamp - st
                                         output.ttft = ttft
+                                        print(f"432 TTFT: {ttft}")
 
                                     # Decoding phase
                                     else:
