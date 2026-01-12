@@ -44,6 +44,7 @@ class ZImageOmniSamplingParams(SamplingParams):
     # width: int = 1280
     # fps: int = 24
 
+    # TODO: default to 5.0 in omni
     guidance_scale: float = 0.0
 
     teacache_params: TeaCacheParams = field(

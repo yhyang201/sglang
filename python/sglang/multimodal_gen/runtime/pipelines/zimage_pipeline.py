@@ -354,10 +354,10 @@ class _PrepareSiglipStage(PipelineStage):
             None if sels == [] else sels + [None] for sels in condition_siglip_embeds
         ]
         # TODO: debug remove
-        # negative_condition_siglip_embeds = [
-        #     None if sels == [] else sels + [None]
-        #     for sels in negative_condition_siglip_embeds
-        # ]
+        negative_condition_siglip_embeds = [
+            None if sels == [] else sels + [None]
+            for sels in negative_condition_siglip_embeds
+        ]
 
         # TODO: for siglip_feats = pos + neg
         # in denoising loop

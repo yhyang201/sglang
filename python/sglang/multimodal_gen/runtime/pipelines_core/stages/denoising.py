@@ -1045,7 +1045,7 @@ class DenoisingStage(PipelineStage):
                                 batch.condition_latents is not None
                             ), "batch.condition_latents is missing."
 
-                            # TODO: hard code False
+                            # TODO: test single batch for now
                             apply_cfg = False
                             if apply_cfg:
                                 raise NotImplementedError

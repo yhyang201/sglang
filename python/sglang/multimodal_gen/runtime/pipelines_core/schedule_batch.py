@@ -213,6 +213,7 @@ class Req:
     condition_images: list | None = None
     resized_images: list | None = None
     condition_latents: list | None = None
+    negative_condition_latents: list | None = None
     condition_siglip_embeds: list | None = None
     negative_condition_siglip_embeds: list | None = None
 

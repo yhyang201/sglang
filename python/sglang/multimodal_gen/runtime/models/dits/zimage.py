@@ -776,11 +776,12 @@ class ZImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
         all_image_padded_feat_list = []
         all_image_noise_mask_list = []
         image_lens = []
+        image_sizes = []
         for j, image in enumerate(images):
             image, (F, H, W), _ = self._patchify_image(
                 image, patch_size=patch_size, f_patch_size=f_patch_size
             )
-            all_image_size.append((F, H, W))
+            image_sizes.append((F, H, W))
 
             # image_ori_len = image.size(0)
             # image_padding_len = (-image_ori_len) % SEQ_MULTI_OF
@@ -799,6 +800,7 @@ class ZImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
             all_image_padded_feat_list.append(image_padded_feat)
             all_image_noise_mask_list.extend(image_nm)
             image_lens.append(image_len)
+        all_image_size.append(image_sizes)
         all_image_out.append(torch.cat(all_image_padded_feat_list, dim=0))
         all_image_noise_mask.append(all_image_noise_mask_list)
         all_image_len.append(image_lens)
@@ -1018,7 +1020,8 @@ class ZImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
         # TODO: single batch only for now.
         bsz = len(x_seqlens)
         unified = []
-        unified_freqs = []
+        unified_freqs_cos = []
+        unified_freqs_sin = []
         unified_noise_mask = []
 
         for i in range(bsz):
@@ -1031,12 +1034,22 @@ class ZImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
                     unified.append(
                         torch.cat([cap[i][:cap_len], x[i][:x_len], siglip[i][:sig_len]])
                     )
-                    unified_freqs.append(
+                    # TODO: review, hack
+                    unified_freqs_cos.append(
                         torch.cat(
                             [
-                                cap_freqs[i][:cap_len],
-                                x_freqs[i][:x_len],
-                                siglip_freqs[i][:sig_len],
+                                cap_freqs[0][:cap_len],
+                                x_freqs[0][:x_len],
+                                siglip_freqs[0][:sig_len],
+                            ]
+                        )
+                    )
+                    unified_freqs_sin.append(
+                        torch.cat(
+                            [
+                                cap_freqs[1][:cap_len],
+                                x_freqs[1][:x_len],
+                                siglip_freqs[1][:sig_len],
                             ]
                         )
                     )
@@ -1049,8 +1062,11 @@ class ZImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
                     )
                 else:
                     unified.append(torch.cat([cap[i][:cap_len], x[i][:x_len]]))
-                    unified_freqs.append(
-                        torch.cat([cap_freqs[i][:cap_len], x_freqs[i][:x_len]])
+                    unified_freqs_cos.append(
+                        torch.cat([cap_freqs[0][:cap_len], x_freqs[0][:x_len]])
+                    )
+                    unified_freqs_sin.append(
+                        torch.cat([cap_freqs[1][:cap_len], x_freqs[1][:x_len]])
                     )
                     unified_noise_mask.append(
                         torch.tensor(
@@ -1062,16 +1078,20 @@ class ZImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
             else:
                 # Basic: [x, cap]
                 unified.append(torch.cat([x[i][:x_len], cap[i][:cap_len]]))
-                unified_freqs.append(
-                    torch.cat([x_freqs[i][:x_len], cap_freqs[i][:cap_len]])
+                unified_freqs_cos.append(
+                    torch.cat([x_freqs[0][:x_len], cap_freqs[0][:cap_len]])
+                )
+                unified_freqs_sin.append(
+                    torch.cat([x_freqs[1][:x_len], cap_freqs[1][:cap_len]])
                 )
 
         # TODO: single batch only
         # no batch pad
         assert len(unified) == 1, "Single batch only for now."
-        assert len(unified_freqs) == 1, "Single batch only for now."
+        assert len(unified_freqs_cos) == 1, "Single batch only for now."
         unified = unified[0].unsqueeze(0)
-        unified_freqs = unified_freqs[0].unsqueeze(0)
+        # unified_freqs = unified_freqs[0].unsqueeze(0)
+        unified_freqs = (unified_freqs_cos[0], unified_freqs_sin[0])
 
         # Noise mask
         noise_mask_tensor = None
@@ -1090,17 +1110,6 @@ class ZImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
         device,
         rotary_emb,
     ):
-        def create_coordinate_grid(size, start=None, device=None):
-            if start is None:
-                start = (0 for _ in size)
-
-            axes = [
-                torch.arange(x0, x0 + span, dtype=torch.int32, device=device)
-                for x0, span in zip(start, size)
-            ]
-            grids = torch.meshgrid(axes, indexing="ij")
-            return torch.stack(grids, dim=-1)
-
         def _get_pos_ids(
             ori_len: int,
             pos_grid_size: Tuple,
@@ -1380,7 +1389,11 @@ class ZImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
             # if controlnet ...
 
         unified = self.all_final_layer[f"{patch_size}-{f_patch_size}"](
-            unified, adaln_input
+            unified,
+            adaln_input,
+            noise_mask=unified_noise_tensor,
+            c_noisy=t_noisy,
+            c_clean=t_clean,
         )
         unified = list(unified.unbind(dim=0))
         x = self.unpatchify(unified, x_size, patch_size, f_patch_size, x_pos_offsets)
