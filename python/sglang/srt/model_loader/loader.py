@@ -641,7 +641,7 @@ class DefaultModelLoader(BaseModelLoader):
                     model_config,
                     self.load_config,
                 )
-
+                print(f"644 {model=}")
             self.load_weights_and_postprocess(
                 model, self._get_all_weights(model_config, model), target_device
             )
