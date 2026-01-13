@@ -291,6 +291,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.pp_rank = pp_rank
         self.pp_size = pp_size
         self.model_config = model_config
+        architectures = getattr(self.model_config.hf_config, "architectures", [])
+        print(f"294 {architectures=}")
         self.dist_port = nccl_port
         self.server_args = server_args
         self.is_draft_worker = is_draft_worker
@@ -880,6 +882,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 load_config=self.load_config,
                 model_config=self.model_config,
             )
+            architectures = getattr(self.model_config.hf_config, "architectures", [])
+            print(f"886 {architectures=}")
             self.model = self.loader.load_model(
                 model_config=self.model_config,
                 device_config=DeviceConfig(self.device, self.gpu_id),
@@ -2294,6 +2298,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 forward_count=split_forward_count,
             )
         elif forward_batch.forward_mode.is_extend(include_draft_extend_v2=True):
+            print(f"2297 {forward_batch.input_ids=}")
             ret = self.forward_extend(
                 forward_batch,
                 skip_attn_backend_init=skip_attn_backend_init,

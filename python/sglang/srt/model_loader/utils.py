@@ -27,7 +27,9 @@ def set_default_torch_dtype(dtype: torch.dtype):
 
 
 def resolve_transformers_arch(model_config: ModelConfig, architectures: list[str]):
+    print(f"30 {architectures=}")
     for i, arch in enumerate(architectures):
+        print(f"32 {arch=}")
         if arch == "TransformersForCausalLM":
             continue
         auto_map: dict[str, str] = (
@@ -97,8 +99,11 @@ def get_model_architecture(model_config: ModelConfig) -> Tuple[Type[nn.Module], 
         architectures = ["QuantMixtralForCausalLM"]
 
     supported_archs = ModelRegistry.get_supported_archs()
+    print(f"100 {supported_archs=}, {architectures=}")
     is_native_supported = any(arch in supported_archs for arch in architectures)
-
+    print(f"101 {is_native_supported=}, {model_config.model_impl=}, {architectures=}")
+    # import traceback
+    # traceback.print_stack()
     if model_config.model_impl == ModelImpl.MINDSPORE:
         architectures = ["MindSporeForCausalLM"]
     elif not is_native_supported or model_config.model_impl == ModelImpl.TRANSFORMERS:

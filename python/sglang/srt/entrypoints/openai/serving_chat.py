@@ -293,6 +293,7 @@ class OpenAIServingChat(OpenAIServingBase):
                 tool_call_constraint = ("json_schema", json_schema)
 
         # Use chat template
+        print(f"296 {self.template_manager.chat_template_name=} {is_multimodal=}")
         if self.template_manager.chat_template_name is None:
             result = self._apply_jinja_template(request, tools, is_multimodal)
         else:
@@ -437,6 +438,10 @@ class OpenAIServingChat(OpenAIServingBase):
         audio_data = audio_data if audio_data else None
         video_data = video_data if video_data else None
         modalities = modalities if modalities else []
+
+        print(f"442 {prompt=}")
+        print(f"443 {prompt_ids=}")
+
         return MessageProcessingResult(
             prompt=prompt,
             prompt_ids=prompt_ids,
@@ -456,7 +461,7 @@ class OpenAIServingChat(OpenAIServingBase):
         prompt = ""
         prompt_ids = []
         conv = generate_chat_conv(request, self.template_manager.chat_template_name)
-
+        print(f"460 {conv=}", flush=True)
         # If we should continue the final assistant message, adjust the conversation.
         if (
             request.continue_final_message

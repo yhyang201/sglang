@@ -410,6 +410,9 @@ class GenerateReqInput(BaseReq, APIServingTimingMixin):
                 raise ValueError("Text should be a list for batch processing.")
             self.text = self.text * self.parallel_sample_num
         elif self.input_ids is not None:
+            print(f"314 {self.input_ids=}")
+            print(f"315 {type(self.input_ids)}")
+            print(f"315 {type(self.input_ids[0])}")
             if not isinstance(self.input_ids, list) or not isinstance(
                 self.input_ids[0], list
             ):

@@ -82,4 +82,5 @@ class Glm4vImageProcessor(SGLangBaseProcessor):
             "mrope_positions": mrope_positions,
             "mrope_position_delta": mrope_position_delta,
         }
+        print(f"{mm_inputs=}")
         return mm_inputs

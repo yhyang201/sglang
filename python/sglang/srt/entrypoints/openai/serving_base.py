@@ -101,10 +101,11 @@ class OpenAIServingBase(ABC):
                 return self.create_error_response(error_msg)
 
             # Convert to internal format
+            print(f"105 {request=}", flush=True)
             adapted_request, processed_request = self._convert_to_internal_request(
                 request, raw_request
             )
-
+            print(f"108 {adapted_request=}", flush=True)
             if isinstance(adapted_request, (GenerateReqInput, EmbeddingReqInput)):
                 # Only set timing fields if adapted_request supports them
                 adapted_request.validation_time = validation_time

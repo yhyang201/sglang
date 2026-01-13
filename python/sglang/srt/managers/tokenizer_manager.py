@@ -481,6 +481,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         self.auto_create_handle_loop()
 
         # Normalize the request
+        print(f"484 {obj=}", flush=True)
         obj.normalize_batch_and_arguments()
         if self.enable_trace:
             self._trace_request_start(obj, created_time, request)
@@ -501,7 +502,9 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
 
             # Tokenize the request and send it to the scheduler
             if obj.is_single:
+                print(f"504 {obj=}")
                 tokenized_obj = await self._tokenize_one_request(obj)
+                print(f"505 {tokenized_obj=}", flush=True)
                 state = self._send_one_request(obj, tokenized_obj, created_time)
                 async for response in self._wait_one_response(obj, state, request):
                     yield response
