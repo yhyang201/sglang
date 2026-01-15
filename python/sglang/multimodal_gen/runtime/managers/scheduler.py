@@ -153,8 +153,15 @@ class Scheduler:
             return None
 
         # pop the first (earliest)
-        item = self.waiting_queue.popleft()
+        item, ts = self.waiting_queue.popleft()
+        import time
 
+        tm = time.time() - ts
+        h, remainder = divmod(tm, 3600)
+        m, s = divmod(remainder, 60)
+        ms = int((s - int(s)) * 1000)
+        tm_str = f"{int(h):02d}:{int(m):02d}:{int(s):02d}.{ms:03d}"
+        print(f"163 tm={tm_str}, {ts=}", flush=True)
         return [item]
 
     def prepare_server_warmup_reqs(self):
@@ -202,7 +209,15 @@ class Scheduler:
                         prompt="",
                         is_warmup=True,
                     )
-                self.waiting_queue.append((None, req))
+                import time
+
+                st = time.time()
+                localtime = time.localtime(st)
+                ms = int((st - int(st)) * 1000)
+                st_formatted = time.strftime(f"%H:%M:%S.{ms:03d}", localtime)
+                print(f"301 {req=}, {st_formatted=}", flush=True)
+                st = time.time()
+                self.waiting_queue.append(((None, req), st))
             # if server is warmed-up, set this flag to avoid req-based warmup
             self.warmed_up = True
 
@@ -297,8 +312,19 @@ class Scheduler:
             # 1: receive requests
             try:
                 new_reqs = self.recv_reqs()
-                new_reqs = self.process_received_reqs_with_req_based_warmup(new_reqs)
-                self.waiting_queue.extend(new_reqs)
+                if len(new_reqs) > 0:
+                    new_reqs = self.process_received_reqs_with_req_based_warmup(
+                        new_reqs
+                    )
+                    import time
+
+                    st = time.time()
+                    localtime = time.localtime(st)
+                    ms = int((st - int(st)) * 1000)
+                    st_formatted = time.strftime(f"%H:%M:%S.{ms:03d}", localtime)
+                    print(f"301 {new_reqs=}, {st_formatted=}", flush=True)
+                    x, y = new_reqs[0]
+                    self.waiting_queue.extend([((x, y), st)])
                 # Reset error count on success
                 self._consecutive_error_count = 0
             except Exception as e:
