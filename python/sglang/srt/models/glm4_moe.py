@@ -776,16 +776,37 @@ class Glm4MoeDecoderLayer(nn.Module):
         hidden_states, residual = self.layer_communicator.prepare_attn(
             hidden_states, residual, forward_batch
         )
+        if forward_batch.should_dump:
+            forward_batch.record_bad_activation(
+                hidden_states,
+                stage="attn_in",
+                layer_id=self.layer_id,
+                model="glm4_moe",
+            )
 
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             forward_batch=forward_batch,
         )
+        if forward_batch.should_dump:
+            forward_batch.record_bad_activation(
+                hidden_states,
+                stage="attn_out",
+                layer_id=self.layer_id,
+                model="glm4_moe",
+            )
 
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
         )
+        if forward_batch.should_dump:
+            forward_batch.record_bad_activation(
+                hidden_states,
+                stage="mlp_in",
+                layer_id=self.layer_id,
+                model="glm4_moe",
+            )
 
         should_allreduce_fusion = (
             self.layer_communicator.should_fuse_mlp_allreduce_with_next_layer(
@@ -801,6 +822,13 @@ class Glm4MoeDecoderLayer(nn.Module):
         hidden_states = self.mlp(
             hidden_states, forward_batch, should_allreduce_fusion, use_reduce_scatter
         )
+        if forward_batch.should_dump:
+            forward_batch.record_bad_activation(
+                hidden_states,
+                stage="mlp_out",
+                layer_id=self.layer_id,
+                model="glm4_moe",
+            )
 
         if should_allreduce_fusion:
             hidden_states._sglang_needs_allreduce_fusion = True
@@ -808,6 +836,13 @@ class Glm4MoeDecoderLayer(nn.Module):
             hidden_states, residual = self.layer_communicator.postprocess_layer(
                 hidden_states, residual, forward_batch
             )
+            if forward_batch.should_dump:
+                forward_batch.record_bad_activation(
+                    hidden_states,
+                    stage="postprocess",
+                    layer_id=self.layer_id,
+                    model="glm4_moe",
+                )
 
         return hidden_states, residual
 
@@ -823,6 +858,13 @@ class Glm4MoeDecoderLayer(nn.Module):
         state.hidden_states_after_comm_pre_attn, state.residual_after_input_ln = (
             self.layer_communicator.prepare_attn(hidden_states, residual, forward_batch)
         )
+        if forward_batch.should_dump:
+            forward_batch.record_bad_activation(
+                state.hidden_states_after_comm_pre_attn,
+                stage="attn_in",
+                layer_id=self.layer_id,
+                model="glm4_moe",
+            )
         state.update(
             dict(
                 forward_batch=forward_batch,
@@ -839,6 +881,13 @@ class Glm4MoeDecoderLayer(nn.Module):
                 state.forward_batch,
             )
         )
+        if state.forward_batch.should_dump:
+            state.forward_batch.record_bad_activation(
+                state.hidden_states_mlp_input,
+                stage="mlp_in",
+                layer_id=self.layer_id,
+                model="glm4_moe",
+            )
 
     def op_mlp(self, state):
         hidden_states = state.pop("hidden_states_mlp_input")
@@ -852,6 +901,13 @@ class Glm4MoeDecoderLayer(nn.Module):
             )
         else:
             state.hidden_states_mlp_output = hidden_states
+        if state.forward_batch.should_dump:
+            state.forward_batch.record_bad_activation(
+                state.hidden_states_mlp_output,
+                stage="mlp_out",
+                layer_id=self.layer_id,
+                model="glm4_moe",
+            )
 
     def op_comm_postprocess_layer(self, state):
         hidden_states, residual = self.layer_communicator.postprocess_layer(
@@ -859,6 +915,13 @@ class Glm4MoeDecoderLayer(nn.Module):
             state.pop("residual_after_comm_pre_mlp"),
             state.forward_batch,
         )
+        if state.forward_batch.should_dump:
+            state.forward_batch.record_bad_activation(
+                hidden_states,
+                stage="postprocess",
+                layer_id=self.layer_id,
+                model="glm4_moe",
+            )
 
         output = dict(
             positions=state.positions,
@@ -938,6 +1001,13 @@ class Glm4MoeModel(nn.Module):
             else:
                 hidden_states = input_embeds
             residual = None
+            if forward_batch.should_dump:
+                forward_batch.record_bad_activation(
+                    hidden_states,
+                    stage="embed_out",
+                    layer_id=None,
+                    model="glm4_moe",
+                )
         else:
             assert pp_proxy_tensors is not None
             hidden_states = pp_proxy_tensors["hidden_states"]

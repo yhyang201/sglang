@@ -2342,6 +2342,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         else:
             raise ValueError(f"Invalid forward mode: {forward_batch.forward_mode}")
 
+        if forward_batch.bad_activation_info is not None:
+            self._dump_bad_activation_request(forward_batch)
+
         if (
             forward_batch.global_num_tokens_cpu is not None
             and self.pp_group.is_last_rank
@@ -2349,6 +2352,33 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             forward_batch.post_forward_mlp_sync_batch(ret)
 
         return ModelRunnerOutput(logits_output=ret, can_run_graph=can_run_graph)
+
+    def _dump_bad_activation_request(self, forward_batch: ForwardBatch) -> None:
+        if not forward_batch.should_dump or not forward_batch.bad_activation_info:
+            return
+        dump_root = self.server_args.should_dump_glm45v
+        if not dump_root:
+            logger.warning(
+                "Bad activation detected but no dump folder configured.",
+            )
+            forward_batch.bad_activation_info = None
+            return
+        dump_dir = dump_root
+        reason = forward_batch.bad_activation_info.get("reason", "bad_activation")
+        try:
+            forward_batch.dump_request_info(
+                dump_dir=dump_dir,
+                reason=reason,
+                extra=forward_batch.bad_activation_info,
+            )
+            logger.warning(
+                "Bad activation detected; dumped request info to %s",
+                dump_dir,
+            )
+        except Exception:
+            logger.exception("Failed to dump bad activation request info.")
+        finally:
+            forward_batch.bad_activation_info = None
 
     def _preprocess_logits(
         self, logits_output: LogitsProcessorOutput, sampling_info: SamplingBatchInfo

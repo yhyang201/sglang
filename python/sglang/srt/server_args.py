@@ -372,6 +372,7 @@ class ServerArgs:
     bucket_inter_token_latency: Optional[List[float]] = None
     bucket_e2e_request_latency: Optional[List[float]] = None
     collect_tokens_histogram: bool = False
+    should_dump_glm45v: Optional[str] = None
     prompt_tokens_buckets: Optional[List[str]] = None
     generation_tokens_buckets: Optional[List[str]] = None
     gc_warning_threshold_secs: float = 0.0
@@ -3253,6 +3254,12 @@ class ServerArgs:
             action="store_true",
             default=ServerArgs.collect_tokens_histogram,
             help="Collect prompt/generation tokens histogram.",
+        )
+        parser.add_argument(
+            "--should-dump-glm45v",
+            type=str,
+            default=ServerArgs.should_dump_glm45v,
+            help="Folder path to dump requests when GLM4/5V activations are NaN or all-zero.",
         )
         bucket_rule = (
             "Supports 3 rule types: 'default' uses predefined buckets; 'tse <middle> <base> <count>' "

@@ -29,7 +29,11 @@ ScheduleBatch -> ModelWorkerBatch -> ForwardBatch
 
 from __future__ import annotations
 
+import os
+import pickle
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from enum import IntEnum, auto
 from functools import total_ordering
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
@@ -375,6 +379,145 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     # For hidden states before normal
     return_hidden_states_before_norm: bool = False
 
+    #  For Debug Dump
+    should_dump: Optional[bool] = False
+    bad_activation_info: Optional[dict] = None
+
+    def _safe_tensor_to_list(self, tensor: Optional[torch.Tensor]):
+        if tensor is None:
+            return None
+        if isinstance(tensor, torch.Tensor):
+            return tensor.detach().cpu().tolist()
+        return tensor
+
+    def _serialize_mm_inputs(self):
+        if not self.mm_inputs:
+            return None
+        mm_inputs_info = []
+        for mm_input in self.mm_inputs:
+            if mm_input is None:
+                mm_inputs_info.append(None)
+                continue
+            items_info = []
+            for item in mm_input.mm_items:
+                feature_shape = (
+                    list(item.feature.shape)
+                    if getattr(item, "feature", None) is not None
+                    and hasattr(item.feature, "shape")
+                    else None
+                )
+                precomputed_shape = (
+                    list(item.precomputed_embeddings.shape)
+                    if getattr(item, "precomputed_embeddings", None) is not None
+                    and hasattr(item.precomputed_embeddings, "shape")
+                    else None
+                )
+                items_info.append(
+                    {
+                        "modality": getattr(item.modality, "name", str(item.modality)),
+                        "format": getattr(item.format, "name", str(item.format)),
+                        "feature_shape": feature_shape,
+                        "precomputed_embeddings_shape": precomputed_shape,
+                        "offsets_len": (
+                            len(item.offsets) if item.offsets is not None else None
+                        ),
+                        "model_specific_keys": list(
+                            getattr(item, "model_specific_data", {}).keys()
+                        ),
+                    }
+                )
+            mm_inputs_info.append(
+                {
+                    "num_items": len(mm_input.mm_items),
+                    "num_image_tokens": mm_input.num_image_tokens,
+                    "image_pad_len": mm_input.image_pad_len,
+                    "im_token_id": mm_input.im_token_id,
+                    "im_start_id": mm_input.im_start_id,
+                    "im_end_id": mm_input.im_end_id,
+                    "slice_start_id": mm_input.slice_start_id,
+                    "slice_end_id": mm_input.slice_end_id,
+                    "video_token_id": mm_input.video_token_id,
+                    "audio_token_id": mm_input.audio_token_id,
+                    "audio_start_id": mm_input.audio_start_id,
+                    "audio_end_id": mm_input.audio_end_id,
+                    "mrope_positions_shape": (
+                        list(mm_input.mrope_positions.shape)
+                        if getattr(mm_input, "mrope_positions", None) is not None
+                        and hasattr(mm_input.mrope_positions, "shape")
+                        else None
+                    ),
+                    "mrope_position_delta_shape": (
+                        list(mm_input.mrope_position_delta.shape)
+                        if getattr(mm_input, "mrope_position_delta", None) is not None
+                        and hasattr(mm_input.mrope_position_delta, "shape")
+                        else None
+                    ),
+                    "items": items_info,
+                }
+            )
+        return mm_inputs_info
+
+    def dump_request_info(
+        self, dump_dir: str, reason: str, extra: Optional[dict] = None
+    ):
+        if not dump_dir:
+            return
+        from sglang.srt.distributed import get_tensor_model_parallel_rank
+
+        if get_tensor_model_parallel_rank() != 0:
+            return
+        os.makedirs(dump_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+        tp_rank = get_tensor_model_parallel_rank()
+        filename = os.path.join(
+            dump_dir,
+            f"bad_activation_{timestamp}_pid{os.getpid()}_tp{tp_rank}.pkl",
+        )
+        payload = {
+            "reason": reason,
+            "timestamp": time.time(),
+            "forward_mode": self.forward_mode.name if self.forward_mode else None,
+            "batch_size": self.batch_size,
+            "seq_lens": self._safe_tensor_to_list(self.seq_lens),
+            "seq_lens_cpu": self._safe_tensor_to_list(self.seq_lens_cpu),
+            "input_ids": self._safe_tensor_to_list(self.input_ids),
+            "positions": self._safe_tensor_to_list(self.positions),
+            "mm_inputs": self._serialize_mm_inputs(),
+            "extra": extra or {},
+        }
+        with open(filename, "wb") as f:
+            pickle.dump(payload, f)
+
+    def record_bad_activation(
+        self,
+        tensor: Optional[torch.Tensor],
+        stage: str,
+        layer_id: Optional[int] = None,
+        model: Optional[str] = None,
+    ) -> None:
+        if not self.should_dump or self.bad_activation_info is not None:
+            return
+        if tensor is None or not isinstance(tensor, torch.Tensor):
+            return
+        if not torch.is_floating_point(tensor) or tensor.numel() == 0:
+            return
+        has_nan = bool(torch.isnan(tensor).any().item())
+        all_zero = False
+        if not has_nan:
+            all_zero = bool(torch.all(tensor == 0).item())
+        if not (has_nan or all_zero):
+            return
+        self.bad_activation_info = {
+            "reason": "activation_nan_or_zero",
+            "stage": stage,
+            "layer_id": layer_id,
+            "model": model,
+            "has_nan": has_nan,
+            "all_zero": all_zero,
+            "shape": list(tensor.shape),
+            "dtype": str(tensor.dtype),
+        }
+
     @classmethod
     def init_new(
         cls,
@@ -419,6 +562,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             tbo_split_seq_index=batch.tbo_split_seq_index,
             dimensions=batch.dimensions,
             return_hidden_states_before_norm=batch.return_hidden_states_before_norm,
+            should_dump=bool(model_runner.server_args.should_dump_glm45v),
         )
         device = model_runner.device
 
