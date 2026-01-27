@@ -235,6 +235,14 @@ def _is_deepseek_ocr_model(config: PretrainedConfig) -> bool:
     )
 
 
+def _is_deepseek_ocr_2_model(config: PretrainedConfig) -> bool:
+    return (
+        getattr(config, "auto_map", None) is not None
+        and config.auto_map.get("AutoModel")
+        == "modeling_deepseekocr2.DeepseekOCR2ForCausalLM"
+    )
+
+
 def _override_deepseek_ocr_v_head_dim(config: DeepseekVLV2Config) -> None:
     # FIXME: deepseek-ocr's v_head_dim is set to 0 in its config file.
     # https://huggingface.co/deepseek-ai/DeepSeek-OCR/blob/main/config.json#L116
@@ -313,10 +321,12 @@ def get_config(
     if config.model_type in _CONFIG_REGISTRY:
         model_type = config.model_type
         if model_type == "deepseek_vl_v2":
-            if _is_deepseek_ocr_model(config):
+            if _is_deepseek_ocr_model(config) or _is_deepseek_ocr_2_model(config):
                 model_type = "deepseek-ocr"
         config_class = _CONFIG_REGISTRY[model_type]
         config = config_class.from_pretrained(model, revision=revision)
+        if _is_deepseek_ocr_2_model(config):
+            model_type = "deepseek-ocr-2"
 
         if _is_deepseek_ocr_model(config):
             _override_deepseek_ocr_v_head_dim(config)
@@ -543,6 +553,9 @@ def get_processor(
     if _is_deepseek_ocr_model(config):
         # Temporary hack for load deepseek-ocr
         config.model_type = "deepseek-ocr"
+    if _is_deepseek_ocr_2_model(config):
+        # Temporary hack for load deepseek-ocr-2
+        config.model_type = "deepseek-ocr-2"
 
     # fix: for Qwen2-VL and Sarashina2Vision models, inject default 'size' if not provided.
     if config.model_type in {"qwen2_vl", "sarashina2_vision"}:

@@ -1117,7 +1117,10 @@ def match_phi_4_mm(model_path: str):
 
 @register_conv_template_matching_function
 def match_deepseek_ocr(model_path: str):
-    if "deepseek-ocr" in model_path.lower():
+    if (
+        "deepseek-ocr" in model_path.lower()
+        and "deepseek-ocr-2" not in model_path.lower()
+    ):
         return "deepseek-ocr"
     model_type = get_model_type(model_path)
     return MODEL_TYPE_TO_TEMPLATE.get(model_type)
