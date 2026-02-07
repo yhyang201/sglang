@@ -338,7 +338,9 @@ class ColumnParallelLinear(LinearBase):
 
         if output_sizes is None:
             output_sizes = [output_size]
-
+        print(
+            f"341 {self.quant_method=}, {self.input_size=}, {self.output_partition_sizes=}, {self.output_size=}"
+        )
         self.quant_method.create_weights(
             layer=self,
             input_size_per_partition=self.input_size,
