@@ -708,7 +708,7 @@ class KimiK25ForConditionalGeneration(nn.Module):
 
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]], is_nextn=False):
         """Load weights for the model, separating vision and language weights"""
         weights = list(weights)
 
@@ -741,7 +741,7 @@ class KimiK25ForConditionalGeneration(nn.Module):
 
         # Load language model weights
         if language_weights:
-            self.language_model.load_weights(language_weights)
+            self.language_model.load_weights(language_weights, is_nextn)
 
 
 EntryClass = [KimiK25ForConditionalGeneration]
