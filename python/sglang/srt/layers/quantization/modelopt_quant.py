@@ -278,8 +278,9 @@ class ModelOptQuantConfig(QuantizationConfig):
         import traceback
 
         traceback.print_stack()
-        print(f"{self.exclude_module=}")
         self.exclude_modules = exclude_modules or []
+        print(f"{self.exclude_module=}")
+
         self.kv_cache_quant_algo = kv_cache_quant_algo
 
     def _get_quant_method(
