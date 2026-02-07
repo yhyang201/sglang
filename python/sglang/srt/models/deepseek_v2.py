@@ -1180,6 +1180,7 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
             tp_rank=attn_tp_rank,
             tp_size=attn_tp_size,
         )
+        print(f"1183 {self.kv_b_proj.weight.shape}")
         # O projection.
         self.o_proj = RowParallelLinear(
             self.num_heads * self.v_head_dim,
