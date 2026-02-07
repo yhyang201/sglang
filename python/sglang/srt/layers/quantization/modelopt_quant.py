@@ -275,6 +275,10 @@ class ModelOptQuantConfig(QuantizationConfig):
     ):
         super().__init__()
         self.packed_modules_mapping = packed_modules_mapping
+        import traceback
+
+        traceback.print_stack()
+        print(f"{self.exclude_module=}")
         self.exclude_modules = exclude_modules or []
         self.kv_cache_quant_algo = kv_cache_quant_algo
 
