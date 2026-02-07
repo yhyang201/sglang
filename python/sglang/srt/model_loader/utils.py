@@ -176,8 +176,8 @@ def maybe_executor_submit(
     """
     from sglang.srt.distributed import get_tensor_model_parallel_rank
 
-    if get_tensor_model_parallel_rank() and name != "" and func_kwargs is not None:
-        print(f"name: {name}, {func_kwargs[0].shape=}")
+    if get_tensor_model_parallel_rank() and name == "186":
+        print(f"name: {name}, {func_kwargs=}")
     if func_kwargs is None:
         func_kwargs = {}
     if use_async:
