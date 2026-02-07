@@ -362,7 +362,7 @@ class DeepseekV2WeightLoaderMixin:
                                 futures=futures,
                                 use_async=use_async_loading,
                                 func=weight_loader,
-                                func_args=(name, param, loaded_weight),
+                                func_args=(param, loaded_weight),
                             )
 
             # Wait for all tasks to complete and raise any exceptions.
