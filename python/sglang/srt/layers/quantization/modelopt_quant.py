@@ -1093,6 +1093,8 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
 
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
+        print(f"1096 {output_size_per_partition=} {input_size_per_partition=}")
+        print(f"1097 {weight_loader=}")
 
         layer.logical_widths = output_partition_sizes
 
