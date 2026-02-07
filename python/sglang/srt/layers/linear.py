@@ -314,10 +314,10 @@ class ColumnParallelLinear(LinearBase):
         use_presharded_weights: bool = False,
         skip_block_quant_check: bool = False,
     ):
+        print(f"320 {self.quant_config=}")
         super().__init__(
             input_size, output_size, skip_bias_add, params_dtype, quant_config, prefix
         )
-        print(f"320 {self.quant_method.__class__.__name__=}")
         self.gather_output = gather_output
         self.use_presharded_weights = use_presharded_weights
 
