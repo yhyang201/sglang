@@ -156,6 +156,7 @@ def should_async_load(weight: torch.Tensor) -> bool:
 
 def maybe_executor_submit(
     *,
+    name,
     executor: concurrent.futures.ThreadPoolExecutor,
     futures: List[concurrent.futures.Future],
     use_async: bool,
