@@ -314,7 +314,7 @@ class ColumnParallelLinear(LinearBase):
         use_presharded_weights: bool = False,
         skip_block_quant_check: bool = False,
     ):
-        print(f"320 {self.quant_config=}")
+        print(f"320 {quant_config=}")
         super().__init__(
             input_size, output_size, skip_bias_add, params_dtype, quant_config, prefix
         )
