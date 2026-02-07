@@ -179,5 +179,4 @@ def maybe_executor_submit(
     if use_async:
         futures.append(executor.submit(func, *func_args, **func_kwargs))
     else:
-        print(f"182 {name=}")
         func(*func_args, **func_kwargs)
