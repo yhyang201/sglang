@@ -252,6 +252,8 @@ def get_quant_config(
     quant_config_file = quant_config_files[0]
     with open(quant_config_file) as f:
         config = json.load(f)
+        print(f"255 {config=}")
+        exit(0)
         if remap_prefix is not None:
             exclude_modules = [
                 replace_prefix(key, remap_prefix)
