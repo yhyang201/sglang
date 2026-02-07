@@ -1040,6 +1040,7 @@ class ModelOptFp4Config(ModelOptQuantConfig):
             regex_str = pattern.replace(".", r"\.").replace("*", r".*")
             pattern_split = pattern.split(".")
             if re.fullmatch(regex_str, prefix):
+                print(f"1043 fullmatch {regex_str=}, {prefix=}")
                 return True
             elif (
                 pattern_split[-1] in fused_patterns
@@ -1049,6 +1050,8 @@ class ModelOptFp4Config(ModelOptQuantConfig):
                 # This handles fused modules like fused_qkv_a_proj_with_mqa that contain q_a_proj and kv_a_proj_with_mqa
                 # e.g., model.layers.{i}.self_attn.{fused_weight_name}
                 assert len(prefix_split) == 5 and len(pattern_split) == 5
+                print(f"1053 fused {pattern_split[-1]=}, {prefix_split[-1]=}")
+                print(f"1054 {fused_patterns=}")
                 return True
         return False
 
