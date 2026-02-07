@@ -289,6 +289,10 @@ class ModelOptQuantConfig(QuantizationConfig):
         from sglang.srt.layers.linear import LinearBase
         from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
 
+        print(
+            f"291 {is_layer_skipped(prefix, self.exclude_modules, self.packed_modules_mapping)=}"
+        )
+        print(f"292 {self.is_layer_excluded(prefix)=}")
         if isinstance(layer, LinearBase):
             if is_layer_skipped(
                 prefix, self.exclude_modules, self.packed_modules_mapping
