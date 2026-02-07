@@ -353,6 +353,7 @@ class DeepseekV2WeightLoaderMixin:
                             weight_loader = getattr(
                                 param, "weight_loader", default_weight_loader
                             )
+                            print(f"{name=}, {param.shape=}, {loaded_weight.shape=}")
                             maybe_executor_submit(
                                 name=name,
                                 executor=executor,
