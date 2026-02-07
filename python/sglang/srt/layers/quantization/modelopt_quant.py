@@ -1035,6 +1035,7 @@ class ModelOptFp4Config(ModelOptQuantConfig):
 
         fused_patterns = ["q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "kv_b_proj"]
         prefix_split = prefix.split(".")
+        print(f"1038 {prefix_split=}")
         for pattern in self.exclude_modules:
             regex_str = pattern.replace(".", r"\.").replace("*", r".*")
             pattern_split = pattern.split(".")
