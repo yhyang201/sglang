@@ -423,6 +423,7 @@ class ColumnParallelLinear(LinearBase):
             assert loaded_weight.numel() == 1
             loaded_weight = loaded_weight.reshape(1)
 
+        print(f"{param.shape=}")
         if isinstance(param, _ColumnvLLMParameter):
             param.load_column_parallel_weight(
                 loaded_weight,
