@@ -137,10 +137,30 @@ class KimiK25Config(PretrainedConfig):
         video_placeholder: str = "<|kimi_k25_video_placeholder|>",
         **kwargs,
     ):
+        # Text (LLM) config.
+        #
+        # Ideally, KimiK25's `config.json` should provide a nested `text_config`
+        # that fully specifies the DeepSeek-V3 config. However, some checkpoints
+        # store LLM fields at the top level (or omit `text_config`), which would
+        # otherwise fall back to the tiny default DeepseekV3Config() (e.g.,
+        # hidden_size=256) and cause shape mismatches when loading real weights.
         if text_config is None:
+            inferred = {}
+            try:
+                allowed = set(DeepseekV3Config().to_dict().keys())
+                inferred = {k: v for k, v in kwargs.items() if k in allowed}
+            except Exception:
+                inferred = {}
+
             text_config = DeepseekV3Config()
+            if inferred:
+                # `update` is tolerant to partial/extra fields.
+                text_config.update(inferred)
         elif isinstance(text_config, dict):
-            text_config = DeepseekV3Config(**text_config)
+            # Be tolerant to extra keys in the dict by using `update`.
+            base = DeepseekV3Config()
+            base.update(text_config)
+            text_config = base
 
         if vision_config is None:
             vision_config = KimiK25VisionConfig()

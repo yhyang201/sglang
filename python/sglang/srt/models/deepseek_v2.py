@@ -1167,7 +1167,10 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
                 layer_id=layer_id,
                 alt_stream=alt_stream,
             )
-
+        print(f"self.kv_lora_rank: {self.kv_lora_rank}")
+        print(
+            f"self.num_heads * (self.qk_nope_head_dim + self.v_head_dim): {self.num_heads * (self.qk_nope_head_dim + self.v_head_dim)}"
+        )
         self.kv_b_proj = ColumnParallelLinear(
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
