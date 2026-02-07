@@ -220,7 +220,7 @@ class DeepseekV2WeightLoaderMixin:
                     param = params_dict[name]
                     weight_loader = param.weight_loader
                     maybe_executor_submit(
-                        name=name,
+                        name="",
                         executor=executor,
                         futures=futures,
                         use_async=use_async_loading,
@@ -241,7 +241,7 @@ class DeepseekV2WeightLoaderMixin:
                         param = params_dict[name]
                         weight_loader = param.weight_loader
                         maybe_executor_submit(
-                            name=name,
+                            name="",
                             executor=executor,
                             futures=futures,
                             use_async=use_async_loading,
@@ -323,7 +323,7 @@ class DeepseekV2WeightLoaderMixin:
                                     param, "weight_loader", default_weight_loader
                                 )
                                 maybe_executor_submit(
-                                    name=name,
+                                    name="",
                                     executor=executor,
                                     futures=futures,
                                     use_async=use_async_loading,

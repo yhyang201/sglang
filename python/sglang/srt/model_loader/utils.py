@@ -174,6 +174,10 @@ def maybe_executor_submit(
     - func_args: positional args for the callable (defaults to empty tuple)
     - func_kwargs: keyword args for the callable (defaults to empty dict)
     """
+    from sglang.srt.distributed import get_tensor_model_parallel_rank
+
+    if get_tensor_model_parallel_rank() and name != "":
+        print(f"name: {name}, {func_kwargs[0].shape=}")
     if func_kwargs is None:
         func_kwargs = {}
     if use_async:
