@@ -2768,6 +2768,7 @@ class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
+        print(f"2771 {quant_config=}")
         super().__init__()
 
         # for quark model load
