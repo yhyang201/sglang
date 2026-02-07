@@ -22,6 +22,7 @@ import torch.nn as nn
 import tqdm
 from transformers import PretrainedConfig
 
+from sglang.srt.distributed import get_tensor_model_parallel_rank
 from sglang.srt.distributed.parallel_state import GroupCoordinator
 from sglang.srt.environ import envs
 from sglang.srt.layers import deep_gemm_wrapper
@@ -149,6 +150,8 @@ class DeepseekV2WeightLoaderMixin:
             for name, loaded_weight in weights:
                 use_async_loading = should_async_load(loaded_weight)
                 use_async_loading = False
+                if get_tensor_model_parallel_rank() == 0:
+                    print(f"{name=}", flush=True)
                 layer_id = get_layer_id(name)
                 if (
                     layer_id is not None
