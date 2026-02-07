@@ -869,6 +869,9 @@ class ModelOptFp4Config(ModelOptQuantConfig):
         exclude_modules: List[str] = None,
         packed_modules_mapping: Optional[Dict[str, List[str]]] = None,
     ) -> None:
+        print(
+            f"872 {is_checkpoint_nvfp4_serialized=} {kv_cache_quant_algo=} {group_size=} {exclude_modules=} {packed_modules_mapping=}"
+        )
         super().__init__(kv_cache_quant_algo, exclude_modules, packed_modules_mapping)
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
         if is_checkpoint_nvfp4_serialized:
