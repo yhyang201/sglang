@@ -416,7 +416,7 @@ class ColumnParallelLinear(LinearBase):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-    def weight_loader_v2(self, name, param: Parameter, loaded_weight: torch.Tensor):
+    def weight_loader_v2(self, param: Parameter, loaded_weight: torch.Tensor):
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
         if len(loaded_weight.shape) == 0:
