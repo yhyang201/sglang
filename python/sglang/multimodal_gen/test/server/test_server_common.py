@@ -35,8 +35,15 @@ from sglang.multimodal_gen.test.server.testcase_configs import (
 )
 from sglang.multimodal_gen.test.test_utils import (
     _consistency_gt_filenames,
+    _get_consistency_gt_dir,
+    compare_with_gt,
     extract_key_frames_from_video,
+    get_clip_threshold,
+    get_consistency_gt_candidates,
     get_dynamic_server_port,
+    gt_exists,
+    image_bytes_to_numpy,
+    load_gt_embeddings,
     wait_for_req_perf_record,
 )
 
@@ -416,6 +423,120 @@ Consider updating perf_baselines.json with the snippets below:
 
 """
         logger.error(output)
+
+    def _validate_consistency(
+        self,
+        case: DiffusionTestCase,
+        content: bytes,
+    ) -> None:
+        """Validate output consistency against ground truth using CLIP similarity.
+
+        Args:
+            case: Test case configuration
+            content: Generated content bytes (image or video)
+
+        Raises:
+            pytest.fail: If consistency check fails (GT exists but doesn't match)
+
+        Note:
+            If GT doesn't exist, the test is skipped (not failed) with a message
+            to run the GT generation workflow after PR is merged.
+
+        Environment Variables:
+            SGLANG_SKIP_CONSISTENCY: Set to "1" to skip consistency checks
+        """
+        # Allow skipping consistency checks for debugging/development
+        if os.environ.get("SGLANG_SKIP_CONSISTENCY", "0") == "1":
+            logger.info(
+                f"[Consistency] Skipping consistency check for {case.id} (SGLANG_SKIP_CONSISTENCY=1)"
+            )
+            return
+
+        # Skip if content is empty (e.g., video generation timed out)
+        if not content:
+            logger.warning(
+                f"[Consistency] Skipping consistency check for {case.id}: "
+                "content is empty (generation may have timed out)"
+            )
+            return
+
+        num_gpus = case.server_args.num_gpus
+        is_video = case.server_args.modality == "video"
+
+        # Check GT exists - if not, fail with instructions to add image(s) to sgl-test-files
+        output_format = case.sampling_params.output_format
+        if not gt_exists(
+            case.id, num_gpus, is_video=is_video, output_format=output_format
+        ):
+            if _get_consistency_gt_dir() is not None:
+                names = ", ".join(
+                    get_consistency_gt_candidates(
+                        case.id, num_gpus, is_video, output_format
+                    )
+                )
+            else:
+                names = ", ".join(
+                    _consistency_gt_filenames(
+                        case.id, num_gpus, is_video, output_format
+                    )
+                )
+            error_msg = f"""
+--- MISSING GROUND TRUTH DETECTED ---
+GT image(s) not found for '{case.id}'.
+
+Add the expected file(s) to sgl-test-files in diffusion-ci/consistency_gt/ with naming (n=num_gpus).
+  Image: {case.id}_{{n}}gpu.<ext> (ext from output_format: png, jpg, webp)
+  Video: {case.id}_{{n}}gpu_frame_0.png, {case.id}_{{n}}gpu_frame_mid.png, {case.id}_{{n}}gpu_frame_last.png
+
+For this case, expected file(s): {names}
+
+Repository: https://github.com/sgl-project/sgl-test-files (path: diffusion-ci/consistency_gt/)
+
+(Optional) Per-case override in consistency_threshold.json: "cases": {{ "{case.id}": {{ "clip_threshold": 0.92 }} }}
+"""
+            logger.error(error_msg)
+            pytest.fail(
+                f"GT not found for {case.id}. See logs for instructions to add GT."
+            )
+
+        # Load GT embeddings (format matches case; PIL converts to RGB for CLIP)
+        gt_embeddings = load_gt_embeddings(
+            case.id, num_gpus, is_video=is_video, output_format=output_format
+        )
+
+        # Convert output to frames
+        if is_video:
+            output_frames = extract_key_frames_from_video(content)
+        else:
+            output_frames = [image_bytes_to_numpy(content)]
+
+        threshold = get_clip_threshold(case)
+
+        # Compare frames with GT embeddings using CLIP similarity
+        result = compare_with_gt(
+            output_frames=output_frames,
+            gt_embeddings=gt_embeddings,
+            threshold=threshold,
+            case_id=case.id,
+        )
+
+        if not result.passed:
+            # Build detailed failure message
+            failed_frames = [
+                f"  Frame {d['frame_index']}: similarity={d['similarity']:.4f}"
+                for d in result.frame_details
+                if not d["passed"]
+            ]
+            pytest.fail(
+                f"Consistency check failed for {case.id}:\n"
+                f"  Min similarity: {result.min_similarity:.4f}\n"
+                f"  Threshold: {result.threshold}\n"
+                f"  Failed frames:\n" + "\n".join(failed_frames)
+            )
+
+        logger.info(
+            f"[Consistency] {case.id}: PASSED (min_similarity={result.min_similarity:.4f})"
+        )
 
     def _save_gt_output(
         self,
@@ -873,6 +994,9 @@ Consider updating perf_baselines.json with the snippets below:
         # Test /v1/models endpoint for router compatibility
         self._test_v1_models_endpoint(diffusion_server, case)
         self._test_t2v_rejects_input_reference(diffusion_server, case)
+
+        # Validation 2: Consistency (reuse the same content)
+        self._validate_consistency(case, content)
 
         # LoRA API functionality test with E2E validation (only for LoRA-enabled cases)
         if case.server_args.lora_path or case.server_args.dynamic_lora_path:
