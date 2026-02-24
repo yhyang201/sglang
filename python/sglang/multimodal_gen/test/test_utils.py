@@ -6,10 +6,13 @@ import os
 import socket
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
+import requests
 from PIL import Image
 
 from sglang.multimodal_gen.runtime.utils.common import get_bool_env_var
@@ -18,8 +21,19 @@ from sglang.multimodal_gen.runtime.utils.perf_logger import (
     RequestPerfRecord,
     get_diffusion_perf_log_dir,
 )
+from sglang.multimodal_gen.test.server.testcase_configs import DiffusionTestCase
 
 logger = init_logger(__name__)
+
+# --- Consistency testing: GT from sgl-test-files or local SGLANG_CONSISTENCY_GT_DIR ---
+SGL_TEST_FILES_CONSISTENCY_GT_BASE = "https://raw.githubusercontent.com/sgl-project/sgl-test-files/main/diffusion-ci/consistency_gt"
+CONSISTENCY_THRESHOLD_JSON_PATH = (
+    Path(__file__).resolve().parent / "server" / "consistency_threshold.json"
+)
+CLIP_MODEL_NAME = "openai/clip-vit-large-patch14"
+DEFAULT_CLIP_THRESHOLD_IMAGE = 0.92
+DEFAULT_CLIP_THRESHOLD_VIDEO = 0.90
+_clip_model_cache: dict[str, Any] = {}
 
 
 def is_image_url(image_path: str | Path | None) -> bool:
@@ -459,3 +473,314 @@ def image_bytes_to_numpy(image_bytes: bytes) -> np.ndarray:
     """Convert image bytes to numpy array."""
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     return np.array(img)
+
+
+# --- Consistency testing (GT from sgl-test-files, embeddings computed on the fly) ---
+
+
+def _load_threshold_json() -> dict[str, Any]:
+    """Load consistency_threshold.json; returns {} if missing."""
+    if not CONSISTENCY_THRESHOLD_JSON_PATH.exists():
+        return {}
+    with CONSISTENCY_THRESHOLD_JSON_PATH.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def get_clip_threshold(
+    case: DiffusionTestCase,
+    metadata: dict[str, Any] | None = None,
+) -> float:
+    """
+    Get CLIP similarity threshold for a consistency test case.
+    Uses consistency_threshold.json: default_clip_threshold_image/video and
+    optional per-case override in cases.<case_id>.clip_threshold.
+    """
+    if metadata is None:
+        metadata = _load_threshold_json()
+    case_meta = metadata.get("cases", {}).get(case.id, {})
+    is_video = case.server_args.modality == "video"
+    default = (
+        metadata.get("default_clip_threshold_video", DEFAULT_CLIP_THRESHOLD_VIDEO)
+        if is_video
+        else metadata.get("default_clip_threshold_image", DEFAULT_CLIP_THRESHOLD_IMAGE)
+    )
+    return float(case_meta.get("clip_threshold", default))
+
+
+@dataclass
+class ConsistencyResult:
+    """Result of a consistency comparison."""
+
+    case_id: str
+    passed: bool
+    similarity_scores: list[float]
+    min_similarity: float
+    threshold: float
+    frame_details: list[dict[str, Any]]
+
+
+def get_clip_model() -> tuple[Any, Any]:
+    """
+    Get CLIP model and processor (lazy loading with singleton pattern).
+
+    Returns:
+        Tuple of (model, processor)
+
+    Raises:
+        ImportError: If transformers is not installed
+    """
+    global _clip_model_cache
+
+    if "model" not in _clip_model_cache:
+        try:
+            import torch
+            from transformers import CLIPModel, CLIPProcessor
+        except ImportError:
+            raise ImportError(
+                "transformers and torch are required for CLIP consistency check. "
+                "Install with: pip install transformers torch"
+            )
+
+        logger.info(f"Loading CLIP model: {CLIP_MODEL_NAME}")
+        processor = CLIPProcessor.from_pretrained(CLIP_MODEL_NAME)
+        model = CLIPModel.from_pretrained(CLIP_MODEL_NAME)
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = model.to(device)
+        model.eval()
+
+        _clip_model_cache["model"] = model
+        _clip_model_cache["processor"] = processor
+        _clip_model_cache["device"] = device
+        logger.info(f"CLIP model loaded on {device}")
+
+    return _clip_model_cache["model"], _clip_model_cache["processor"]
+
+
+def compute_clip_embedding(image: np.ndarray) -> np.ndarray:
+    """
+    Compute CLIP embedding for a single image.
+
+    Args:
+        image: numpy array (H, W, C) in RGB format
+
+    Returns:
+        768-dimensional numpy array (L2 normalized)
+    """
+    try:
+        import torch
+    except ImportError:
+        raise ImportError(
+            "torch is required for CLIP consistency check. "
+            "Install with: pip install torch"
+        )
+
+    model, processor = get_clip_model()
+    device = _clip_model_cache["device"]
+
+    pil_image = Image.fromarray(image)
+    inputs = processor(images=pil_image, return_tensors="pt")
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+
+    with torch.no_grad():
+        image_features = model.get_image_features(**inputs)
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
+    return image_features.cpu().numpy().flatten()
+
+
+def compute_clip_similarity(emb1: np.ndarray, emb2: np.ndarray) -> float:
+    """
+    Compute cosine similarity between two CLIP embeddings.
+    """
+    similarity = np.dot(emb1, emb2)
+    return float(similarity)
+
+
+def get_consistency_gt_candidates(
+    case_id: str, num_gpus: int, is_video: bool, output_format: str | None = None
+) -> list[str]:
+    """Return list of GT filenames to try when using SGLANG_CONSISTENCY_GT_DIR.
+
+    For image: [base.png, base.jpg, base.webp] in preferred-first order so that
+    GT can be stored as .png, .jpg, or .webp. For video: the 3 frame filenames
+    (no extension fallback).
+    """
+    n = num_gpus
+    if is_video:
+        return [
+            f"{case_id}_{n}gpu_frame_0.png",
+            f"{case_id}_{n}gpu_frame_mid.png",
+            f"{case_id}_{n}gpu_frame_last.png",
+        ]
+    base = f"{case_id}_{n}gpu"
+    preferred = output_format_to_ext(output_format)
+    exts = [preferred] + [e for e in ("png", "jpg", "webp") if e != preferred]
+    return [f"{base}.{e}" for e in exts]
+
+
+def _get_consistency_gt_dir() -> Path | None:
+    """If SGLANG_CONSISTENCY_GT_DIR is set, return that Path; else None (use remote)."""
+    d = os.environ.get("SGLANG_CONSISTENCY_GT_DIR")
+    if not d:
+        return None
+    return Path(d).resolve()
+
+
+def load_gt_embeddings(
+    case_id: str,
+    num_gpus: int,
+    is_video: bool = False,
+    output_format: str | None = None,
+) -> list[np.ndarray]:
+    """
+    Load ground truth by downloading image(s) from sgl-test-files or reading from
+    SGLANG_CONSISTENCY_GT_DIR, then compute CLIP embeddings.
+    Format (png/jpg/webp) follows case output_format; PIL converts to RGB for CLIP.
+    """
+    filenames = _consistency_gt_filenames(case_id, num_gpus, is_video, output_format)
+    embeddings = []
+
+    gt_dir = _get_consistency_gt_dir()
+    if gt_dir is not None:
+        candidates = get_consistency_gt_candidates(
+            case_id, num_gpus, is_video, output_format
+        )
+        if is_video:
+            for fn in candidates:
+                path = gt_dir / fn
+                if not path.exists():
+                    raise FileNotFoundError(f"GT image not found: {path}")
+                arr = np.array(Image.open(path).convert("RGB"))
+                emb = compute_clip_embedding(arr)
+                embeddings.append(emb)
+        else:
+            path = None
+            for fn in candidates:
+                p = gt_dir / fn
+                if p.exists():
+                    path = p
+                    break
+            if path is None:
+                raise FileNotFoundError(
+                    f"GT image not found in {gt_dir}. Tried: {', '.join(candidates)}"
+                )
+            arr = np.array(Image.open(path).convert("RGB"))
+            emb = compute_clip_embedding(arr)
+            embeddings.append(emb)
+        logger.info(
+            f"Loaded {len(embeddings)} GT embeddings for {case_id} from {gt_dir}"
+        )
+    else:
+        for fn in filenames:
+            url = f"{SGL_TEST_FILES_CONSISTENCY_GT_BASE}/{fn}"
+            resp = requests.get(url, timeout=30)
+            if resp.status_code != 200:
+                raise FileNotFoundError(f"GT image not found: {url}")
+
+            arr = np.array(Image.open(io.BytesIO(resp.content)).convert("RGB"))
+            emb = compute_clip_embedding(arr)
+            embeddings.append(emb)
+
+        logger.info(
+            f"Loaded {len(embeddings)} GT embeddings for {case_id} from sgl-test-files"
+        )
+    return embeddings
+
+
+def gt_exists(
+    case_id: str,
+    num_gpus: int,
+    is_video: bool = False,
+    output_format: str | None = None,
+) -> bool:
+    """Check if GT image(s) exist (sgl-test-files or SGLANG_CONSISTENCY_GT_DIR)."""
+    gt_dir = _get_consistency_gt_dir()
+    if gt_dir is not None:
+        candidates = get_consistency_gt_candidates(
+            case_id, num_gpus, is_video, output_format
+        )
+        if is_video:
+            return all((gt_dir / c).exists() for c in candidates)
+        return any((gt_dir / c).exists() for c in candidates)
+
+    filenames = _consistency_gt_filenames(case_id, num_gpus, is_video, output_format)
+    fn = filenames[0]
+    url = f"{SGL_TEST_FILES_CONSISTENCY_GT_BASE}/{fn}"
+    try:
+        r = requests.head(url, timeout=10)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def compare_with_gt(
+    output_frames: list[np.ndarray],
+    gt_embeddings: list[np.ndarray],
+    threshold: float,
+    case_id: str,
+) -> ConsistencyResult:
+    """
+    Compare output frames with ground truth embeddings using CLIP similarity.
+    """
+    if len(output_frames) != len(gt_embeddings):
+        raise ValueError(
+            f"Frame count mismatch: output={len(output_frames)}, gt={len(gt_embeddings)}"
+        )
+
+    similarity_scores = []
+    frame_details = []
+
+    for i, (out_frame, gt_emb) in enumerate(zip(output_frames, gt_embeddings)):
+        out_emb = compute_clip_embedding(out_frame)
+        similarity = compute_clip_similarity(out_emb, gt_emb)
+        similarity_scores.append(similarity)
+        frame_details.append(
+            {
+                "frame_index": i,
+                "similarity": similarity,
+                "passed": similarity >= threshold,
+                "output_shape": out_frame.shape,
+            }
+        )
+
+    min_similarity = min(similarity_scores)
+    passed = all(s >= threshold for s in similarity_scores)
+
+    result = ConsistencyResult(
+        case_id=case_id,
+        passed=passed,
+        similarity_scores=similarity_scores,
+        min_similarity=min_similarity,
+        threshold=threshold,
+        frame_details=frame_details,
+    )
+
+    status = "PASSED" if passed else "FAILED"
+    print(f"\n{'='*60}")
+    print(f"[CLIP Consistency] {case_id}: {status}")
+    print(f"  Threshold: {threshold}")
+    print(f"  Min similarity: {min_similarity:.4f}")
+    print(f"  Frame details:")
+    for detail in frame_details:
+        frame_status = "✓" if detail["passed"] else "✗"
+        print(
+            f"    Frame {detail['frame_index']}: similarity={detail['similarity']:.4f} {frame_status}"
+        )
+    print(f"{'='*60}\n")
+
+    if passed:
+        logger.info(
+            f"[Consistency] {case_id}: PASSED (min_similarity={min_similarity:.4f}, threshold={threshold})"
+        )
+    else:
+        logger.error(
+            f"[Consistency] {case_id}: FAILED (min_similarity={min_similarity:.4f}, threshold={threshold})"
+        )
+        for detail in frame_details:
+            if not detail["passed"]:
+                logger.error(
+                    f"  Frame {detail['frame_index']}: similarity={detail['similarity']:.4f} < {threshold}"
+                )
+
+    return result
