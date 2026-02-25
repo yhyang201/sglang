@@ -136,8 +136,11 @@ class KDAAttnBackend(MambaAttnBackendBase):
         b: torch.Tensor,
         **kwargs,
     ):
-        assert isinstance(mixed_qkv, Tuple)
-        q_proj_states, k_proj_states, v_proj_states = mixed_qkv
+        q_proj_states, k_proj_states, v_proj_states = torch.split(
+            mixed_qkv,
+            [layer.q_dim, layer.k_dim, layer.v_dim],
+            dim=-1,
+        )
         q_conv_weights, k_conv_weights, v_conv_weights = layer.conv_weights
         q_conv_bias, k_conv_bias, v_conv_bias = layer.bias
 
@@ -202,8 +205,11 @@ class KDAAttnBackend(MambaAttnBackendBase):
         b: torch.Tensor,
         **kwargs,
     ):
-        assert isinstance(mixed_qkv, Tuple)
-        q_proj_states, k_proj_states, v_proj_states = mixed_qkv
+        q_proj_states, k_proj_states, v_proj_states = torch.split(
+            mixed_qkv,
+            [layer.q_dim, layer.k_dim, layer.v_dim],
+            dim=-1,
+        )
         q_conv_weights, k_conv_weights, v_conv_weights = layer.conv_weights
         q_conv_bias, k_conv_bias, v_conv_bias = layer.bias
 
