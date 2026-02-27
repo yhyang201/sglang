@@ -901,7 +901,7 @@ def get_generate_fn(
     def generate_image_edit_url(case_id, client) -> tuple[str, bytes]:
         """TI2I: Text + Image ? Image edit using direct URL transfer (no pre-download)."""
         if not sampling_params.prompt or not sampling_params.image_path:
-            pytest.skip(f"{id}: no edit config")
+            pytest.skip(f"{case_id}: no edit config")
         # Handle both single URL and list of URLs
         image_urls = sampling_params.image_path
         if not isinstance(image_urls, list):
@@ -911,7 +911,7 @@ def get_generate_fn(
         for url in image_urls:
             if not is_image_url(url):
                 pytest.skip(
-                    f"{id}: image_path must be a URL for URL direct test: {url}"
+                    f"{case_id}: image_path must be a URL for URL direct test: {url}"
                 )
 
         # Request parameters that affect output format
@@ -1018,7 +1018,7 @@ def get_generate_fn(
 
     def generate_text_url_image_to_video(case_id, client) -> tuple[str, bytes]:
         if not sampling_params.prompt or not sampling_params.image_path:
-            pytest.skip(f"{id}: no edit config")
+            pytest.skip(f"{case_id}: no edit config")
 
         # Build extra_body for optional features
         extra_body = {"reference_url": sampling_params.image_path}
