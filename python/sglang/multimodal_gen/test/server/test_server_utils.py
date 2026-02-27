@@ -647,7 +647,7 @@ def get_generate_fn(
     model_path: str,
     modality: str,
     sampling_params: DiffusionSamplingParams,
-) -> Callable[[str, Client], str]:
+) -> Callable[[str, Client], tuple[str, bytes]]:
     """Return appropriate generation function for the case."""
     # Allow override via environment variable (useful for AMD where large resolutions cause slow VAE)
     output_size = os.environ.get("SGLANG_TEST_OUTPUT_SIZE", sampling_params.output_size)
@@ -898,7 +898,7 @@ def get_generate_fn(
 
         return (rid, img_data)
 
-    def generate_image_edit_url(case_id, client) -> str:
+    def generate_image_edit_url(case_id, client) -> tuple[str, bytes]:
         """TI2I: Text + Image ? Image edit using direct URL transfer (no pre-download)."""
         if not sampling_params.prompt or not sampling_params.image_path:
             pytest.skip(f"{id}: no edit config")
@@ -967,7 +967,7 @@ def get_generate_fn(
 
         return (rid, img_data)
 
-    def generate_video(case_id, client) -> str:
+    def generate_video(case_id, client) -> tuple[str, bytes]:
         """T2V: Text ? Video."""
         if not sampling_params.prompt:
             pytest.skip(f"{case_id}: no text prompt configured")
@@ -1016,7 +1016,7 @@ def get_generate_fn(
                 extra_body=extra_body if extra_body else None,
             )
 
-    def generate_text_url_image_to_video(case_id, client) -> str:
+    def generate_text_url_image_to_video(case_id, client) -> tuple[str, bytes]:
         if not sampling_params.prompt or not sampling_params.image_path:
             pytest.skip(f"{id}: no edit config")
 
