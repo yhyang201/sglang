@@ -1,4 +1,4 @@
-name: Diffusion CI Generation
+name: Diffusion CI Ground Truth Generation
 
 on:
   workflow_dispatch:
@@ -15,7 +15,7 @@ on:
         type: string
 
 concurrency:
-  group: diffusion-ci-gen-${{ github.ref }}
+  group: diffusion-ci-gt-gen-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
