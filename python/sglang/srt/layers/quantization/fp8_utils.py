@@ -184,7 +184,10 @@ if is_blackwell_supported() and is_flashinfer_available():
 
 if is_sm90_supported() and is_flashinfer_available():
     # FlashInfer SM90 DeepGEMM with automatic swapAB optimization for small M
-    from flashinfer.gemm import fp8_blockscale_gemm_sm90
+    try:
+        from flashinfer.gemm import fp8_blockscale_gemm_sm90
+    except ImportError:
+        fp8_blockscale_gemm_sm90 = None
 
 
 def dispatch_w8a8_block_fp8_linear() -> Callable:

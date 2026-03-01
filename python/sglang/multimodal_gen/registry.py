@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 from sglang.multimodal_gen.configs.pipeline_configs import (
     FastHunyuanConfig,
     FluxPipelineConfig,
+    HeliosT2VConfig,
     HunyuanConfig,
     WanI2V480PConfig,
     WanI2V720PConfig,
@@ -71,6 +72,7 @@ from sglang.multimodal_gen.configs.sample.flux import (
     FluxSamplingParams,
 )
 from sglang.multimodal_gen.configs.sample.glmimage import GlmImageSamplingParams
+from sglang.multimodal_gen.configs.sample.helios import HeliosT2VSamplingParams
 from sglang.multimodal_gen.configs.sample.hunyuan import (
     FastHunyuanSamplingParam,
     HunyuanSamplingParams,
@@ -657,6 +659,18 @@ def _register_configs():
         sampling_param_cls=GlmImageSamplingParams,
         pipeline_config_cls=GlmImagePipelineConfig,
         model_detectors=[lambda hf_id: "glm-image" in hf_id.lower()],
+    )
+
+    # Helios
+    register_configs(
+        sampling_param_cls=HeliosT2VSamplingParams,
+        pipeline_config_cls=HeliosT2VConfig,
+        hf_model_paths=[
+            "BestWishYsh/Helios-Base",
+            "BestWishYsh/Helios-Mid",
+            "BestWishYsh/Helios-Distilled",
+        ],
+        model_detectors=[lambda hf_id: "helios" in hf_id.lower()],
     )
 
 

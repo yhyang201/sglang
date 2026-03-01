@@ -15,6 +15,7 @@ from sglang.multimodal_gen.configs.pipeline_configs.flux import (
 from sglang.multimodal_gen.configs.pipeline_configs.flux_finetuned import (
     Flux2FinetunedPipelineConfig,
 )
+from sglang.multimodal_gen.configs.pipeline_configs.helios import HeliosT2VConfig
 from sglang.multimodal_gen.configs.pipeline_configs.hunyuan import (
     FastHunyuanConfig,
     HunyuanConfig,
@@ -32,6 +33,7 @@ from sglang.multimodal_gen.configs.pipeline_configs.zimage import ZImagePipeline
 
 __all__ = [
     "DiffusersGenericPipelineConfig",
+    "HeliosT2VConfig",
     "HunyuanConfig",
     "FastHunyuanConfig",
     "FluxPipelineConfig",
