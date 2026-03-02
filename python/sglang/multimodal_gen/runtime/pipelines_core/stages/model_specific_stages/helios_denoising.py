@@ -456,7 +456,8 @@ class HeliosChunkedDenoisingStage(PipelineStage):
         if negative_prompt_embeds is not None:
             negative_prompt_embeds = negative_prompt_embeds.to(target_dtype)
 
-        # Scale factors
+        # Scale factors inherited from the Wan VAE used by Helios
+        # (AutoencoderKLWan: temporal_compression_ratio=4, spatial_compression_ratio=8)
         vae_scale_factor_temporal = 4
         vae_scale_factor_spatial = 8
 
@@ -473,7 +474,7 @@ class HeliosChunkedDenoisingStage(PipelineStage):
             1, (num_frames + window_num_frames - 1) // window_num_frames
         )
         num_history_latent_frames = sum(history_sizes)
-        batch_size = 1
+        batch_size = 1  # Helios processes one video at a time
 
         # Prepare history latents
         if not keep_first_frame:
@@ -527,6 +528,7 @@ class HeliosChunkedDenoisingStage(PipelineStage):
             * (width // vae_scale_factor_spatial)
             // (patch_size[0] * patch_size[1] * patch_size[2])
         )
+        # Sigma schedule from near-1.0 (pure noise) to 0.0 (clean); 0.999 avoids singularity
         sigmas = np.linspace(0.999, 0.0, num_inference_steps + 1)[:-1]
         mu = calculate_shift(image_seq_len)
 

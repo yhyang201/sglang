@@ -65,6 +65,7 @@ class HeliosScheduler:
         **kwargs,
     ):
         if stage_range is None:
+            # Evenly divide [0, 1] into 3 stages for pyramid SR
             stage_range = [0, 1 / 3, 2 / 3, 1]
         if disable_corrector is None:
             disable_corrector = []
@@ -167,13 +168,15 @@ class HeliosScheduler:
             else:
                 start_ratio = sum(stage_distance[:i_s]) / tot_distance
             if i_s == stages - 1:
-                end_ratio = 0.9999999999999999
+                # Use value just below 1.0 to avoid out-of-bounds indexing
+                end_ratio = 1.0 - 1e-16
             else:
                 end_ratio = sum(stage_distance[: i_s + 1]) / tot_distance
             self.timestep_ratios[i_s] = (start_ratio, end_ratio)
 
         for i_s in range(stages):
             timestep_ratio = self.timestep_ratios[i_s]
+            # Clamp to max valid timestep (num_train_timesteps - 1)
             timestep_max = min(
                 self.timesteps[int(timestep_ratio[0] * training_steps)], 999
             )
@@ -186,6 +189,7 @@ class HeliosScheduler:
                 if isinstance(timesteps, torch.Tensor)
                 else torch.from_numpy(timesteps[:-1])
             )
+            # Sigma range [0.999, 0]: start just below 1.0 to avoid singularity
             stage_sigmas = np.linspace(0.999, 0, training_steps + 1)
             self.sigmas_per_stage[i_s] = torch.from_numpy(stage_sigmas[:-1])
 

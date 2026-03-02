@@ -18,21 +18,30 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 logger = init_logger(__name__)
 
 
-def umt5_postprocess_text(outputs: BaseEncoderOutput, _text_inputs) -> torch.Tensor:
-    """Post-process UMT5 text encoder outputs, padding to 226 tokens."""
-    mask: torch.Tensor = outputs.attention_mask
-    hidden_state: torch.Tensor = outputs.last_hidden_state
-    seq_lens = mask.gt(0).sum(dim=1).long()
-    assert torch.isnan(hidden_state).sum() == 0
-    prompt_embeds = [u[:v] for u, v in zip(hidden_state, seq_lens, strict=True)]
-    prompt_embeds_tensor: torch.Tensor = torch.stack(
-        [
-            torch.cat([u, u.new_zeros(226 - u.size(0), u.size(1))])
-            for u in prompt_embeds
-        ],
-        dim=0,
-    )
-    return prompt_embeds_tensor
+# Helios UMT5 max sequence length (used for both tokenizer and post-processing padding)
+HELIOS_MAX_SEQUENCE_LENGTH = 226
+
+
+def _make_umt5_postprocess(max_seq_len: int):
+    """Create a UMT5 postprocess function with the given max sequence length."""
+
+    def umt5_postprocess_text(outputs: BaseEncoderOutput, _text_inputs) -> torch.Tensor:
+        """Post-process UMT5 text encoder outputs, padding to max_seq_len tokens."""
+        mask: torch.Tensor = outputs.attention_mask
+        hidden_state: torch.Tensor = outputs.last_hidden_state
+        seq_lens = mask.gt(0).sum(dim=1).long()
+        assert torch.isnan(hidden_state).sum() == 0
+        prompt_embeds = [u[:v] for u, v in zip(hidden_state, seq_lens, strict=True)]
+        prompt_embeds_tensor: torch.Tensor = torch.stack(
+            [
+                torch.cat([u, u.new_zeros(max_seq_len - u.size(0), u.size(1))])
+                for u in prompt_embeds
+            ],
+            dim=0,
+        )
+        return prompt_embeds_tensor
+
+    return umt5_postprocess_text
 
 
 @dataclass
@@ -52,12 +61,18 @@ class HeliosT2VConfig(PipelineConfig):
     # Denoising stage
     flow_shift: float | None = 1.0
 
-    # Text encoding stage (UMT5 is T5-compatible, override text_len to 226)
+    # Text encoding stage (UMT5 is T5-compatible)
     text_encoder_configs: tuple[EncoderConfig, ...] = field(
-        default_factory=lambda: (T5Config(arch_config=T5ArchConfig(text_len=226)),)
+        default_factory=lambda: (
+            T5Config(arch_config=T5ArchConfig(text_len=HELIOS_MAX_SEQUENCE_LENGTH)),
+        )
     )
     postprocess_text_funcs: tuple[Callable[[BaseEncoderOutput], torch.Tensor], ...] = (
-        field(default_factory=lambda: (umt5_postprocess_text,))
+        field(
+            default_factory=lambda: (
+                _make_umt5_postprocess(HELIOS_MAX_SEQUENCE_LENGTH),
+            )
+        )
     )
 
     # Precision for each component
