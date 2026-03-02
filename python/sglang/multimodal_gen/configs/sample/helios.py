@@ -33,3 +33,18 @@ class HeliosT2VSamplingParams(SamplingParams):
             (480, 832),  # ~9:16-ish
         ]
     )
+
+
+@dataclass
+class HeliosMidSamplingParams(HeliosT2VSamplingParams):
+    """Sampling params for Helios-Mid (Stage 2 pyramid SR)."""
+
+    num_inference_steps: int = 20
+
+
+@dataclass
+class HeliosDistilledSamplingParams(HeliosT2VSamplingParams):
+    """Sampling params for Helios-Distilled (DMD, no CFG needed)."""
+
+    guidance_scale: float = 1.0
+    num_inference_steps: int = 10

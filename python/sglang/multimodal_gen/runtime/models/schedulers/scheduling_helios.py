@@ -215,6 +215,12 @@ class HeliosScheduler:
         mu=None,
         is_amplify_first_chunk: bool = False,
     ):
+        if self.config.scheduler_type == "dmd":
+            if is_amplify_first_chunk:
+                num_inference_steps = num_inference_steps * 2 + 1
+            else:
+                num_inference_steps = num_inference_steps + 1
+
         self.num_inference_steps = num_inference_steps
         self.init_sigmas()
 
@@ -248,6 +254,10 @@ class HeliosScheduler:
 
         self._step_index = None
         self.reset_scheduler_history()
+
+        if self.config.scheduler_type == "dmd":
+            self.timesteps = self.timesteps[:-1]
+            self.sigmas = torch.cat([self.sigmas[:-2], self.sigmas[-1:]])
 
         if self.config.use_dynamic_shifting:
             assert self.config.shift == 1.0
@@ -593,6 +603,75 @@ class HeliosScheduler:
             return (prev_sample,)
         return HeliosSchedulerOutput(prev_sample=prev_sample)
 
+    # ---------------------------------- DMD ----------------------------------
+    def add_noise(self, original_samples, noise, timestep, sigmas, timesteps):
+        sigmas = sigmas.to(noise.device)
+        timesteps = timesteps.to(noise.device)
+        timestep_id = torch.argmin(
+            (timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(), dim=1
+        )
+        sigma = sigmas[timestep_id].reshape(-1, 1, 1, 1, 1)
+        sample = (1 - sigma) * original_samples + sigma * noise
+        return sample.type_as(noise)
+
+    def convert_flow_pred_to_x0(self, flow_pred, xt, timestep, sigmas, timesteps):
+        original_dtype = flow_pred.dtype
+        device = flow_pred.device
+        flow_pred, xt, sigmas, timesteps = (
+            x.double().to(device) for x in (flow_pred, xt, sigmas, timesteps)
+        )
+        timestep_id = torch.argmin(
+            (timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(), dim=1
+        )
+        sigma_t = sigmas[timestep_id].reshape(-1, 1, 1, 1, 1)
+        x0_pred = xt - sigma_t * flow_pred
+        return x0_pred.to(original_dtype)
+
+    def step_dmd(
+        self,
+        model_output: torch.FloatTensor,
+        timestep=None,
+        sample: torch.FloatTensor = None,
+        return_dict: bool = True,
+        cur_sampling_step: int = 0,
+        dmd_noisy_tensor: torch.FloatTensor | None = None,
+        dmd_sigmas: torch.FloatTensor | None = None,
+        dmd_timesteps: torch.FloatTensor | None = None,
+        all_timesteps: torch.FloatTensor | None = None,
+        **kwargs,
+    ) -> HeliosSchedulerOutput | tuple:
+        pred_image_or_video = self.convert_flow_pred_to_x0(
+            flow_pred=model_output,
+            xt=sample,
+            timestep=torch.full(
+                (model_output.shape[0],),
+                timestep,
+                dtype=torch.long,
+                device=model_output.device,
+            ),
+            sigmas=dmd_sigmas,
+            timesteps=dmd_timesteps,
+        )
+        if cur_sampling_step < len(all_timesteps) - 1:
+            prev_sample = self.add_noise(
+                pred_image_or_video,
+                dmd_noisy_tensor,
+                torch.full(
+                    (model_output.shape[0],),
+                    all_timesteps[cur_sampling_step + 1],
+                    dtype=torch.long,
+                    device=model_output.device,
+                ),
+                sigmas=dmd_sigmas,
+                timesteps=dmd_timesteps,
+            )
+        else:
+            prev_sample = pred_image_or_video
+
+        if not return_dict:
+            return (prev_sample,)
+        return HeliosSchedulerOutput(prev_sample=prev_sample)
+
     # ---------------------------------- Main step ----------------------------------
     def step(
         self,
@@ -615,6 +694,14 @@ class HeliosScheduler:
                 timestep=timestep,
                 sample=sample,
                 return_dict=return_dict,
+            )
+        elif self.config.scheduler_type == "dmd":
+            return self.step_dmd(
+                model_output=model_output,
+                timestep=timestep,
+                sample=sample,
+                return_dict=return_dict,
+                **kwargs,
             )
         else:
             raise NotImplementedError(

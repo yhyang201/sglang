@@ -72,6 +72,41 @@ class HeliosT2VConfig(PipelineConfig):
     zero_steps: int = 1
     keep_first_frame: bool = True
 
+    # Stage 2 (Pyramid SR) & Stage 3 (DMD) params
+    is_enable_stage2: bool = False
+    pyramid_num_stages: int = 3
+    pyramid_num_inference_steps_list: list[int] = field(
+        default_factory=lambda: [10, 10, 10]
+    )
+    is_distilled: bool = False
+    is_amplify_first_chunk: bool = False
+    scheduler_type: str = "unipc"
+    gamma: float = 1 / 3
+
     def __post_init__(self):
         self.vae_config.load_encoder = False
         self.vae_config.load_decoder = True
+
+
+@dataclass
+class HeliosMidConfig(HeliosT2VConfig):
+    """Configuration for Helios-Mid (Stage 1 + Stage 2 pyramid SR)."""
+
+    is_enable_stage2: bool = True
+    is_cfg_zero_star: bool = True
+    pyramid_num_inference_steps_list: list[int] = field(
+        default_factory=lambda: [20, 20, 20]
+    )
+
+
+@dataclass
+class HeliosDistilledConfig(HeliosT2VConfig):
+    """Configuration for Helios-Distilled (Stage 1 + Stage 2 + Stage 3 DMD)."""
+
+    is_enable_stage2: bool = True
+    is_distilled: bool = True
+    is_amplify_first_chunk: bool = True
+    scheduler_type: str = "dmd"
+    pyramid_num_inference_steps_list: list[int] = field(
+        default_factory=lambda: [10, 10, 10]
+    )

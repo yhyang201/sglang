@@ -48,6 +48,14 @@ class HeliosPipeline(LoRAPipeline, ComposedPipelineBase):
         if scheduler is not None and server_args.pipeline_config.flow_shift is not None:
             scheduler.set_shift(server_args.pipeline_config.flow_shift)
 
+        # Configure scheduler for Stage 2/3 if enabled
+        pipeline_config = server_args.pipeline_config
+        if scheduler is not None and pipeline_config.is_enable_stage2:
+            scheduler.config.stages = pipeline_config.pyramid_num_stages
+            scheduler.config.scheduler_type = pipeline_config.scheduler_type
+            scheduler.config.gamma = pipeline_config.gamma
+            scheduler.init_sigmas_for_each_stage()
+
     def create_pipeline_stages(self, server_args: ServerArgs) -> None:
         self.add_stage(InputValidationStage())
         self.add_standard_text_encoding_stage()
@@ -65,4 +73,10 @@ class HeliosPipeline(LoRAPipeline, ComposedPipelineBase):
         self.add_standard_decoding_stage()
 
 
-EntryClass = HeliosPipeline
+class HeliosPyramidPipeline(HeliosPipeline):
+    """Helios pyramid SR pipeline (used by Helios-Mid and Helios-Distilled)."""
+
+    pipeline_name = "HeliosPyramidPipeline"
+
+
+EntryClass = [HeliosPipeline, HeliosPyramidPipeline]
