@@ -1891,9 +1891,6 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         num_tokens = batch_size * num_tokens_per_bs
 
-        # Align num_tokens to attn_tp_size for reduce-scatter in dp_gather,
-        # matching the alignment done in forward_batch_info.py and
-        # cuda_graph_runner.py for actual inference and graph capture.
         if require_gathered_buffer(self.server_args):
             attn_tp_size = get_attention_tp_size()
             if attn_tp_size > 1 and num_tokens % attn_tp_size != 0:
