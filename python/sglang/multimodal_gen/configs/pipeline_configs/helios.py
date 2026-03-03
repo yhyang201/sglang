@@ -22,26 +22,22 @@ logger = init_logger(__name__)
 HELIOS_MAX_SEQUENCE_LENGTH = 226
 
 
-def _make_umt5_postprocess(max_seq_len: int):
-    """Create a UMT5 postprocess function with the given max sequence length."""
-
-    def umt5_postprocess_text(outputs: BaseEncoderOutput, _text_inputs) -> torch.Tensor:
-        """Post-process UMT5 text encoder outputs, padding to max_seq_len tokens."""
-        mask: torch.Tensor = outputs.attention_mask
-        hidden_state: torch.Tensor = outputs.last_hidden_state
-        seq_lens = mask.gt(0).sum(dim=1).long()
-        assert torch.isnan(hidden_state).sum() == 0
-        prompt_embeds = [u[:v] for u, v in zip(hidden_state, seq_lens, strict=True)]
-        prompt_embeds_tensor: torch.Tensor = torch.stack(
-            [
-                torch.cat([u, u.new_zeros(max_seq_len - u.size(0), u.size(1))])
-                for u in prompt_embeds
-            ],
-            dim=0,
-        )
-        return prompt_embeds_tensor
-
-    return umt5_postprocess_text
+def umt5_postprocess_text(outputs: BaseEncoderOutput, _text_inputs) -> torch.Tensor:
+    """Post-process UMT5 text encoder outputs, padding to HELIOS_MAX_SEQUENCE_LENGTH tokens."""
+    max_seq_len = HELIOS_MAX_SEQUENCE_LENGTH
+    mask: torch.Tensor = outputs.attention_mask
+    hidden_state: torch.Tensor = outputs.last_hidden_state
+    seq_lens = mask.gt(0).sum(dim=1).long()
+    assert torch.isnan(hidden_state).sum() == 0
+    prompt_embeds = [u[:v] for u, v in zip(hidden_state, seq_lens, strict=True)]
+    prompt_embeds_tensor: torch.Tensor = torch.stack(
+        [
+            torch.cat([u, u.new_zeros(max_seq_len - u.size(0), u.size(1))])
+            for u in prompt_embeds
+        ],
+        dim=0,
+    )
+    return prompt_embeds_tensor
 
 
 @dataclass
@@ -68,11 +64,7 @@ class HeliosT2VConfig(PipelineConfig):
         )
     )
     postprocess_text_funcs: tuple[Callable[[BaseEncoderOutput], torch.Tensor], ...] = (
-        field(
-            default_factory=lambda: (
-                _make_umt5_postprocess(HELIOS_MAX_SEQUENCE_LENGTH),
-            )
-        )
+        field(default_factory=lambda: (umt5_postprocess_text,))
     )
 
     # Precision for each component
