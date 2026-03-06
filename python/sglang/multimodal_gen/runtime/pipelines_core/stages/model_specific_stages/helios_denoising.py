@@ -535,6 +535,7 @@ class HeliosChunkedDenoisingStage(PipelineStage):
         # Chunk loop
         image_latents = None
         total_generated_latent_frames = 0
+        chunk_latents_list = []  # Store per-chunk latents for chunk-by-chunk decode
 
         self.log_info(
             f"Starting chunked denoising: {num_latent_chunk} chunks, "
@@ -653,6 +654,7 @@ class HeliosChunkedDenoisingStage(PipelineStage):
             # Update history
             total_generated_latent_frames += latents.shape[2]
             history_latents = torch.cat([history_latents, latents], dim=2)
+            chunk_latents_list.append(latents)
 
         # Move transformer back to CPU after denoising
         if server_args.dit_cpu_offload and not server_args.use_fsdp_inference:
@@ -660,7 +662,10 @@ class HeliosChunkedDenoisingStage(PipelineStage):
                 self.transformer.to("cpu")
         torch.cuda.empty_cache()
 
-        # Store denoised latents for the standard DecodingStage to decode
+        # Store per-chunk latents for chunk-by-chunk VAE decode (matches diffusers behavior).
+        # The standard DecodingStage will check for this attribute and decode each chunk
+        # separately to avoid temporal artifacts at chunk boundaries.
+        batch.latent_chunks = chunk_latents_list
         batch.latents = history_latents[:, :, -total_generated_latent_frames:]
 
         return batch
