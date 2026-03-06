@@ -122,7 +122,7 @@ class HeliosChunkedDenoisingStage(PipelineStage):
 
             with set_forward_context(
                 current_timestep=t,
-                forward_batch=None,
+                forward_batch=batch,
                 attn_metadata=None,
             ):
                 noise_pred = self.transformer(
@@ -153,7 +153,7 @@ class HeliosChunkedDenoisingStage(PipelineStage):
             if do_cfg:
                 with set_forward_context(
                     current_timestep=t,
-                    forward_batch=None,
+                    forward_batch=batch,
                     attn_metadata=None,
                 ):
                     noise_uncond = self.transformer(
@@ -309,7 +309,7 @@ class HeliosChunkedDenoisingStage(PipelineStage):
 
                 with set_forward_context(
                     current_timestep=t,
-                    forward_batch=None,
+                    forward_batch=batch,
                     attn_metadata=None,
                 ):
                     noise_pred = self.transformer(
@@ -340,7 +340,7 @@ class HeliosChunkedDenoisingStage(PipelineStage):
                 if do_cfg:
                     with set_forward_context(
                         current_timestep=t,
-                        forward_batch=None,
+                        forward_batch=batch,
                         attn_metadata=None,
                     ):
                         noise_uncond = self.transformer(
@@ -581,15 +581,26 @@ class HeliosChunkedDenoisingStage(PipelineStage):
                 )
 
             # Generate noise latents for this chunk
-            latents = torch.randn(
+            # Use batch.generator to ensure identical noise across SP ranks
+            latent_shape = (
                 batch_size,
                 num_channels_latents,
                 (window_num_frames - 1) // vae_scale_factor_temporal + 1,
                 height // vae_scale_factor_spatial,
                 width // vae_scale_factor_spatial,
-                device=device,
+            )
+            generator = batch.generator
+            if isinstance(generator, list):
+                generator = generator[0] if len(generator) > 0 else None
+            gen_device = generator.device if generator is not None else device
+            latents = torch.randn(
+                latent_shape,
+                generator=generator,
+                device=gen_device,
                 dtype=torch.float32,
             )
+            if latents.device != device:
+                latents = latents.to(device)
 
             if is_enable_stage2:
                 # Stage 2: Pyramid SR denoising (handles scheduler internally)
