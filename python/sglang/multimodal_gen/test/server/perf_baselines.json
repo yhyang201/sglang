@@ -2136,6 +2136,48 @@
             "expected_e2e_ms": 716.81,
             "expected_avg_denoise_ms": 67.32,
             "expected_median_denoise_ms": 74.1
+        },
+        "helios_base_t2v": {
+            "stages_ms": {
+                "InputValidationStage": 0.07,
+                "TextEncodingStage": 1103.97,
+                "LatentPreparationStage": 0.24,
+                "HeliosChunkedDenoisingStage": 118580.37,
+                "HeliosDecodingStage": 664.79,
+                "per_frame_generation": null
+            },
+            "denoise_step_ms": {},
+            "expected_e2e_ms": 120413.51,
+            "expected_avg_denoise_ms": 0.0,
+            "expected_median_denoise_ms": 0.0
+        },
+        "helios_distilled_t2v": {
+            "stages_ms": {
+                "InputValidationStage": 0.13,
+                "TextEncodingStage": 581.79,
+                "LatentPreparationStage": 0.18,
+                "HeliosChunkedDenoisingStage": 49752.88,
+                "HeliosDecodingStage": 666.69,
+                "per_frame_generation": null
+            },
+            "denoise_step_ms": {},
+            "expected_e2e_ms": 51038.66,
+            "expected_avg_denoise_ms": 0.0,
+            "expected_median_denoise_ms": 0.0
+        },
+        "helios_mid_t2v": {
+            "stages_ms": {
+                "InputValidationStage": 0.05,
+                "TextEncodingStage": 1101.99,
+                "LatentPreparationStage": 0.16,
+                "HeliosChunkedDenoisingStage": 77728.72,
+                "HeliosDecodingStage": 661.23,
+                "per_frame_generation": null
+            },
+            "denoise_step_ms": {},
+            "expected_e2e_ms": 79600.62,
+            "expected_avg_denoise_ms": 0.0,
+            "expected_median_denoise_ms": 0.0
         }
     }
 }
