@@ -69,9 +69,14 @@ See existing Modular examples: `QwenImagePipeline` (uses `add_standard_t2i_stage
 
 ## Step-by-Step Implementation
 
-### Step 1: Study the Reference Implementation
+### Step 1: Obtain and Study the Reference Implementation
 
-Before writing any code, study the target model's Diffusers pipeline (or official reference):
+**Before writing any code, ask the user to provide the model's original implementation or Diffusers pipeline code.** You need the actual source code to work from — do not guess or assume the model's architecture. If the user has not provided it, request:
+- The model's Diffusers pipeline source (e.g., the `pipeline_*.py` file from the `diffusers` library or HuggingFace repo)
+- Or the model's official reference implementation (e.g., from the model author's GitHub repo)
+- Or the HuggingFace model ID so you can look up `model_index.json` and the associated pipeline class
+
+Once you have the reference code, study it thoroughly:
 
 1. Find the model's `model_index.json` to identify required modules (text_encoder, vae, transformer, scheduler, etc.)
 2. Read the Diffusers pipeline's `__call__` method end-to-end. Identify:
@@ -81,6 +86,20 @@ Before writing any code, study the target model's Diffusers pipeline (or officia
    - What conditioning kwargs the DiT/UNet expects
    - How the denoising loop works (classifier-free guidance, etc.)
    - How VAE decoding is done (scaling factors, tiling, etc.)
+
+### Step 1.5: Evaluate Reuse of Existing Pipelines and Stages
+
+**Before creating any new files, check whether an existing pipeline or stage can be reused or extended.** Only create new pipelines/stages when the existing ones would require extensive modifications or when no similar implementation exists.
+
+Specifically:
+1. **Compare the new model's architecture against existing pipelines** (Flux, Wan, Qwen-Image, GLM-Image, HunyuanVideo, LTX, etc.). If the new model shares most of its structure with an existing one (e.g., same text encoders, similar latent format, compatible denoising loop), prefer:
+   - Adding a new config variant to the existing pipeline rather than creating a new pipeline class
+   - Reusing the existing `BeforeDenoisingStage` with minor parameter differences
+   - Using `add_standard_t2i_stages()` / `add_standard_ti2i_stages()` / `add_standard_ti2v_stages()` if the model fits standard patterns
+2. **Check existing stages** in `runtime/pipelines_core/stages/` and `stages/model_specific_stages/`. If an existing stage handles 80%+ of what the new model needs, extend it rather than duplicating it.
+3. **Check existing model components** — many models share VAEs (e.g., `AutoencoderKL`), text encoders (CLIP, T5), and schedulers. Reuse these directly instead of re-implementing.
+
+**Rule of thumb**: Only create a new file when the delta from the closest existing implementation would require changing more than ~30% of the code, or when no existing implementation is architecturally similar.
 
 ### Step 2: Implement Model Components
 
@@ -125,6 +144,38 @@ class MyModelTransformer2DModel(nn.Module):
     ) -> torch.Tensor:
         # ... forward pass ...
         return output
+```
+
+**Tensor Parallel (TP) and Sequence Parallel (SP)**: The DiT model **must** support distributed inference. Reference existing implementations and adapt to your model's architecture:
+
+- **Wan model** (`runtime/models/dits/wanvideo.py`) — Full TP + SP reference:
+  - TP: Uses `ColumnParallelLinear` for Q/K/V projections, `RowParallelLinear` for output projections, attention heads divided by `tp_size`
+  - SP: Sequence dimension sharding via `get_sp_world_size()`, padding for alignment, `sequence_model_parallel_all_gather` for aggregation
+  - Cross-attention skips SP (`skip_sequence_parallel=is_cross_attention`)
+- **Qwen-Image model** (`runtime/models/dits/qwen_image.py`) — SP + USPAttention reference:
+  - SP: Uses `USPAttention` (Ulysses + Ring Attention), configured via `--ulysses-degree` / `--ring-degree`
+  - TP: Uses `MergedColumnParallelLinear` for QKV (with Nunchaku quantization), `ReplicatedLinear` otherwise
+
+**Important**: These are references only — each model has its own architecture and parallelism requirements. Consider:
+- How attention heads can be divided across TP ranks
+- Whether the model's sequence dimension is naturally shardable for SP
+- Which linear layers benefit from column/row parallel sharding vs. replication
+- Whether cross-attention or other special modules need SP exclusion
+
+Key imports for distributed support:
+```python
+from sglang.multimodal_gen.runtime.distributed import (
+    divide,
+    get_sp_group,
+    get_sp_world_size,
+    get_tp_world_size,
+    sequence_model_parallel_all_gather,
+)
+from sglang.multimodal_gen.runtime.layers.linear import (
+    ColumnParallelLinear,
+    RowParallelLinear,
+    ReplicatedLinear,
+)
 ```
 
 **VAE** (`runtime/models/vaes/{model_name}.py`): Implement if the model uses a non-standard VAE. Many models reuse existing VAEs.
@@ -462,6 +513,22 @@ register_configs(
 
 The `EntryClass` in your pipeline file is automatically discovered by the registry's `_discover_and_register_pipelines()` function -- no additional registration needed for the pipeline class itself.
 
+### Step 8: Verify Output Quality
+
+After implementation, **you must verify that the generated output is not noise**. A noisy or garbled output image/video is the most common sign of an incorrect implementation. Common causes include:
+
+- Incorrect latent scale/shift factors (`get_decode_scale_and_shift` returning wrong values)
+- Wrong timestep/sigma schedule (order, dtype, or value range)
+- Mismatched conditioning kwargs (fields not matching the DiT's `forward()` signature)
+- Incorrect VAE decoder configuration (wrong `vae_scale_factor`, missing denormalization)
+- Rotary embedding style mismatch (`is_neox_style` set incorrectly)
+- Wrong prompt embedding format (missing list wrapping, wrong encoder output selection)
+
+**If the output is noise, the implementation is incorrect — do not ship it.** Debug by:
+1. Comparing intermediate tensor values (latents, prompt_embeds, timesteps) against the Diffusers reference pipeline
+2. Running the Diffusers pipeline and SGLang pipeline side-by-side with the same seed
+3. Checking each stage's output shape and value range independently
+
 ---
 
 ## Reference Implementations
@@ -503,6 +570,8 @@ Before submitting, verify:
 - [ ] Latent scale/shift factors are correctly configured
 - [ ] Use fused kernels where possible (see `use-efficient-diffusion-kernels` skill)
 - [ ] Weight names match Diffusers for automatic loading
+- [ ] **TP/SP support** implemented in DiT model (reference `wanvideo.py` for TP+SP, `qwen_image.py` for USPAttention)
+- [ ] **Output quality verified** — generated images/videos are not noise; compared against Diffusers reference output
 
 **Hybrid style only:**
 - [ ] **BeforeDenoisingStage** at `stages/model_specific_stages/{model_name}.py`
@@ -516,3 +585,20 @@ Before submitting, verify:
 4. **Rotary embedding style matters**: `is_neox_style=True` = split-half rotation, `is_neox_style=False` = interleaved. Check the reference model carefully.
 5. **VAE precision**: Many VAEs need fp32 or bf16 for numerical stability. Set `vae_precision` in the PipelineConfig accordingly.
 6. **Avoid forcing model-specific logic into shared stages**: If your model's pre-processing doesn't naturally fit the existing standard stages, prefer the Hybrid pattern with a dedicated BeforeDenoisingStage rather than adding conditional branches to shared stages.
+
+## After Implementation: Tests and Performance Data
+
+Once the model is working and output quality is verified, **ask the user** whether they would like to:
+
+1. **Add tests** — Create unit tests and/or integration tests for the new model. Tests should cover:
+   - Pipeline construction and stage wiring
+   - Single-GPU inference producing non-noise output
+   - Multi-GPU inference (TP/SP) if supported
+   - See the `write-sglang-test` skill for test conventions and placement guidelines
+
+2. **Generate performance data** — Run benchmarks and collect perf metrics:
+   - Single-GPU latency and throughput (look for `Pixel data generated successfully in xxxx seconds` in console output; use the `warmup excluded` line for accurate timing)
+   - Multi-GPU scaling (TP/SP) throughput comparison
+   - Use `python/sglang/multimodal_gen/benchmarks/bench_serving.py` for serving benchmarks
+
+Do not skip this step — always ask the user before proceeding, as test and benchmark requirements vary per model.
