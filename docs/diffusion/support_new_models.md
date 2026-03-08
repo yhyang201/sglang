@@ -101,9 +101,14 @@ The following fine-grained stages can be composed to build the pre-processing po
 
 ## Implementation Guide
 
-### Step 1: Study the Reference Implementation
+### Step 1: Obtain and Study the Reference Implementation
 
-Before writing any code, study the target model's Diffusers pipeline:
+Before writing any code, obtain the model's original implementation or Diffusers pipeline code:
+- The model's Diffusers pipeline source (e.g., the `pipeline_*.py` file from the `diffusers` library or HuggingFace repo)
+- Or the model's official reference implementation (e.g., from the model author's GitHub repo)
+- Or the HuggingFace model ID to look up `model_index.json` and the associated pipeline class
+
+Once you have the reference code, study it thoroughly:
 
 1. Find the model's `model_index.json` to identify required modules.
 2. Read the Diffusers pipeline's `__call__` method to understand:
@@ -113,6 +118,14 @@ Before writing any code, study the target model's Diffusers pipeline:
    - What conditioning kwargs the DiT expects
    - How the denoising loop works
    - How VAE decoding is done
+
+### Step 1.5: Evaluate Reuse of Existing Pipelines and Stages
+
+Before creating any new files, check whether an existing pipeline or stage can be reused or extended. Only create new pipelines/stages when the existing ones would need substantial structural changes or when no architecturally similar implementation exists.
+
+- **Compare against existing pipelines** (Flux, Wan, Qwen-Image, GLM-Image, HunyuanVideo, LTX, etc.). If the new model shares most of its structure with an existing one, prefer adding a new config variant or reusing existing stages.
+- **Check existing stages** in `runtime/pipelines_core/stages/` and `stages/model_specific_stages/`.
+- **Check existing model components** — many models share VAEs (e.g., `AutoencoderKL`), text encoders (CLIP, T5), and schedulers. Reuse these directly.
 
 ### Step 2: Implement Model Components
 
@@ -124,6 +137,10 @@ Adapt the model's core components:
 - **Schedulers**: Implement in [`runtime/models/schedulers/`](https://github.com/sgl-project/sglang/blob/main/python/sglang/multimodal_gen/runtime/models/schedulers/) if needed
 
 Use SGLang's fused kernels where possible (see `LayerNormScaleShift`, `RMSNormScaleShift`, `apply_qk_norm`, etc.).
+
+**Tensor Parallel (TP) and Sequence Parallel (SP)**: For multi-GPU deployment, it is recommended to add TP/SP support to the DiT model. This can be done incrementally after the single-GPU implementation is verified. Reference implementations:
+- **Wan model** (`runtime/models/dits/wanvideo.py`) — Full TP + SP: `ColumnParallelLinear`/`RowParallelLinear` for attention, sequence dimension sharding via `get_sp_world_size()`
+- **Qwen-Image model** (`runtime/models/dits/qwen_image.py`) — SP via `USPAttention` (Ulysses + Ring Attention)
 
 ### Step 3: Create Configs
 
@@ -319,6 +336,17 @@ register_configs(
 
 The `EntryClass` in your pipeline file is automatically discovered by the registry — no additional registration needed for the pipeline class itself.
 
+### Step 8: Verify Output Quality
+
+After implementation, verify that the generated output is not noise. A noisy or garbled output is the most common sign of an incorrect implementation. Common causes include:
+
+- Incorrect latent scale/shift factors
+- Wrong timestep/sigma schedule (order, dtype, or value range)
+- Mismatched conditioning kwargs
+- Rotary embedding style mismatch (`is_neox_style`)
+
+Debug by comparing intermediate tensor values against the Diffusers reference pipeline with the same seed.
+
 ## Reference Implementations
 
 ### Hybrid Style
@@ -352,6 +380,8 @@ Before submitting your implementation, verify:
 - [ ] `_required_config_modules` lists all modules from `model_index.json`
 - [ ] `PipelineConfig` callbacks (`prepare_pos_cond_kwargs`, etc.) match the DiT's `forward()` signature
 - [ ] Uses framework-standard `DenoisingStage` and `DecodingStage` (not custom denoising loops)
+- [ ] **TP/SP support** considered for DiT model (recommended; reference `wanvideo.py` for TP+SP, `qwen_image.py` for USPAttention)
+- [ ] **Output quality verified** — generated images/videos are not noise; compared against Diffusers reference output
 
 **Hybrid style only:**
 - [ ] **BeforeDenoisingStage** at `stages/model_specific_stages/{model_name}.py`

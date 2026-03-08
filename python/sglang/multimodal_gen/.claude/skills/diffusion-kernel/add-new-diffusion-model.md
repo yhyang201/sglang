@@ -87,7 +87,7 @@ Once you have the reference code, study it thoroughly:
    - How the denoising loop works (classifier-free guidance, etc.)
    - How VAE decoding is done (scaling factors, tiling, etc.)
 
-### Step 1.5: Evaluate Reuse of Existing Pipelines and Stages
+### Step 2: Evaluate Reuse of Existing Pipelines and Stages
 
 **Before creating any new files, check whether an existing pipeline or stage can be reused or extended.** Only create new pipelines/stages when the existing ones would require extensive modifications or when no similar implementation exists.
 
@@ -99,9 +99,9 @@ Specifically:
 2. **Check existing stages** in `runtime/pipelines_core/stages/` and `stages/model_specific_stages/`. If an existing stage handles 80%+ of what the new model needs, extend it rather than duplicating it.
 3. **Check existing model components** — many models share VAEs (e.g., `AutoencoderKL`), text encoders (CLIP, T5), and schedulers. Reuse these directly instead of re-implementing.
 
-**Rule of thumb**: Only create a new file when the delta from the closest existing implementation would require changing more than ~30% of the code, or when no existing implementation is architecturally similar.
+**Rule of thumb**: Only create a new file when the existing implementation would need substantial structural changes to accommodate the new model, or when no architecturally similar implementation exists.
 
-### Step 2: Implement Model Components
+### Step 3: Implement Model Components
 
 Adapt or implement the model's core components in the appropriate directories.
 
@@ -146,7 +146,7 @@ class MyModelTransformer2DModel(nn.Module):
         return output
 ```
 
-**Tensor Parallel (TP) and Sequence Parallel (SP)**: The DiT model **must** support distributed inference. Reference existing implementations and adapt to your model's architecture:
+**Tensor Parallel (TP) and Sequence Parallel (SP)**: For multi-GPU deployment, it is recommended to add TP/SP support to the DiT model. This can be done incrementally after the single-GPU implementation is verified. Reference existing implementations and adapt to your model's architecture:
 
 - **Wan model** (`runtime/models/dits/wanvideo.py`) — Full TP + SP reference:
   - TP: Uses `ColumnParallelLinear` for Q/K/V projections, `RowParallelLinear` for output projections, attention heads divided by `tp_size`
@@ -184,7 +184,7 @@ from sglang.multimodal_gen.runtime.layers.linear import (
 
 **Schedulers** (`runtime/models/schedulers/{scheduler_name}.py`): Implement if the model requires a custom scheduler not available in Diffusers.
 
-### Step 3: Create Model Configs
+### Step 4: Create Model Configs
 
 **DiT Config** (`configs/models/dits/{model_name}.py`):
 
@@ -237,7 +237,7 @@ class MyModelSamplingParams(SamplingParams):
     # ... model-specific defaults ...
 ```
 
-### Step 4: Create PipelineConfig
+### Step 5: Create PipelineConfig
 
 The `PipelineConfig` holds static model configuration and defines callback methods used by the standard `DenoisingStage` and `DecodingStage`.
 
@@ -316,7 +316,7 @@ class MyModelPipelineConfig(ImagePipelineConfig):
 
 **Important**: The `prepare_pos_cond_kwargs` / `prepare_neg_cond_kwargs` methods define what the DiT receives at each denoising step. These must match the DiT's `forward()` signature.
 
-### Step 5: Implement the BeforeDenoisingStage (Core Step)
+### Step 6: Implement the BeforeDenoisingStage (Core Step)
 
 This is the heart of the Hybrid pattern. Create a single stage that handles ALL pre-processing.
 
@@ -438,7 +438,7 @@ class MyModelBeforeDenoisingStage(PipelineStage):
 | `batch.raw_latent_shape` | `tuple` | Original latent shape before any packing |
 | `batch.height` / `batch.width` | `int` | Output dimensions |
 
-### Step 6: Define the Pipeline Class
+### Step 7: Define the Pipeline Class
 
 The pipeline class is minimal -- it just wires the stages together.
 
@@ -496,7 +496,7 @@ class MyModelPipeline(LoRAPipeline, ComposedPipelineBase):
 EntryClass = [MyModelPipeline]
 ```
 
-### Step 7: Register the Model
+### Step 8: Register the Model
 
 In `python/sglang/multimodal_gen/registry.py`, register your configs:
 
@@ -513,7 +513,7 @@ register_configs(
 
 The `EntryClass` in your pipeline file is automatically discovered by the registry's `_discover_and_register_pipelines()` function -- no additional registration needed for the pipeline class itself.
 
-### Step 8: Verify Output Quality
+### Step 9: Verify Output Quality
 
 After implementation, **you must verify that the generated output is not noise**. A noisy or garbled output image/video is the most common sign of an incorrect implementation. Common causes include:
 
@@ -528,8 +528,6 @@ After implementation, **you must verify that the generated output is not noise**
 1. Comparing intermediate tensor values (latents, prompt_embeds, timesteps) against the Diffusers reference pipeline
 2. Running the Diffusers pipeline and SGLang pipeline side-by-side with the same seed
 3. Checking each stage's output shape and value range independently
-
----
 
 ## Reference Implementations
 
@@ -561,8 +559,8 @@ Before submitting, verify:
 - [ ] **SamplingParams** at `configs/sample/{model_name}.py`
 - [ ] **DiT model** at `runtime/models/dits/{model_name}.py`
 - [ ] **DiT config** at `configs/models/dits/{model_name}.py`
-- [ ] **VAE** (new or reuse existing) at `runtime/models/vaes/`
-- [ ] **VAE config** at `configs/models/vaes/{model_name}.py`
+- [ ] **VAE** — reuse existing (e.g., `AutoencoderKL`) or create new at `runtime/models/vaes/`
+- [ ] **VAE config** — reuse existing or create new at `configs/models/vaes/{model_name}.py`
 - [ ] **Registry entry** in `registry.py` via `register_configs()`
 - [ ] `pipeline_name` matches Diffusers `model_index.json` `_class_name`
 - [ ] `_required_config_modules` lists all modules from `model_index.json`
@@ -570,7 +568,7 @@ Before submitting, verify:
 - [ ] Latent scale/shift factors are correctly configured
 - [ ] Use fused kernels where possible (see `use-efficient-diffusion-kernels` skill)
 - [ ] Weight names match Diffusers for automatic loading
-- [ ] **TP/SP support** implemented in DiT model (reference `wanvideo.py` for TP+SP, `qwen_image.py` for USPAttention)
+- [ ] **TP/SP support** considered for DiT model (recommended; reference `wanvideo.py` for TP+SP, `qwen_image.py` for USPAttention)
 - [ ] **Output quality verified** — generated images/videos are not noise; compared against Diffusers reference output
 
 **Hybrid style only:**
