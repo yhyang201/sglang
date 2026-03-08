@@ -99,6 +99,7 @@ CLIP_MODEL_NAME = "openai/clip-vit-large-patch14"
 DEFAULT_CLIP_THRESHOLD_IMAGE = 0.92
 DEFAULT_CLIP_THRESHOLD_VIDEO = 0.90
 _clip_model_cache: dict[str, Any] = {}
+_diffusers_version_warned: bool = False
 
 
 def is_image_url(image_path: str | Path | None) -> bool:
@@ -668,6 +669,33 @@ def _load_threshold_json() -> dict[str, Any]:
         return json.load(f)
 
 
+def check_diffusers_version_match() -> None:
+    """Warn once if the installed diffusers version doesn't match GT generation version."""
+    global _diffusers_version_warned
+    if _diffusers_version_warned:
+        return
+    _diffusers_version_warned = True
+
+    metadata = _load_threshold_json()
+    gt_version = metadata.get("diffusers_version")
+    if not gt_version:
+        return
+
+    try:
+        import diffusers
+
+        installed = diffusers.__version__
+    except ImportError:
+        return
+
+    if installed != gt_version:
+        logger.warning(
+            f"[Consistency] Diffusers version mismatch: GT was generated with "
+            f"{gt_version}, but {installed} is installed. Consider regenerating GT "
+            f"via the 'Diffusion CI Ground Truth Generation' workflow."
+        )
+
+
 def get_clip_threshold(
     case: DiffusionTestCase,
     metadata: dict[str, Any] | None = None,
@@ -714,14 +742,8 @@ def get_clip_model() -> tuple[Any, Any]:
     global _clip_model_cache
 
     if "model" not in _clip_model_cache:
-        try:
-            import torch
-            from transformers import CLIPModel, CLIPProcessor
-        except ImportError:
-            raise ImportError(
-                "transformers and torch are required for CLIP consistency check. "
-                "Install with: pip install transformers torch"
-            )
+        import torch
+        from transformers import CLIPModel, CLIPProcessor
 
         logger.info(f"Loading CLIP model: {CLIP_MODEL_NAME}")
         processor = CLIPProcessor.from_pretrained(CLIP_MODEL_NAME)
@@ -749,13 +771,7 @@ def compute_clip_embedding(image: np.ndarray) -> np.ndarray:
     Returns:
         768-dimensional numpy array (L2 normalized)
     """
-    try:
-        import torch
-    except ImportError:
-        raise ImportError(
-            "torch is required for CLIP consistency check. "
-            "Install with: pip install torch"
-        )
+    import torch
 
     model, processor = get_clip_model()
     device = _clip_model_cache["device"]
@@ -820,7 +836,6 @@ def load_gt_embeddings(
     SGLANG_CONSISTENCY_GT_DIR, then compute CLIP embeddings.
     Format (png/jpg/webp) follows case output_format; PIL converts to RGB for CLIP.
     """
-    filenames = _consistency_gt_filenames(case_id, num_gpus, is_video, output_format)
     embeddings = []
 
     gt_dir = _get_consistency_gt_dir()
@@ -854,20 +869,66 @@ def load_gt_embeddings(
             f"Loaded {len(embeddings)} GT embeddings for {case_id} from {gt_dir}"
         )
     else:
-        for fn in filenames:
-            url = f"{SGL_TEST_FILES_CONSISTENCY_GT_BASE}/{fn}"
-            resp = requests.get(url, timeout=30)
-            if resp.status_code != 200:
-                raise FileNotFoundError(f"GT image not found: {url}")
-
-            arr = np.array(Image.open(io.BytesIO(resp.content)).convert("RGB"))
-            emb = compute_clip_embedding(arr)
-            embeddings.append(emb)
+        candidates = get_consistency_gt_candidates(
+            case_id, num_gpus, is_video, output_format
+        )
+        if is_video:
+            # Video: download all 3 frame files
+            for fn in candidates:
+                url = f"{SGL_TEST_FILES_CONSISTENCY_GT_BASE}/{fn}"
+                resp = requests.get(url, timeout=30)
+                if resp.status_code != 200:
+                    raise FileNotFoundError(f"GT image not found: {url}")
+                arr = np.array(Image.open(io.BytesIO(resp.content)).convert("RGB"))
+                embeddings.append(compute_clip_embedding(arr))
+        else:
+            # Image: try each extension until one succeeds
+            content = None
+            for fn in candidates:
+                url = f"{SGL_TEST_FILES_CONSISTENCY_GT_BASE}/{fn}"
+                resp = requests.get(url, timeout=30)
+                if resp.status_code == 200:
+                    content = resp.content
+                    break
+            if content is None:
+                raise FileNotFoundError(
+                    f"GT image not found in sgl-test-files. "
+                    f"Tried: {', '.join(candidates)}"
+                )
+            arr = np.array(Image.open(io.BytesIO(content)).convert("RGB"))
+            embeddings.append(compute_clip_embedding(arr))
 
         logger.info(
             f"Loaded {len(embeddings)} GT embeddings for {case_id} from sgl-test-files"
         )
     return embeddings
+
+
+def _remote_gt_url(
+    case_id: str, num_gpus: int, is_video: bool, output_format: str | None = None
+) -> str | None:
+    """Find the first existing remote GT URL, trying multiple extensions for images."""
+    candidates = get_consistency_gt_candidates(
+        case_id, num_gpus, is_video, output_format
+    )
+    if is_video:
+        # For video, all 3 frame files must exist; just check the first one
+        url = f"{SGL_TEST_FILES_CONSISTENCY_GT_BASE}/{candidates[0]}"
+        try:
+            r = requests.head(url, timeout=10)
+            return url if r.status_code == 200 else None
+        except Exception:
+            return None
+    # For images, try each extension candidate
+    for fn in candidates:
+        url = f"{SGL_TEST_FILES_CONSISTENCY_GT_BASE}/{fn}"
+        try:
+            r = requests.head(url, timeout=10)
+            if r.status_code == 200:
+                return url
+        except Exception:
+            continue
+    return None
 
 
 def gt_exists(
@@ -886,14 +947,7 @@ def gt_exists(
             return all((gt_dir / c).exists() for c in candidates)
         return any((gt_dir / c).exists() for c in candidates)
 
-    filenames = _consistency_gt_filenames(case_id, num_gpus, is_video, output_format)
-    fn = filenames[0]
-    url = f"{SGL_TEST_FILES_CONSISTENCY_GT_BASE}/{fn}"
-    try:
-        r = requests.head(url, timeout=10)
-        return r.status_code == 200
-    except Exception:
-        return False
+    return _remote_gt_url(case_id, num_gpus, is_video, output_format) is not None
 
 
 def compare_with_gt(
@@ -937,19 +991,6 @@ def compare_with_gt(
         threshold=threshold,
         frame_details=frame_details,
     )
-
-    status = "PASSED" if passed else "FAILED"
-    print(f"\n{'='*60}")
-    print(f"[CLIP Consistency] {case_id}: {status}")
-    print(f"  Threshold: {threshold}")
-    print(f"  Min similarity: {min_similarity:.4f}")
-    print(f"  Frame details:")
-    for detail in frame_details:
-        frame_status = "✓" if detail["passed"] else "✗"
-        print(
-            f"    Frame {detail['frame_index']}: similarity={detail['similarity']:.4f} {frame_status}"
-        )
-    print(f"{'='*60}\n")
 
     if passed:
         logger.info(

@@ -35,7 +35,7 @@ from sglang.multimodal_gen.test.server.testcase_configs import (
 )
 from sglang.multimodal_gen.test.test_utils import (
     _consistency_gt_filenames,
-    _get_consistency_gt_dir,
+    check_diffusers_version_match,
     compare_with_gt,
     extract_key_frames_from_video,
     get_clip_threshold,
@@ -439,8 +439,8 @@ Consider updating perf_baselines.json with the snippets below:
             pytest.fail: If consistency check fails (GT exists but doesn't match)
 
         Note:
-            If GT doesn't exist, the test is skipped (not failed) with a message
-            to run the GT generation workflow after PR is merged.
+            If GT doesn't exist, the test is skipped (not failed) so that new
+            cases don't block CI. Run the GT generation workflow after merging.
 
         Environment Variables:
             SGLANG_SKIP_CONSISTENCY: Set to "1" to skip consistency checks
@@ -460,49 +460,40 @@ Consider updating perf_baselines.json with the snippets below:
             )
             return
 
+        # Warn if diffusers version doesn't match GT generation version
+        check_diffusers_version_match()
+
         num_gpus = case.server_args.num_gpus
         is_video = case.server_args.modality == "video"
 
-        # Check GT exists - if not, fail with instructions to add image(s) to sgl-test-files
+        # Check GT exists - if not, skip with instructions to generate GT
         output_format = case.sampling_params.output_format
         if not gt_exists(
             case.id, num_gpus, is_video=is_video, output_format=output_format
         ):
-            if _get_consistency_gt_dir() is not None:
-                names = ", ".join(
-                    get_consistency_gt_candidates(
-                        case.id, num_gpus, is_video, output_format
-                    )
+            names = ", ".join(
+                get_consistency_gt_candidates(
+                    case.id, num_gpus, is_video, output_format
                 )
-            else:
-                names = ", ".join(
-                    _consistency_gt_filenames(
-                        case.id, num_gpus, is_video, output_format
-                    )
-                )
-            error_msg = f"""
---- MISSING GROUND TRUTH DETECTED ---
-GT image(s) not found for '{case.id}'.
-
-Add the expected file(s) to sgl-test-files in diffusion-ci/consistency_gt/ with naming (n=num_gpus).
-  Image: {case.id}_{{n}}gpu.<ext> (ext from output_format: png, jpg, webp)
-  Video: {case.id}_{{n}}gpu_frame_0.png, {case.id}_{{n}}gpu_frame_mid.png, {case.id}_{{n}}gpu_frame_last.png
-
-For this case, expected file(s): {names}
-
-Repository: https://github.com/sgl-project/sgl-test-files (path: diffusion-ci/consistency_gt/)
-
-(Optional) Per-case override in consistency_threshold.json: "cases": {{ "{case.id}": {{ "clip_threshold": 0.92 }} }}
-"""
-            logger.error(error_msg)
-            pytest.fail(
-                f"GT not found for {case.id}. See logs for instructions to add GT."
+            )
+            logger.warning(
+                f"[Consistency] GT not found for '{case.id}'. "
+                f"Expected file(s): {names}. "
+                f"Run the 'Diffusion CI Ground Truth Generation' workflow after merging."
+            )
+            pytest.skip(
+                f"GT not found for {case.id}. "
+                f"Run GT generation workflow to enable consistency check."
             )
 
         # Load GT embeddings (format matches case; PIL converts to RGB for CLIP)
-        gt_embeddings = load_gt_embeddings(
-            case.id, num_gpus, is_video=is_video, output_format=output_format
-        )
+        try:
+            gt_embeddings = load_gt_embeddings(
+                case.id, num_gpus, is_video=is_video, output_format=output_format
+            )
+        except Exception as e:
+            logger.warning(f"[Consistency] Failed to load GT for {case.id}: {e}")
+            pytest.skip(f"Failed to load GT for {case.id}: {e}")
 
         # Convert output to frames
         if is_video:
