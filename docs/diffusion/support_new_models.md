@@ -119,7 +119,7 @@ Once you have the reference code, study it thoroughly:
    - How the denoising loop works
    - How VAE decoding is done
 
-### Step 1.5: Evaluate Reuse of Existing Pipelines and Stages
+### Step 2: Evaluate Reuse of Existing Pipelines and Stages
 
 Before creating any new files, check whether an existing pipeline or stage can be reused or extended. Only create new pipelines/stages when the existing ones would need substantial structural changes or when no architecturally similar implementation exists.
 
@@ -127,7 +127,7 @@ Before creating any new files, check whether an existing pipeline or stage can b
 - **Check existing stages** in `runtime/pipelines_core/stages/` and `stages/model_specific_stages/`.
 - **Check existing model components** — many models share VAEs (e.g., `AutoencoderKL`), text encoders (CLIP, T5), and schedulers. Reuse these directly.
 
-### Step 2: Implement Model Components
+### Step 3: Implement Model Components
 
 Adapt the model's core components:
 
@@ -142,13 +142,13 @@ Use SGLang's fused kernels where possible (see `LayerNormScaleShift`, `RMSNormSc
 - **Wan model** (`runtime/models/dits/wanvideo.py`) — Full TP + SP: `ColumnParallelLinear`/`RowParallelLinear` for attention, sequence dimension sharding via `get_sp_world_size()`
 - **Qwen-Image model** (`runtime/models/dits/qwen_image.py`) — SP via `USPAttention` (Ulysses + Ring Attention)
 
-### Step 3: Create Configs
+### Step 4: Create Configs
 
 - **DiT Config**: `configs/models/dits/{model_name}.py`
 - **VAE Config**: `configs/models/vaes/{model_name}.py`
 - **SamplingParams**: `configs/sample/{model_name}.py`
 
-### Step 4: Create PipelineConfig
+### Step 5: Create PipelineConfig
 
 The `PipelineConfig` provides callbacks that the standard `DenoisingStage` and `DecodingStage` use:
 
@@ -188,7 +188,7 @@ class MyModelPipelineConfig(ImagePipelineConfig):
         ...
 ```
 
-### Step 5: Implement Pre-processing
+### Step 6: Implement Pre-processing
 
 Choose based on your model's needs (see [How to Choose](#how-to-choose)):
 
@@ -243,7 +243,7 @@ class MyModelBeforeDenoisingStage(PipelineStage):
 
 Skip creating a custom stage entirely — configure via `PipelineConfig` callbacks and use framework helpers. Best when the model fits standard patterns.
 
-(This option has no separate stage file; the pipeline class in Step 6 calls `add_standard_t2i_stages()` directly.)
+(This option has no separate stage file; the pipeline class in Step 7 calls `add_standard_t2i_stages()` directly.)
 
 **Key batch fields that `DenoisingStage` expects** (regardless of which option you choose):
 
@@ -258,7 +258,7 @@ Skip creating a custom stage entirely — configure via `PipelineConfig` callbac
 | `batch.generator` | `torch.Generator` | RNG generator for reproducibility |
 | `batch.raw_latent_shape` | `tuple` | Original latent shape before any packing |
 
-### Step 6: Define the Pipeline Class
+### Step 7: Define the Pipeline Class
 
 #### Hybrid Style
 
@@ -321,7 +321,7 @@ class MyModelPipeline(LoRAPipeline, ComposedPipelineBase):
 EntryClass = [MyModelPipeline]
 ```
 
-### Step 7: Register the Model
+### Step 8: Register the Model
 
 Register your configs in [`registry.py`](https://github.com/sgl-project/sglang/blob/main/python/sglang/multimodal_gen/registry.py):
 
@@ -336,7 +336,7 @@ register_configs(
 
 The `EntryClass` in your pipeline file is automatically discovered by the registry — no additional registration needed for the pipeline class itself.
 
-### Step 8: Verify Output Quality
+### Step 9: Verify Output Quality
 
 After implementation, verify that the generated output is not noise. A noisy or garbled output is the most common sign of an incorrect implementation. Common causes include:
 
