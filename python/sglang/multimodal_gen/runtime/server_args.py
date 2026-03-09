@@ -331,6 +331,7 @@ class ServerArgs:
     encoder_gpus: list[int] | None = None
     denoiser_gpus: list[int] | None = None
     decoder_gpus: list[int] | None = None
+    disagg_timeout: int = 600  # seconds, timeout for pending disagg requests
     # ZMQ endpoints for role-to-role communication (populated at launch time)
     encoder_to_denoiser_endpoint: str | None = None
     denoiser_to_decoder_endpoint: str | None = None
@@ -804,6 +805,15 @@ class ServerArgs:
             default=None,
             help="GPU IDs for the decoder role (default: [0], shares with encoder). "
             "Only used with --disagg-mode.",
+        )
+        parser.add_argument(
+            "--disagg-timeout",
+            type=int,
+            default=ServerArgs.disagg_timeout,
+            help="Timeout in seconds for pending disagg requests. "
+            "Encoder returns an error if the decoder result is not received "
+            "within this period. Also used as recv timeout for denoiser/decoder. "
+            "Default: 600.",
         )
         parser.add_argument(
             "--encoder-to-denoiser-endpoint",
