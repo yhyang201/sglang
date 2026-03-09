@@ -83,6 +83,41 @@ DiffusionServer:
 
 **Backward compatible**: Chain mode (`--disagg-mode`) with 1:1:1 instances still works as before.
 
+### Commit 7 — Phase 5: Capacity-Aware Dispatch with FreeBufferSlots & TTA Queues ✅
+
+> Covers [RFC §3 TODO 1.2](#phase-5-diffusionserver--capacity-aware-dispatch-rfc-3-todo-12) — admission control based on buffer capacity
+
+`[Diffusion] Add disaggregation Phase 5: capacity-aware dispatch with FreeBufferSlots and TTA queues`
+
+- `runtime/disaggregation/request_state.py` — Added 3 WAITING states: `ENCODER_WAITING`, `DENOISING_WAITING`, `DECODER_WAITING` (request in TTA queue awaiting slot). States can be skipped when capacity is immediately available (PENDING → ENCODER_RUNNING directly)
+- `runtime/disaggregation/dispatch_policy.py` — Added `select_with_capacity(free_slots) → int | None` to `DispatchPolicy` ABC, `RoundRobin` (skips full instances round-robin), `MaxFreeSlotsFirst` (picks highest free_slots, returns None when all zero). `PoolDispatcher` gains `select_*_with_capacity()` methods
+- `runtime/disaggregation/diffusion_server.py` — Full capacity-aware rewrite:
+  - `FreeBufferSlots`: per-instance counters (`encoder_capacity` / `denoiser_capacity` / `decoder_capacity`, configurable)
+  - `TryToAdd` (TTA) queues: 3 dequeues (`_encoder_tta` / `_denoiser_tta` / `_decoder_tta`) with typed entries
+  - Dispatch flow: `select_*_with_capacity()` → if slot available: decrement + dispatch; if None: transition to WAITING + enqueue TTA
+  - Completion callback: result handler increments `FreeBufferSlots` + calls `_drain_*_tta()` to dispatch queued requests
+  - Timeout cleanup: frees slots for timed-out requests + purges TTA entries
+  - `get_stats()` reports `free_slots`, `tta_depth` per role
+- `test/unit/test_request_state.py` — 18 tests (+4): WAITING lifecycle, fail from WAITING, skip WAITING, timeout from WAITING
+- `test/unit/test_dispatch_policy.py` — 19 tests (+6): `select_with_capacity` for RoundRobin (skip full, return None, cycle available) and MaxFreeSlotsFirst (pick most free, return None, tie-break)
+- `test/unit/test_diffusion_server.py` — 8 tests (+3): TTA queuing and drain, FreeBufferSlots decrement/increment through full pipeline, capacity=1 end-to-end
+
+**Dispatch flow with admission control**:
+```
+Client request arrives:
+  FreeBufferSlots[encoder] > 0?
+    YES → decrement slot, dispatch to Encoder[i], state = ENCODER_RUNNING
+    NO  → enqueue in encoder TTA, state = ENCODER_WAITING
+
+Encoder result arrives:
+  increment FreeBufferSlots[encoder][i]
+  drain encoder TTA (dispatch queued requests if slots now available)
+  FreeBufferSlots[denoiser] > 0?
+    YES → decrement slot, relay to Denoiser[j], state = DENOISING_RUNNING
+    NO  → enqueue in denoiser TTA, state = DENOISING_WAITING
+  (same pattern for denoiser→decoder and decoder→client)
+```
+
 ### Commit 6 — Phase 6: TransferBuffer with Buddy-System Allocator ✅
 
 > Covers [RFC §2 TODO 3.1–3.3](#phase-6-transferbuffer--pinned-memory-pool-rfc-2-todo-3133) — pinned memory pool infrastructure
@@ -147,8 +182,8 @@ Below maps directly to RFC sections and TODO items. See [RFC](https://github.com
 | 1. Role-Based Decomposition | — | ✅ Done | Commit 1 |
 | 3. DiffusionServer — Server Core | 1.1 | ✅ Done | Commit 5 |
 | 3. DiffusionServer — Dispatch Loop | 1.3 | ✅ Done | Commit 5 |
-| 3. DiffusionServer — State Tracker (FreeBufferSlots/TTA) | 1.2 | ❌ | Phase 5 |
-| 3. DiffusionServer — Callback (slot increment on completion) | 1.2 | ❌ | Phase 5 |
+| 3. DiffusionServer — State Tracker (FreeBufferSlots/TTA) | 1.2 | ✅ Done | Commit 7 |
+| 3. DiffusionServer — Callback (slot increment on completion) | 1.2 | ✅ Done | Commit 7 |
 | 2. TransferBuffer — MetaBuffer | 3.1 | ✅ Done | Commit 6 |
 | 2. TransferBuffer — TensorBuffer + Buddy Allocator | 3.2, 3.3 | ✅ Done | Commit 6 |
 | 2. TransferManager — Engine Setup (RDMA/RPC) | 2.1 | ❌ | Phase 7 |
@@ -163,31 +198,11 @@ Below maps directly to RFC sections and TODO items. See [RFC](https://github.com
 
 ---
 
-### Phase 5: DiffusionServer — Capacity-Aware Dispatch (RFC §3 TODO 1.2)
+### Done: Phase 5 — Capacity-Aware Dispatch (RFC §3 TODO 1.2) ✅
 
-> Current DiffusionServer dispatches immediately (round-robin / max-free-slots heuristic). RFC requires **admission control** based on actual buffer capacity.
+> Completed in Commit 7. See [Commit 7](#commit-7--phase-5-capacity-aware-dispatch-with-freebufferslots--tta-queues-) for details.
 
-**Goal**: DiffusionServer tracks real capacity per role instance and queues requests when all instances are full.
-
-**Files to create/modify**:
-
-| File | Action | Description |
-|------|--------|-------------|
-| `runtime/disaggregation/diffusion_server.py` | **Modify** | Add `FreeBufferSlots` dict per role instance, `TryToAdd` (TTA) queues per role type |
-| `runtime/disaggregation/request_state.py` | **Modify** | Split states: `EncoderWaiting` (in TTA) vs `EncoderRunning` (dispatched), same for Denoising/Decoder |
-| `runtime/disaggregation/dispatch_policy.py` | **Modify** | `MaxFreeSlotsFirst` reads actual `FreeBufferSlots` instead of heuristic |
-
-**Key design**:
-- Each role instance reports initial capacity (number of concurrent requests it can buffer) at registration
-- `dispatch_event_loop` pops from TTA queue only when a target instance has `FreeBufferSlots > 0`
-- On role completion callback: increment `FreeBufferSlots`, try to pop next request from TTA
-- State transitions per RFC: `Waiting` (in TTA queue) → `OnGoing` (dispatched to instance) — for Denoising, remains `Waiting` even after DS selects instance, transitions to `OnGoing` only after upstream confirms transfer complete
-
-**Wire protocol addition**:
-```
-Role instance → DiffusionServer:  {"type": "slot_free", "instance_id": "enc-0", "request_id": "xxx"}
-Role instance → DiffusionServer:  {"type": "register", "instance_id": "enc-0", "capacity": 4}
-```
+FreeBufferSlots per instance + TryToAdd (TTA) queues per role + completion callbacks that drain TTA. 45 tests passing. Capacity is configurable via `encoder_capacity` / `denoiser_capacity` / `decoder_capacity` constructor args (will be wired to TransferBuffer slot counts in Phase 7).
 
 ---
 
@@ -430,7 +445,7 @@ RFC §  Original Plan                   Actual / Planned
 §3     Phase 3 (DiffusionServer)       Commit 3 ✅  (CLI + single-instance)
 §3     Phase 3 (Pool-Based N:M:K)      Commit 5 ✅  (multi-instance orchestration)
 —      — (Async + Observability)        Commit 4 ✅
-§3     Phase 5 (Capacity-Aware DS)     TODO — FreeBufferSlots, TTA queues, callbacks
+§3     Phase 5 (Capacity-Aware DS)     Commit 7 ✅ (FreeBufferSlots, TTA, callbacks)
 —      Phase 5.5 (Per-Role Parallel)   TODO — SP/TP per role
 §2     Phase 6 (TransferBuffer)        Commit 6 ✅ (buddy allocator + pinned pool)
 §2,§4  Phase 7 (TransferManager+P2P)   TODO — RDMA/RPC, P2P direct transfer, queues
@@ -441,11 +456,9 @@ Future — (etcd P2P Routing)            Future — decentralized control plane
 ### Dependency Graph
 
 ```
-Phase 6 (TransferBuffer) ✅
-    ├──→ Phase 5 (Capacity-Aware DS)       ← FreeBufferSlots = allocator.count_free_slots()
-    └──→ Phase 7 (TransferManager + P2P)   ← needs pool_data_ptr for RDMA registration
-             └──→ Phase 8 (3-Stream Overlap)  ← needs queues from Phase 7
-
-Phase 5.5 (Per-Role Parallelism)       ← independent, can parallel with Phase 5/7
+Phase 5 (Capacity-Aware DS) ✅ ──┐
+Phase 6 (TransferBuffer) ✅ ─────┼──→ Phase 7 (TransferManager + P2P)
+                                 │        └──→ Phase 8 (3-Stream Overlap)
+Phase 5.5 (Per-Role Parallelism) ┘   ← independent, can parallel
              └──→ Phase 7 (transfer_slice needs SP/FSDP info)
 ```

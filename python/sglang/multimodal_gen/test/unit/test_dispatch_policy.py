@@ -71,6 +71,55 @@ class TestMaxFreeSlotsFirst(unittest.TestCase):
         self.assertGreater(len(results), 1)
 
 
+class TestRoundRobinCapacity(unittest.TestCase):
+    """Test RoundRobin.select_with_capacity."""
+
+    def test_skips_full_instances(self):
+        policy = RoundRobin(num_instances=3)
+        # Instance 0 full, 1 has 2 free, 2 full
+        result = policy.select_with_capacity([0, 2, 0])
+        self.assertEqual(result, 1)
+
+    def test_returns_none_when_all_full(self):
+        policy = RoundRobin(num_instances=3)
+        result = policy.select_with_capacity([0, 0, 0])
+        self.assertIsNone(result)
+
+    def test_cycles_among_available(self):
+        policy = RoundRobin(num_instances=3)
+        # Instance 0 full, 1 and 2 available
+        results = []
+        for _ in range(4):
+            r = policy.select_with_capacity([0, 1, 1])
+            results.append(r)
+        # Should alternate between 1 and 2
+        self.assertTrue(all(r in (1, 2) for r in results))
+        self.assertIn(1, results)
+        self.assertIn(2, results)
+
+
+class TestMaxFreeSlotsFirstCapacity(unittest.TestCase):
+    """Test MaxFreeSlotsFirst.select_with_capacity."""
+
+    def test_picks_most_free(self):
+        policy = MaxFreeSlotsFirst(num_instances=3, max_slots_per_instance=4)
+        result = policy.select_with_capacity([1, 3, 2])
+        self.assertEqual(result, 1)
+
+    def test_returns_none_when_all_zero(self):
+        policy = MaxFreeSlotsFirst(num_instances=3, max_slots_per_instance=4)
+        result = policy.select_with_capacity([0, 0, 0])
+        self.assertIsNone(result)
+
+    def test_tie_breaking(self):
+        policy = MaxFreeSlotsFirst(num_instances=3, max_slots_per_instance=4)
+        results = set()
+        for _ in range(10):
+            r = policy.select_with_capacity([2, 2, 2])
+            results.add(r)
+        self.assertGreater(len(results), 1)
+
+
 class TestCreateDispatchPolicy(unittest.TestCase):
     """Test factory function."""
 

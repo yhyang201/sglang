@@ -23,14 +23,26 @@ logger = logging.getLogger(__name__)
 
 
 class RequestState(enum.Enum):
-    """Lifecycle states for a disagg pipeline request."""
+    """Lifecycle states for a disagg pipeline request.
+
+    *_WAITING states: request is in the TryToAdd (TTA) queue, awaiting a
+    free buffer slot on some instance.
+    *_RUNNING states: request has been dispatched to a specific instance.
+    """
 
     PENDING = "pending"
+    # Encoder
+    ENCODER_WAITING = "encoder_waiting"
     ENCODER_RUNNING = "encoder_running"
     ENCODER_DONE = "encoder_done"
+    # Denoiser
+    DENOISING_WAITING = "denoising_waiting"
     DENOISING_RUNNING = "denoising_running"
     DENOISING_DONE = "denoising_done"
+    # Decoder
+    DECODER_WAITING = "decoder_waiting"
     DECODER_RUNNING = "decoder_running"
+    # Terminal
     DONE = "done"
     FAILED = "failed"
     TIMED_OUT = "timed_out"
@@ -38,12 +50,25 @@ class RequestState(enum.Enum):
 
 # Valid state transitions
 _VALID_TRANSITIONS: dict[RequestState, set[RequestState]] = {
-    RequestState.PENDING: {RequestState.ENCODER_RUNNING, RequestState.FAILED},
+    RequestState.PENDING: {
+        RequestState.ENCODER_WAITING,
+        RequestState.ENCODER_RUNNING,
+        RequestState.FAILED,
+    },
+    RequestState.ENCODER_WAITING: {
+        RequestState.ENCODER_RUNNING,
+        RequestState.FAILED,
+    },
     RequestState.ENCODER_RUNNING: {
         RequestState.ENCODER_DONE,
         RequestState.FAILED,
     },
     RequestState.ENCODER_DONE: {
+        RequestState.DENOISING_WAITING,
+        RequestState.DENOISING_RUNNING,
+        RequestState.FAILED,
+    },
+    RequestState.DENOISING_WAITING: {
         RequestState.DENOISING_RUNNING,
         RequestState.FAILED,
     },
@@ -52,6 +77,11 @@ _VALID_TRANSITIONS: dict[RequestState, set[RequestState]] = {
         RequestState.FAILED,
     },
     RequestState.DENOISING_DONE: {
+        RequestState.DECODER_WAITING,
+        RequestState.DECODER_RUNNING,
+        RequestState.FAILED,
+    },
+    RequestState.DECODER_WAITING: {
         RequestState.DECODER_RUNNING,
         RequestState.FAILED,
     },
@@ -68,10 +98,13 @@ _VALID_TRANSITIONS: dict[RequestState, set[RequestState]] = {
 # Non-terminal states that can time out
 _ACTIVE_STATES = {
     RequestState.PENDING,
+    RequestState.ENCODER_WAITING,
     RequestState.ENCODER_RUNNING,
     RequestState.ENCODER_DONE,
+    RequestState.DENOISING_WAITING,
     RequestState.DENOISING_RUNNING,
     RequestState.DENOISING_DONE,
+    RequestState.DECODER_WAITING,
     RequestState.DECODER_RUNNING,
 }
 
