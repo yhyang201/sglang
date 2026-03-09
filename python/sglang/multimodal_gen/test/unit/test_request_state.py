@@ -15,10 +15,13 @@ class TestRequestState(unittest.TestCase):
     def test_all_states_defined(self):
         expected = {
             "PENDING",
+            "ENCODER_WAITING",
             "ENCODER_RUNNING",
             "ENCODER_DONE",
+            "DENOISING_WAITING",
             "DENOISING_RUNNING",
             "DENOISING_DONE",
+            "DECODER_WAITING",
             "DECODER_RUNNING",
             "DONE",
             "FAILED",
@@ -168,6 +171,93 @@ class TestRequestTracker(unittest.TestCase):
         tracker = RequestTracker()
         record = tracker.submit("r1")
         self.assertGreater(record.elapsed_s(), 0.0)
+
+    def test_waiting_states_lifecycle(self):
+        """Test full lifecycle with WAITING states (capacity-aware dispatch)."""
+        tracker = RequestTracker()
+        tracker.submit("r1")
+
+        # PENDING → ENCODER_WAITING (queued in TTA)
+        tracker.transition("r1", RequestState.ENCODER_WAITING)
+        self.assertEqual(tracker.get("r1").state, RequestState.ENCODER_WAITING)
+
+        # ENCODER_WAITING → ENCODER_RUNNING (slot available)
+        tracker.transition("r1", RequestState.ENCODER_RUNNING, encoder_instance=0)
+        self.assertEqual(tracker.get("r1").state, RequestState.ENCODER_RUNNING)
+
+        tracker.transition("r1", RequestState.ENCODER_DONE)
+
+        # ENCODER_DONE → DENOISING_WAITING (all denoisers full)
+        tracker.transition("r1", RequestState.DENOISING_WAITING)
+        self.assertEqual(tracker.get("r1").state, RequestState.DENOISING_WAITING)
+
+        # DENOISING_WAITING → DENOISING_RUNNING
+        tracker.transition("r1", RequestState.DENOISING_RUNNING, denoiser_instance=1)
+
+        tracker.transition("r1", RequestState.DENOISING_DONE)
+
+        # DENOISING_DONE → DECODER_WAITING
+        tracker.transition("r1", RequestState.DECODER_WAITING)
+        self.assertEqual(tracker.get("r1").state, RequestState.DECODER_WAITING)
+
+        # DECODER_WAITING → DECODER_RUNNING
+        tracker.transition("r1", RequestState.DECODER_RUNNING, decoder_instance=0)
+
+        tracker.transition("r1", RequestState.DONE)
+        self.assertTrue(tracker.get("r1").is_terminal())
+
+    def test_fail_from_waiting_states(self):
+        """WAITING states can transition to FAILED."""
+        for waiting_state in [
+            RequestState.ENCODER_WAITING,
+            RequestState.DENOISING_WAITING,
+            RequestState.DECODER_WAITING,
+        ]:
+            tracker = RequestTracker()
+            tracker.submit("r1")
+
+            # Walk to the waiting state
+            if waiting_state == RequestState.ENCODER_WAITING:
+                tracker.transition("r1", RequestState.ENCODER_WAITING)
+            elif waiting_state == RequestState.DENOISING_WAITING:
+                tracker.transition("r1", RequestState.ENCODER_RUNNING)
+                tracker.transition("r1", RequestState.ENCODER_DONE)
+                tracker.transition("r1", RequestState.DENOISING_WAITING)
+            elif waiting_state == RequestState.DECODER_WAITING:
+                tracker.transition("r1", RequestState.ENCODER_RUNNING)
+                tracker.transition("r1", RequestState.ENCODER_DONE)
+                tracker.transition("r1", RequestState.DENOISING_RUNNING)
+                tracker.transition("r1", RequestState.DENOISING_DONE)
+                tracker.transition("r1", RequestState.DECODER_WAITING)
+
+            tracker.transition("r1", RequestState.FAILED, error="timeout")
+            self.assertTrue(tracker.get("r1").is_terminal())
+
+    def test_skip_waiting_when_capacity_available(self):
+        """When capacity is available, skip WAITING and go directly to RUNNING."""
+        tracker = RequestTracker()
+        tracker.submit("r1")
+
+        # PENDING → ENCODER_RUNNING directly (skip ENCODER_WAITING)
+        tracker.transition("r1", RequestState.ENCODER_RUNNING, encoder_instance=0)
+        tracker.transition("r1", RequestState.ENCODER_DONE)
+
+        # ENCODER_DONE → DENOISING_RUNNING directly
+        tracker.transition("r1", RequestState.DENOISING_RUNNING, denoiser_instance=0)
+        tracker.transition("r1", RequestState.DENOISING_DONE)
+
+        # DENOISING_DONE → DECODER_RUNNING directly
+        tracker.transition("r1", RequestState.DECODER_RUNNING, decoder_instance=0)
+        tracker.transition("r1", RequestState.DONE)
+
+        self.assertTrue(tracker.get("r1").is_terminal())
+
+    def test_timeout_from_waiting_state(self):
+        tracker = RequestTracker()
+        tracker.submit("r1")
+        tracker.transition("r1", RequestState.ENCODER_WAITING)
+        tracker.transition("r1", RequestState.TIMED_OUT)
+        self.assertTrue(tracker.get("r1").is_terminal())
 
 
 if __name__ == "__main__":

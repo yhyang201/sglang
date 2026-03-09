@@ -46,6 +46,20 @@ class DispatchPolicy(abc.ABC):
         """
         ...
 
+    def select_with_capacity(self, free_slots: list[int]) -> int | None:
+        """Select an instance that has free capacity.
+
+        Args:
+            free_slots: FreeBufferSlots per instance. Length must equal num_instances.
+
+        Returns:
+            Instance index, or None if all instances are at capacity.
+        """
+        # Default: find any instance with free_slots > 0, prefer via select()
+        if not any(s > 0 for s in free_slots):
+            return None
+        return self.select(active_counts=None)
+
     def record_completion(self, instance_id: int) -> None:
         """Notify the policy that an instance completed a request.
 
@@ -71,12 +85,22 @@ class RoundRobin(DispatchPolicy):
             self._next = (self._next + 1) % self._num_instances
         return chosen
 
+    def select_with_capacity(self, free_slots: list[int]) -> int | None:
+        with self._lock:
+            # Try up to num_instances starting from _next
+            for _ in range(self._num_instances):
+                idx = self._next
+                self._next = (self._next + 1) % self._num_instances
+                if free_slots[idx] > 0:
+                    return idx
+            return None
+
 
 class MaxFreeSlotsFirst(DispatchPolicy):
     """Dispatch to the instance with the most free slots.
 
-    Requires active_counts to be provided. Falls back to the instance
-    with the fewest active requests if max_slots is not set.
+    Requires active_counts or free_slots to be provided. Falls back to
+    round-robin if no load info is available.
 
     Thread-safe.
     """
@@ -122,6 +146,25 @@ class MaxFreeSlotsFirst(DispatchPolicy):
 
             return best_id
 
+    def select_with_capacity(self, free_slots: list[int]) -> int | None:
+        """Select instance with most free slots. Returns None if all full."""
+        with self._lock:
+            best_id = -1
+            best_free = 0
+            for i in range(self._num_instances):
+                if free_slots[i] > best_free:
+                    best_free = free_slots[i]
+                    best_id = i
+                elif free_slots[i] == best_free and best_free > 0:
+                    if i == (self._tiebreak % self._num_instances):
+                        best_id = i
+
+            self._tiebreak += 1
+
+            if best_id < 0:
+                return None
+            return best_id
+
 
 class PoolDispatcher:
     """Wraps three independent dispatch policies for encoder/denoiser/decoder pools."""
@@ -152,6 +195,15 @@ class PoolDispatcher:
 
     def select_decoder(self, active_counts: list[int] | None = None) -> int:
         return self.decoder_policy.select(active_counts)
+
+    def select_encoder_with_capacity(self, free_slots: list[int]) -> int | None:
+        return self.encoder_policy.select_with_capacity(free_slots)
+
+    def select_denoiser_with_capacity(self, free_slots: list[int]) -> int | None:
+        return self.denoiser_policy.select_with_capacity(free_slots)
+
+    def select_decoder_with_capacity(self, free_slots: list[int]) -> int | None:
+        return self.decoder_policy.select_with_capacity(free_slots)
 
 
 def create_dispatch_policy(name: str, num_instances: int, **kwargs) -> DispatchPolicy:
