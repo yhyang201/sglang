@@ -259,6 +259,9 @@ def launch_disagg_server(
 
         # Build per-role ServerArgs via from_kwargs to trigger __post_init__
         # which recalculates parallelism based on this role's num_gpus.
+        # Per-role parallelism: use explicit overrides if set, else None (auto-derive)
+        role_par = server_args.get_role_parallelism(role_type)
+
         role_overrides = {
             "disagg_role": role_type,
             "disagg_mode": False,  # prevent validation conflict
@@ -273,11 +276,11 @@ def launch_disagg_server(
                 (server_args.master_port or 30005)
                 + 100 * (1 + list(RoleType).index(role_type))
             ),
-            # Reset parallelism so _adjust_parallelism re-derives from num_gpus
-            "tp_size": None,
-            "sp_degree": None,
-            "ulysses_degree": None,
-            "ring_degree": None,
+            # Per-role parallelism (None = auto-derive from num_gpus)
+            "tp_size": role_par["tp_size"],
+            "sp_degree": role_par["sp_degree"],
+            "ulysses_degree": role_par["ulysses_degree"],
+            "ring_degree": role_par["ring_degree"],
         }
 
         # Only encoder role needs warmup
@@ -510,6 +513,9 @@ def launch_pool_disagg_server(
         for inst_idx, gpu_ids in enumerate(gpu_lists):
             num_role_gpus = len(gpu_ids)
 
+            # Per-role parallelism: use explicit overrides if set, else None (auto-derive)
+            role_par = server_args.get_role_parallelism(role_type)
+
             role_overrides = {
                 "disagg_role": role_type,
                 "disagg_mode": False,
@@ -520,10 +526,11 @@ def launch_pool_disagg_server(
                 "warmup": role_type == RoleType.ENCODER,
                 "scheduler_port": find_port(port_cursor),
                 "master_port": find_port(port_cursor + 100),
-                "tp_size": None,
-                "sp_degree": None,
-                "ulysses_degree": None,
-                "ring_degree": None,
+                # Per-role parallelism (None = auto-derive from num_gpus)
+                "tp_size": role_par["tp_size"],
+                "sp_degree": role_par["sp_degree"],
+                "ulysses_degree": role_par["ulysses_degree"],
+                "ring_degree": role_par["ring_degree"],
             }
             port_cursor = role_overrides["master_port"] + 100
 
