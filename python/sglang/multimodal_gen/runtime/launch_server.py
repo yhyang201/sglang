@@ -185,6 +185,218 @@ def launch_server(server_args: ServerArgs, launch_http_server: bool = True):
     return processes
 
 
+def launch_disagg_server(
+    server_args: ServerArgs,
+    encoder_gpus: list[int] | None = None,
+    denoiser_gpus: list[int] | None = None,
+    decoder_gpus: list[int] | None = None,
+    launch_http_server: bool = True,
+):
+    """Launch a disaggregated diffusion server with separate Encoder/Denoiser/Decoder processes.
+
+    Each role runs as an independent process group with its own GPU(s), pipeline,
+    and scheduler. Roles communicate via ZMQ PUSH/PULL for tensor transfer.
+
+    Args:
+        server_args: Base server configuration (model_path, etc.)
+        encoder_gpus: GPU IDs for encoder role. Default: [0]
+        denoiser_gpus: GPU IDs for denoiser role. Default: [1]
+        decoder_gpus: GPU IDs for decoder role. Default: [0] (shares with encoder)
+        launch_http_server: Whether to launch the HTTP server (for encoder)
+    """
+    from copy import deepcopy
+
+    from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
+    from sglang.multimodal_gen.runtime.utils.common import is_port_available
+
+    configure_logger(server_args)
+    logger.info("Starting disaggregated server...")
+
+    # Default GPU assignments
+    if encoder_gpus is None:
+        encoder_gpus = [0]
+    if denoiser_gpus is None:
+        denoiser_gpus = [1] if len(encoder_gpus) < 2 else [encoder_gpus[-1] + 1]
+    if decoder_gpus is None:
+        decoder_gpus = [0]  # decoder is lightweight, can share GPU with encoder
+
+    # Allocate ports for inter-role communication
+    base_port = server_args.scheduler_port + 2000
+
+    def find_port(start):
+        port = start
+        while not is_port_available(port):
+            port += 1
+        return port
+
+    e2d_port = find_port(base_port)
+    d2d_port = find_port(e2d_port + 1)
+    d2e_port = find_port(d2d_port + 1)
+
+    host = server_args.host or "127.0.0.1"
+    e2d_endpoint = f"tcp://{host}:{e2d_port}"
+    d2d_endpoint = f"tcp://{host}:{d2d_port}"
+    d2e_endpoint = f"tcp://{host}:{d2e_port}"
+
+    logger.info(
+        "Disagg endpoints: encoder->denoiser=%s, denoiser->decoder=%s, decoder->encoder=%s",
+        e2d_endpoint,
+        d2d_endpoint,
+        d2e_endpoint,
+    )
+
+    # Role configurations: (role_type, gpu_ids)
+    role_configs = [
+        (RoleType.ENCODER, encoder_gpus),
+        (RoleType.DENOISING, denoiser_gpus),
+        (RoleType.DECODER, decoder_gpus),
+    ]
+
+    all_processes = []
+    for role_type, gpu_ids in role_configs:
+        # Create role-specific server_args
+        role_args = deepcopy(server_args)
+        role_args.disagg_role = role_type
+        role_args.num_gpus = len(gpu_ids)
+        role_args.encoder_to_denoiser_endpoint = e2d_endpoint
+        role_args.denoiser_to_decoder_endpoint = d2d_endpoint
+        role_args.decoder_to_encoder_endpoint = d2e_endpoint
+
+        # Each role needs its own scheduler port and master port
+        role_args.scheduler_port = find_port(
+            server_args.scheduler_port + 100 * (1 + list(RoleType).index(role_type))
+        )
+        role_args.master_port = find_port(
+            (server_args.master_port or 30005)
+            + 100 * (1 + list(RoleType).index(role_type))
+        )
+
+        # Only encoder role needs warmup with HTTP
+        if role_type != RoleType.ENCODER:
+            role_args.warmup = False
+
+        num_gpus = len(gpu_ids)
+
+        # Pipes for master-slave coordination within this role
+        task_pipes_w = []
+        task_pipes_r = []
+        for _ in range(num_gpus - 1):
+            r, w = mp.Pipe(duplex=False)
+            task_pipes_r.append(r)
+            task_pipes_w.append(w)
+
+        result_pipes_w = []
+        result_pipes_r = []
+        for _ in range(num_gpus - 1):
+            r, w = mp.Pipe(duplex=False)
+            result_pipes_r.append(r)
+            result_pipes_w.append(w)
+
+        pipe_readers = []
+        for i in range(num_gpus):
+            reader, writer = mp.Pipe(duplex=False)
+            pipe_readers.append(reader)
+
+            # Set CUDA_VISIBLE_DEVICES for this process
+            env_gpu_id = gpu_ids[i]
+
+            if i == 0:
+                process = mp.Process(
+                    target=_run_disagg_role_process,
+                    args=(
+                        env_gpu_id,
+                        i,  # local_rank
+                        i,  # rank within role
+                        role_args,
+                        writer,
+                        task_pipes_w,
+                        result_pipes_r,
+                    ),
+                    name=f"sglang-diffusion-{role_type.value}-{i}",
+                    daemon=True,
+                )
+            else:
+                process = mp.Process(
+                    target=_run_disagg_role_process,
+                    args=(
+                        env_gpu_id,
+                        i,
+                        i,
+                        role_args,
+                        writer,
+                        [task_pipes_r[i - 1]],
+                        [result_pipes_w[i - 1]],
+                    ),
+                    name=f"sglang-diffusion-{role_type.value}-{i}",
+                    daemon=True,
+                )
+
+            process.start()
+            all_processes.append(process)
+
+        # Close unused pipe ends in parent
+        for p in task_pipes_w + task_pipes_r + result_pipes_w + result_pipes_r:
+            p.close()
+
+        # Wait for processes to be ready
+        for i, reader in enumerate(pipe_readers):
+            try:
+                data = reader.recv()
+            except EOFError:
+                logger.error(f"Disagg {role_type.value} rank {i} is dead. Check logs.")
+                raise
+            if data.get("status") != "ready":
+                raise RuntimeError(
+                    f"Disagg {role_type.value} rank {i} failed to initialize."
+                )
+            reader.close()
+
+        logger.info(
+            "Disagg %s ready on GPU(s) %s (scheduler_port=%d)",
+            role_type.value.upper(),
+            gpu_ids,
+            role_args.scheduler_port,
+        )
+
+    logger.info("All disagg roles ready")
+
+    if launch_http_server:
+        logger.info("Starting FastAPI server (connected to ENCODER scheduler).")
+        launch_http_server_only(server_args)
+
+    return all_processes
+
+
+def _run_disagg_role_process(
+    gpu_id: int,
+    local_rank: int,
+    rank: int,
+    server_args: ServerArgs,
+    pipe_writer: mp.connection.Connection,
+    task_pipes: list,
+    result_pipes: list,
+):
+    """Entry point for a disagg role process.
+
+    Sets CUDA_VISIBLE_DEVICES to the specified GPU and runs the scheduler.
+    """
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+    # Run the normal scheduler process with local_rank=0
+    # (since CUDA_VISIBLE_DEVICES remaps to a single GPU)
+    run_scheduler_process(
+        local_rank=0,
+        rank=0,
+        master_port=server_args.master_port,
+        server_args=server_args,
+        pipe_writer=pipe_writer,
+        task_pipe_r=None,
+        result_pipe_w=None,
+        task_pipes_to_slaves=task_pipes,
+        result_pipes_from_slaves=result_pipes,
+    )
+
+
 def launch_http_server_only(server_args):
     # set for endpoints to access global_server_args
     set_global_server_args(server_args)

@@ -215,6 +215,10 @@ class ServerArgs:
 
     # Disaggregation
     disagg_role: RoleType = RoleType.MONOLITHIC
+    # ZMQ endpoints for role-to-role communication (populated at launch time)
+    encoder_to_denoiser_endpoint: str | None = None
+    denoiser_to_decoder_endpoint: str | None = None
+    decoder_to_encoder_endpoint: str | None = None
 
     # Logging
     log_level: str = "info"
@@ -646,6 +650,27 @@ class ServerArgs:
             help="Role for disaggregated pipeline. 'monolithic' (default) loads all components. "
             "'encoder' loads only text/image encoders. 'denoising' loads only the transformer. "
             "'decoder' loads only the VAE decoder.",
+        )
+        parser.add_argument(
+            "--encoder-to-denoiser-endpoint",
+            type=str,
+            default=None,
+            help="ZMQ endpoint for encoder->denoiser transfer (e.g., tcp://127.0.0.1:6001). "
+            "Auto-assigned if not specified.",
+        )
+        parser.add_argument(
+            "--denoiser-to-decoder-endpoint",
+            type=str,
+            default=None,
+            help="ZMQ endpoint for denoiser->decoder transfer (e.g., tcp://127.0.0.1:6002). "
+            "Auto-assigned if not specified.",
+        )
+        parser.add_argument(
+            "--decoder-to-encoder-endpoint",
+            type=str,
+            default=None,
+            help="ZMQ endpoint for decoder->encoder result return (e.g., tcp://127.0.0.1:6003). "
+            "Auto-assigned if not specified.",
         )
 
         # Prompt text file for batch processing

@@ -207,9 +207,16 @@ class GPUWorker:
             f"Related offload server args to disable: {suggested_args_str}"
         )
 
-    def execute_forward(self, batch: List[Req]) -> OutputBatch:
+    def execute_forward(
+        self, batch: List[Req], return_req: bool = False
+    ) -> OutputBatch | Req:
         """
         Execute a forward pass.
+
+        Args:
+            batch: List of requests to process.
+            return_req: If True, return the raw Req instead of OutputBatch.
+                Used by disaggregated pipelines to access intermediate tensors.
         """
         assert self.pipeline is not None
         req = batch[0]
@@ -227,6 +234,11 @@ class GPUWorker:
 
             req.log(server_args=self.server_args)
             result = self.pipeline.forward(req, self.server_args)
+
+            # For disagg roles, return raw Req to let the caller handle
+            # the role-to-role tensor transfer before OutputBatch conversion.
+            if return_req and isinstance(result, Req):
+                return result
 
             if isinstance(result, Req):
                 output_batch = OutputBatch(
