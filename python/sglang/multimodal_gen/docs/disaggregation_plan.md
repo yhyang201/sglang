@@ -188,8 +188,9 @@ Below maps directly to RFC sections and TODO items. See [RFC](https://github.com
 | 2. TransferBuffer — TensorBuffer + Buddy Allocator | 3.2, 3.3 | ✅ Done | Commit 6 |
 | 2. TransferManager — Engine Setup (RDMA/RPC) | 2.1 | ✅ Done | Commit 9 |
 | 2. TransferManager — Receive Loop | 2.2 | ✅ Done | Commit 10 |
-| 2. TransferManager — Send Loop + transfer_slice | 2.3 | 🔶 Partial (send done, transfer_slice TODO) | Commit 10 / Phase 7c |
-| 2. TransferringQueue / SwappingQueue | 4.4 | ❌ | Phase 7c |
+| 2. TransferManager — Send Loop + transfer_slice | 2.3 | 🔶 Partial (send done, transfer_slice deferred — see Route B) | Commit 10 |
+| 2. TransferringQueue / SwappingQueue | 4.4 | 🔶 Deferred (BS=1, no multi-request batching yet) | — |
+| Multi-Rank Pool Mode (Route A: broadcast) | — | ✅ Done | Commit 11 |
 | 4. E2E Workflow — P2P data transfer (bypass DS) | — | ✅ Done | Commit 10 |
 | 5. CUDA Stream Overlap — 3-stream scheduling | 4.2 | ❌ | Phase 8 |
 | 5. CUDA Stream Overlap — Request-level trigger | 4.3 | ❌ | Phase 8 |
@@ -307,12 +308,72 @@ while running:
 
 ---
 
-### Phase 7c: Queue Management + transfer_slice (TODO)
+### Commit 11 — Phase 7c: Multi-Rank Pool Mode (Route A — Broadcast Full Tensor) ✅
 
-> [RFC §4 TODO 4.4](#phase-7-transfermanager--p2p-data-transfer-rfc-2-todo-2123-4) — request queues and SP-aware transfer
+> Covers multi-rank support for pool mode event loop. Each role can use SP/TP/CFG parallelism with multiple GPUs.
 
-**TransferringQueue / SwappingQueue**: requests waiting for P2P data vs ready for H2D
-**transfer_slice**: handle FSDP (encoder) → SP (denoiser) tensor redistribution
+`[Diffusion] Add disaggregation Phase 7c: multi-rank pool mode support`
+
+**Goal**: When a role uses multiple GPUs (e.g., denoiser with SP=4), only rank 0 communicates via ZMQ with DiffusionServer. All ranks participate in `execute_forward()` via NCCL collectives.
+
+**Route A (implemented)**: Broadcast full tensors to all ranks, let pipeline shard internally.
+- Encoder output (e.g., prompt_embeds) is broadcast in full; the pipeline's `shard_latents_for_sp()` handles sharding.
+- TP mode: all ranks receive the same full tensor; model internally handles weight partitioning.
+- Simple, correct, works with all models and parallelism strategies.
+
+- `runtime/managers/scheduler.py` — **Modified**:
+  - `_init_pool_mode_sockets()`: Gated on `self.gpu_id == 0` — non-rank-0 has no ZMQ sockets
+  - `_init_p2p_transfer_manager()`: Gated on `self.gpu_id == 0` — non-rank-0 has no TransferManager
+  - `_pool_mode_recv_work()`: **New** — rank 0 receives from ZMQ, broadcasts to all ranks via `broadcast_pyobj` over SP/CFG/TP CPU groups
+  - `_pool_mode_event_loop()`: Rewritten — uses `_pool_mode_recv_work()`, routes P2P frames to rank-0 `_handle_p2p_message()` or non-rank-0 `_handle_p2p_non_rank0()`
+  - `_handle_p2p_non_rank0()`: **New** — skip alloc/push (rank-0-only), enter compute on p2p_ready
+  - `_handle_p2p_ready_non_rank0()`: **New** — build minimal Req from scalars, call execute_forward (pipeline NCCL handles tensor sync)
+  - Step methods (`_pool_mode_encoder_step`, `_pool_mode_denoiser_step`, `_pool_mode_decoder_step`): All ZMQ send calls gated on `self._pool_result_push is not None`
+  - Cleanup gated on socket/manager existence
+- `test/unit/test_scheduler_p2p.py` — Added 9 multi-rank gating tests: init skip, send gating for all 3 roles, P2P flag logic, non-rank-0 P2P handling
+
+**Multi-rank event loop flow**:
+```
+All ranks:
+  frames = _pool_mode_recv_work()       # rank 0 ZMQ recv + broadcast
+  if P2P message:
+    rank 0  → _handle_p2p_message()     # alloc/push/ready (full handling)
+    rank !0 → _handle_p2p_non_rank0()   # only p2p_ready → execute_forward
+  else (relay mode):
+    all ranks → step method              # execute_forward (NCCL sync)
+    rank 0 only → send result via ZMQ
+```
+
+---
+
+### Deferred: Route B — `transfer_slice` Optimization
+
+> [RFC §2 TODO 2.3](#phase-7-transfermanager--p2p-data-transfer-rfc-2-todo-2123-4) — SP-aware tensor slicing during transfer
+
+**What**: Instead of broadcasting the full tensor and having the pipeline shard it, `transfer_slice` would send only the slice each SP rank needs directly via RDMA.
+
+**Why deferred**:
+1. **Model-specific shard patterns**: Each model family has a different sharding dimension and strategy:
+   - Video (Wan, HunyuanVideo): `[B,C,T,H,W]` shard on dim=2 (temporal)
+   - Flux: `[B,C,H',W']` shard on dim=2
+   - SDXL: `[B,H*W,C]` shard on dim=1
+   - LTX-2: `[B,S,D]` shard on dim=1 by frame
+   - ZImage: `[B,C,T,H,W]` shard on dim=3 with H/W swap
+   This would require exposing shard patterns from pipeline configs into the transfer layer.
+2. **Pipeline interface changes**: `shard_latents_for_sp()` and `gather_latents_for_sp()` are pipeline-config methods. Transfer layer would need to call these, creating a coupling between transport and pipeline logic.
+3. **NCCL broadcast is fast**: For intra-machine (same NVLink/PCIe domain), broadcast overhead is negligible vs. the denoising compute. The optimization matters most for cross-machine RDMA where bandwidth is limited.
+4. **TP doesn't benefit**: TP needs the full tensor on every rank — no slicing possible.
+
+**When to implement**: When cross-machine RDMA deployments show transfer-to-compute ratio > 5%, or when consistency models reduce step counts to 1–4 (making transfer time proportionally significant).
+
+---
+
+### Deferred: TransferringQueue / SwappingQueue (RFC §4 TODO 4.4)
+
+Request-level queue management for pipelining multiple in-flight transfers. Currently unnecessary because:
+- BS=1 constraint means at most 1 request per role at a time
+- Transfer + compute are synchronous within the event loop
+- Queuing becomes valuable with multi-request batching (future work)
 
 ---
 
@@ -501,7 +562,9 @@ RFC §  Original Plan                   Actual / Planned
 §2     Phase 6 (TransferBuffer)        Commit 6 ✅ (buddy allocator + pinned pool)
 §2     Phase 7a (Engine+Manager+P2P)    Commit 9 ✅ (TransferEngine, TransferManager, protocol)
 §2,§4  Phase 7b (Scheduler P2P)        Commit 10 ✅ (P2P event loop + handlers)
-§4     Phase 7c (Queues+transfer_slice) TODO — TransferringQueue, SwappingQueue
+—      Phase 7c (Multi-Rank Pool)      Commit 11 ✅ (Route A: broadcast full tensor)
+§2     Route B (transfer_slice)        Deferred — model-specific shard patterns, NCCL fast enough
+§4     Queues (Transferring/Swapping)  Deferred — BS=1 constraint, no multi-request batching
 §5     Phase 8 (3-Stream Overlap)      TODO — H2D/Compute/D2H pipelining
 Future — (etcd P2P Routing)            Future — decentralized control plane
 ```
@@ -511,8 +574,8 @@ Future — (etcd P2P Routing)            Future — decentralized control plane
 ```
 Phase 5 (Capacity-Aware DS) ✅ ──┐
 Phase 6 (TransferBuffer) ✅ ─────┼──→ Phase 7a (Engine+Manager+P2P) ✅
-                                 │        └──→ Phase 7b (Scheduler P2P)
-Phase 5.5 (Per-Role Parallelism) ✅ ┘        └──→ Phase 7c (Queues+transfer_slice)
-             └──→ Phase 7c (transfer_slice needs SP/FSDP info)
-                                                  └──→ Phase 8 (3-Stream Overlap)
+                                 │        └──→ Phase 7b (Scheduler P2P) ✅
+Phase 5.5 (Per-Role Parallelism) ✅ ┘        └──→ Phase 7c (Multi-Rank Pool) ✅
+                                                      ├──→ Route B (transfer_slice) [deferred]
+                                                      └──→ Phase 8 (3-Stream Overlap)
 ```
