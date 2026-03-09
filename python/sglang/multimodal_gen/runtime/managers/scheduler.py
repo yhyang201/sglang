@@ -61,9 +61,16 @@ class Scheduler:
         port_args: PortArgs,
         task_pipes_to_slaves: list = None,
         result_pipes_from_slaves: list = None,
+        local_rank: int | None = None,
     ):
         self.server_args = server_args
         self.port_args = port_args
+
+        # local_rank is the physical GPU index for torch.cuda.set_device.
+        # In non-disagg mode, it equals gpu_id. In disagg mode, it may differ
+        # (e.g., denoiser rank 0 on physical GPU 1).
+        if local_rank is None:
+            local_rank = gpu_id
 
         set_global_server_args(server_args=server_args)
 
@@ -80,7 +87,7 @@ class Scheduler:
             self.receiver = None
 
         worker = GPUWorker(
-            local_rank=gpu_id,
+            local_rank=local_rank,
             master_port=port_args.master_port,
             rank=gpu_id,
             server_args=server_args,
@@ -119,30 +126,20 @@ class Scheduler:
         self._max_consecutive_errors = 3
         self._consecutive_error_count = 0
 
-        # Disaggregation connectors
+        # Disaggregation state
         self._disagg_role = server_args.disagg_role
-        self._role_sender = None  # sends to next role
-        self._role_receiver = None  # receives from previous role
-        self._result_sender = None  # decoder -> encoder result return
-        self._result_receiver = None  # encoder waits for decoder result
-
-        # Phase 4: Async pipelining state for ENCODER role.
-        # Maps request_id -> (zmq_identity, RequestMetrics, submit_time)
-        # so the encoder can fire-and-forget to the denoiser and reply
-        # to the HTTP client later when the decoder result arrives.
-        self._pending_disagg: dict[str, tuple[bytes | None, Any, float]] = {}
         self._disagg_timeout_s: float = float(
             getattr(server_args, "disagg_timeout", 600)
         )
 
-        # Phase 4 P3: Per-role observability metrics
+        # Per-role observability metrics
         self._disagg_metrics = None
         self._pool_mode = getattr(server_args, "disagg_pool_mode", False)
         self._p2p_mode = getattr(server_args, "disagg_p2p_mode", False)
         # Pool mode sockets (set by _init_pool_mode_sockets)
         self._pool_work_pull = None
         self._pool_result_push = None
-        # Phase 7b: P2P transfer manager (set by _init_p2p_transfer_manager)
+        # P2P transfer manager (set by _init_p2p_transfer_manager)
         self._transfer_manager = None
 
         if self._disagg_role != RoleType.MONOLITHIC:
@@ -151,12 +148,9 @@ class Scheduler:
             )
 
             self._disagg_metrics = DisaggMetrics(role=self._disagg_role.value)
-            if self._pool_mode:
-                self._init_pool_mode_sockets()
-                if self._p2p_mode:
-                    self._init_p2p_transfer_manager()
-            else:
-                self._init_disagg_connectors()
+            self._init_pool_mode_sockets()
+            if self._p2p_mode:
+                self._init_p2p_transfer_manager()
 
     def get_disagg_metrics(self) -> dict | None:
         """Return disagg role metrics snapshot, or None if not in disagg mode."""
@@ -224,8 +218,6 @@ class Scheduler:
             else:
                 logger.info("Processing warmup req...")
 
-        # Note: disagg ENCODER is now handled directly in the event loop
-        # via _handle_generation_disagg_encoder() with identity/is_warmup args.
         return self.worker.execute_forward(reqs)
 
     def return_result(
@@ -378,399 +370,31 @@ class Scheduler:
 
         return recv_reqs
 
-    def _init_disagg_connectors(self):
-        """Initialize ZMQ connectors for disaggregated role communication."""
-        from sglang.multimodal_gen.runtime.disaggregation.role_connector import (
-            create_denoiser_to_decoder_receiver,
-            create_denoiser_to_decoder_sender,
-            create_encoder_to_denoiser_receiver,
-            create_encoder_to_denoiser_sender,
-        )
+    def _migrate_req_tensors(self, req: Req) -> None:
+        """Move all GPU tensor attributes of a Req to this worker's device.
 
-        sa = self.server_args
-
-        if self._disagg_role == RoleType.ENCODER:
-            # Encoder sends to denoiser
-            self._role_sender = create_encoder_to_denoiser_sender(
-                self.context, sa.encoder_to_denoiser_endpoint
-            )
-            # Encoder receives final result from decoder
-            result_socket, _ = get_zmq_socket(
-                self.context, zmq.PULL, sa.decoder_to_encoder_endpoint, bind=True
-            )
-            self._result_receiver = result_socket
-            logger.info(
-                "Disagg ENCODER: sender=%s, result_receiver=%s",
-                sa.encoder_to_denoiser_endpoint,
-                sa.decoder_to_encoder_endpoint,
-            )
-
-        elif self._disagg_role == RoleType.DENOISING:
-            # Denoiser receives from encoder (tensors go directly to GPU)
-            self._role_receiver = create_encoder_to_denoiser_receiver(
-                self.context, sa.encoder_to_denoiser_endpoint, device="cuda"
-            )
-            # Denoiser sends to decoder
-            self._role_sender = create_denoiser_to_decoder_sender(
-                self.context, sa.denoiser_to_decoder_endpoint
-            )
-            logger.info(
-                "Disagg DENOISING: receiver=%s, sender=%s",
-                sa.encoder_to_denoiser_endpoint,
-                sa.denoiser_to_decoder_endpoint,
-            )
-
-        elif self._disagg_role == RoleType.DECODER:
-            # Decoder receives from denoiser (tensors go directly to GPU)
-            self._role_receiver = create_denoiser_to_decoder_receiver(
-                self.context, sa.denoiser_to_decoder_endpoint, device="cuda"
-            )
-            # Decoder sends result back to encoder
-            result_socket, _ = get_zmq_socket(
-                self.context, zmq.PUSH, sa.decoder_to_encoder_endpoint, bind=False
-            )
-            self._result_sender = result_socket
-            logger.info(
-                "Disagg DECODER: receiver=%s, result_sender=%s",
-                sa.denoiser_to_decoder_endpoint,
-                sa.decoder_to_encoder_endpoint,
-            )
-
-    def _disagg_event_loop(self) -> None:
-        """Event loop for DENOISING and DECODER roles.
-
-        Instead of receiving requests from an HTTP client via ZMQ ROUTER,
-        these roles receive intermediate tensors from the previous role
-        via ZMQ PULL, process them, and send results to the next role.
-
-        P2: After receiving the first request (blocking), drains any
-        additional queued requests (non-blocking) to process them in a
-        batch (sequentially — GPU batching requires pipeline changes).
+        After broadcast or ZMQ recv, tensors may be on a different GPU
+        (e.g., rank 0's device). This moves them to the local device.
+        Handles both direct tensor attributes and lists of tensors.
         """
-        from sglang.multimodal_gen.runtime.disaggregation.tensor_transport import (
-            send_tensors,
-        )
-
-        role_name = self._disagg_role.value.upper()
-        recv_timeout_ms = int(self._disagg_timeout_s * 1000)
-        logger.info(
-            "Disagg %s event loop started, recv_timeout=%ds, waiting for work...",
-            role_name,
-            self._disagg_timeout_s,
-        )
-
-        while self._running:
-            try:
-                # 1. Receive first request (blocking with timeout)
-                try:
-                    req = self._role_receiver.recv(timeout_ms=recv_timeout_ms)
-                except TimeoutError:
-                    logger.warning(
-                        "Disagg %s: recv timed out after %ds, retrying...",
-                        role_name,
-                        self._disagg_timeout_s,
-                    )
-                    continue
-
-                # P2: Drain additional queued requests (non-blocking)
-                batch = [req]
-                while True:
-                    extra = self._role_receiver.try_recv()
-                    if extra is None:
-                        break
-                    batch.append(extra)
-
-                if len(batch) > 1:
-                    logger.info(
-                        "Disagg %s: drained %d requests from queue",
-                        role_name,
-                        len(batch),
-                    )
-
-                # 2. Process each request in the batch sequentially
-                for req in batch:
-                    request_id = getattr(req, "request_id", "unknown")
-                    logger.debug(
-                        "Disagg %s: processing request %s", role_name, request_id
-                    )
-
-                    # Record metrics
-                    if self._disagg_metrics:
-                        self._disagg_metrics.record_request_start(request_id)
-
-                    try:
-                        self._process_disagg_request(req, send_tensors)
-                        if self._disagg_metrics:
-                            self._disagg_metrics.record_request_complete(request_id)
-                    except Exception as e:
-                        if self._disagg_metrics:
-                            self._disagg_metrics.record_request_failed(request_id)
-                        raise
-
-            except Exception as e:
-                self._consecutive_error_count += 1
-                logger.error(
-                    "Disagg %s: error processing request (attempt %d/%d): %s",
-                    role_name,
-                    self._consecutive_error_count,
-                    self._max_consecutive_errors,
-                    e,
-                    exc_info=True,
-                )
-                if self._consecutive_error_count >= self._max_consecutive_errors:
-                    raise RuntimeError(
-                        f"Disagg {role_name} terminated after "
-                        f"{self._max_consecutive_errors} consecutive errors: {e}"
-                    ) from e
+        target = torch.device(f"cuda:{self.worker.local_rank}")
+        for attr_name in dir(req):
+            if attr_name.startswith("_"):
                 continue
-
-            # Reset error count on success
-            self._consecutive_error_count = 0
-
-        self._cleanup_disagg_connectors()
-
-    def _process_disagg_request(self, req: Req, send_tensors) -> None:
-        """Process a single request for DENOISING or DECODER role.
-
-        Extracted from the event loop to enable batch iteration.
-        """
-        request_id = getattr(req, "request_id", "unknown")
-
-        if self._disagg_role == RoleType.DENOISING:
-            # Initialize the scheduler timesteps (normally done by
-            # TimestepPreparationStage which runs on the encoder side)
-            scheduler_mod = self.worker.pipeline.get_module("scheduler")
-            num_steps = getattr(req, "num_inference_steps", None)
-            if scheduler_mod is not None and num_steps is not None:
-                device = torch.device(f"cuda:{self.gpu_id}")
-                scheduler_mod.set_timesteps(num_steps, device=device)
-
-            # Run denoising stages, get back Req with updated latents
-            start_time = time.monotonic()
-            result = self.worker.execute_forward([req], return_req=True)
-            duration_s = time.monotonic() - start_time
-
-            if isinstance(result, Req):
-                self._role_sender.send(result)
-                logger.info(
-                    "Disagg DENOISING: processed request %s in %.2f s, sent to decoder",
-                    getattr(result, "request_id", "unknown"),
-                    duration_s,
-                )
-            else:
-                # Error: forward error through decoder path to encoder
-                error_msg = getattr(result, "error", "unknown denoiser error")
-                logger.error(
-                    "Disagg DENOISING: error processing request %s: %s, "
-                    "forwarding error to decoder",
-                    request_id,
-                    error_msg,
-                )
-                req.latents = None
-                req._disagg_error = error_msg
-                self._role_sender.send(req)
-
-        elif self._disagg_role == RoleType.DECODER:
-            # Check for upstream error from denoiser
-            disagg_error = getattr(req, "_disagg_error", None)
-            if disagg_error:
-                logger.warning(
-                    "Disagg DECODER: received error from denoiser for %s: %s, "
-                    "forwarding to encoder",
-                    request_id,
-                    disagg_error,
-                )
-                scalar_fields = {
-                    "request_id": request_id,
-                    "error": f"Denoiser error: {disagg_error}",
-                }
-                send_tensors(self._result_sender, {}, scalar_fields)
-                return
-
-            # In disagg mode, the decoder must return the raw output tensor
-            req.save_output = False
-            req.return_file_paths_only = False
-
-            start_time = time.monotonic()
-            output_batch = self.worker.execute_forward([req])
-            duration_s = time.monotonic() - start_time
-
-            # Send result back to encoder via result channel
-            tensor_fields = {}
-            scalar_fields = {"request_id": request_id}
-            if output_batch.output is not None:
-                tensor_fields["output"] = output_batch.output
-            else:
-                logger.warning(
-                    "Disagg DECODER: output_batch.output is None for request %s, "
-                    "error=%s, output_file_paths=%s",
-                    request_id,
-                    output_batch.error,
-                    output_batch.output_file_paths,
-                )
-            if output_batch.audio is not None:
-                tensor_fields["audio"] = output_batch.audio
-            if output_batch.audio_sample_rate is not None:
-                scalar_fields["audio_sample_rate"] = output_batch.audio_sample_rate
-            if output_batch.error is not None:
-                scalar_fields["error"] = output_batch.error
-
-            send_tensors(self._result_sender, tensor_fields, scalar_fields)
-            logger.info(
-                "Disagg DECODER: processed request %s in %.2f s, sent result to encoder",
-                request_id,
-                duration_s,
-            )
-
-    def _handle_generation_disagg_encoder(
-        self, reqs: List[Req], identity: bytes | None = None, is_warmup: bool = False
-    ) -> OutputBatch | None:
-        """Handle generation for ENCODER role in disagg mode (non-blocking).
-
-        1. Run encoder pipeline stages → get Req with embeddings/latents
-        2. Fire-and-forget to denoiser
-        3. Stash identity in _pending_disagg for deferred reply
-        4. Return None to signal the event loop that the reply is deferred
-
-        For warmup requests, blocks synchronously (no HTTP client to defer).
-        """
-        from sglang.multimodal_gen.runtime.disaggregation.tensor_transport import (
-            recv_tensors,
-        )
-
-        # Run encoder stages (return raw Req to access intermediate tensors)
-        req_result = self.worker.execute_forward(reqs, return_req=True)
-
-        if not isinstance(req_result, Req):
-            # Error case — return immediately
-            request_id = (
-                getattr(reqs[0], "request_id", "unknown") if reqs else "unknown"
-            )
-            if self._disagg_metrics:
-                self._disagg_metrics.record_request_failed(request_id)
-            return req_result
-
-        request_id = getattr(req_result, "request_id", None)
-
-        # Track metrics
-        if self._disagg_metrics and not is_warmup:
-            self._disagg_metrics.record_request_start(request_id)
-
-        # Send encoder outputs to denoiser
-        self._role_sender.send(req_result)
-        logger.debug(
-            "Disagg ENCODER: sent request %s to denoiser (pending=%d)",
-            request_id,
-            len(self._pending_disagg),
-        )
-
-        if is_warmup:
-            # Warmup: block-wait for result (no HTTP client to defer to)
-            tensor_fields, scalar_fields = recv_tensors(self._result_receiver)
-            return OutputBatch(
-                output=tensor_fields.get("output"),
-                audio=tensor_fields.get("audio"),
-                audio_sample_rate=scalar_fields.get("audio_sample_rate"),
-                error=scalar_fields.get("error"),
-                metrics=req_result.metrics,
-            )
-
-        # Stash identity + metrics for deferred reply
-        self._pending_disagg[request_id] = (
-            identity,
-            req_result.metrics,
-            time.monotonic(),
-        )
-        return None  # Sentinel: reply deferred
-
-    def _poll_disagg_results(self) -> None:
-        """Non-blocking poll for completed decoder results.
-
-        Drains all available results from _result_receiver and sends
-        ZMQ replies back to the HTTP clients whose requests are complete.
-        """
-        from sglang.multimodal_gen.runtime.disaggregation.tensor_transport import (
-            recv_tensors,
-        )
-
-        while True:
             try:
-                tensor_fields, scalar_fields = recv_tensors(
-                    self._result_receiver, flags=zmq.NOBLOCK
-                )
-            except zmq.Again:
-                break  # No more results available
-
-            request_id = scalar_fields.get("request_id")
-            pending = self._pending_disagg.pop(request_id, None)
-            if pending is None:
-                logger.warning(
-                    "Disagg ENCODER: received result for unknown request_id=%s "
-                    "(may have timed out already)",
-                    request_id,
-                )
+                val = getattr(req, attr_name)
+            except Exception:
                 continue
-
-            identity, metrics, _submit_time = pending
-
-            output_batch = OutputBatch(
-                output=tensor_fields.get("output"),
-                audio=tensor_fields.get("audio"),
-                audio_sample_rate=scalar_fields.get("audio_sample_rate"),
-                error=scalar_fields.get("error"),
-                metrics=metrics,
-            )
-
-            # Record metrics
-            if self._disagg_metrics:
-                if output_batch.error:
-                    self._disagg_metrics.record_request_failed(request_id)
-                else:
-                    self._disagg_metrics.record_request_complete(request_id)
-
-            try:
-                self.return_result(output_batch, identity)
-            except zmq.ZMQError as e:
-                logger.error(
-                    "Disagg ENCODER: failed to send result for request %s: %s",
-                    request_id,
-                    e,
-                )
-
-            logger.debug(
-                "Disagg ENCODER: returned result for request %s (pending=%d)",
-                request_id,
-                len(self._pending_disagg),
-            )
-
-    def _check_disagg_timeouts(self) -> None:
-        """Check for timed-out pending disagg requests and send error replies."""
-        now = time.monotonic()
-        timed_out = [
-            rid
-            for rid, (_ident, _metrics, submit_time) in self._pending_disagg.items()
-            if now - submit_time > self._disagg_timeout_s
-        ]
-
-        for request_id in timed_out:
-            identity, metrics, submit_time = self._pending_disagg.pop(request_id)
-            elapsed = now - submit_time
-            error_msg = (
-                f"Disagg pipeline timeout: request {request_id} "
-                f"not completed within {elapsed:.1f}s "
-                f"(limit={self._disagg_timeout_s}s)"
-            )
-            logger.error("Disagg ENCODER: %s", error_msg)
-            if self._disagg_metrics:
-                self._disagg_metrics.record_request_timeout(request_id)
-            output_batch = OutputBatch(error=error_msg, metrics=metrics)
-            try:
-                self.return_result(output_batch, identity)
-            except zmq.ZMQError as e:
-                logger.error(
-                    "Disagg ENCODER: failed to send timeout error for %s: %s",
-                    request_id,
-                    e,
+            if isinstance(val, torch.Tensor) and val.is_cuda and val.device != target:
+                setattr(req, attr_name, val.to(target))
+            elif isinstance(val, list) and val and isinstance(val[0], torch.Tensor):
+                setattr(
+                    req,
+                    attr_name,
+                    [
+                        t.to(target) if t.is_cuda and t.device != target else t
+                        for t in val
+                    ],
                 )
 
     def _init_pool_mode_sockets(self):
@@ -1109,7 +733,7 @@ class Scheduler:
             scheduler_mod = self.worker.pipeline.get_module("scheduler")
             num_steps = getattr(req, "num_inference_steps", None)
             if scheduler_mod is not None and num_steps is not None:
-                device = torch.device(f"cuda:{self.gpu_id}")
+                device = torch.device(f"cuda:{self.worker.local_rank}")
                 scheduler_mod.set_timesteps(num_steps, device=device)
 
             self.worker.execute_forward([req], return_req=True)
@@ -1208,8 +832,9 @@ class Scheduler:
             self._disagg_metrics.record_request_start(request_id)
 
         # 1. Load tensors from receive buffer (H2D)
+        local_device = f"cuda:{self.worker.local_rank}"
         tensors = self._transfer_manager.load_tensors(
-            request_id, manifest, device="cuda"
+            request_id, manifest, device=local_device
         )
 
         # Free receive slot after loading to GPU
@@ -1256,7 +881,7 @@ class Scheduler:
         scheduler_mod = self.worker.pipeline.get_module("scheduler")
         num_steps = getattr(req, "num_inference_steps", None)
         if scheduler_mod is not None and num_steps is not None:
-            device = torch.device(f"cuda:{self.gpu_id}")
+            device = torch.device(f"cuda:{self.worker.local_rank}")
             scheduler_mod.set_timesteps(num_steps, device=device)
 
         # Run denoising
@@ -1512,7 +1137,8 @@ class Scheduler:
         # Receive tensor multipart from DiffusionServer relay
         if frames is None:
             frames = self._pool_work_pull.recv_multipart(copy=False)
-        req = build_req_fn(frames, "encoder_to_denoiser", device="cuda")
+        local_device = f"cuda:{self.worker.local_rank}"
+        req = build_req_fn(frames, "encoder_to_denoiser", device=local_device)
         request_id = getattr(req, "request_id", "unknown")
 
         if self._disagg_metrics:
@@ -1522,7 +1148,7 @@ class Scheduler:
         scheduler_mod = self.worker.pipeline.get_module("scheduler")
         num_steps = getattr(req, "num_inference_steps", None)
         if scheduler_mod is not None and num_steps is not None:
-            device = torch.device(f"cuda:{self.gpu_id}")
+            device = torch.device(local_device)
             scheduler_mod.set_timesteps(num_steps, device=device)
 
         # Run denoising
@@ -1553,7 +1179,8 @@ class Scheduler:
         # Receive tensor multipart from DiffusionServer relay
         if frames is None:
             frames = self._pool_work_pull.recv_multipart(copy=False)
-        req = build_req_fn(frames, "denoiser_to_decoder", device="cuda")
+        local_device = f"cuda:{self.worker.local_rank}"
+        req = build_req_fn(frames, "denoiser_to_decoder", device=local_device)
         request_id = getattr(req, "request_id", "unknown")
 
         # Check for upstream error
@@ -1601,45 +1228,22 @@ class Scheduler:
 
         logger.debug("Pool DECODER: processed %s", request_id)
 
-    def _cleanup_disagg_connectors(self):
-        """Clean up disagg connector sockets."""
-        if self._role_sender is not None:
-            self._role_sender.close()
-        if self._role_receiver is not None:
-            self._role_receiver.close()
-        if self._result_sender is not None:
-            self._result_sender.close()
-        if self._result_receiver is not None:
-            self._result_receiver.close()
-
     def event_loop(self) -> None:
         """
         The main event loop that listens for ZMQ requests.
         Handles abortion
         """
         # Pool mode: all roles use the pool event loop
-        if self._pool_mode and self._disagg_role != RoleType.MONOLITHIC:
+        if self._disagg_role != RoleType.MONOLITHIC:
             self._pool_mode_event_loop()
             return
-
-        # For DENOISING/DECODER roles, use the disagg event loop (chain mode)
-        if self._disagg_role in (RoleType.DENOISING, RoleType.DECODER):
-            self._disagg_event_loop()
-            return
-
-        is_disagg_encoder = self._disagg_role == RoleType.ENCODER
 
         logger.debug(
             f"Rank 0 scheduler listening on tcp://*:{self.server_args.scheduler_port}"
         )
 
         while self._running:
-            # Phase 4: Poll for completed disagg results (non-blocking)
-            if is_disagg_encoder and self._pending_disagg:
-                self._poll_disagg_results()
-                self._check_disagg_timeouts()
-
-            # P3: Update queue depth for metrics
+            # Update queue depth for metrics
             if self._disagg_metrics:
                 self._disagg_metrics.update_queue_depth(len(self.waiting_queue))
 
@@ -1671,9 +1275,6 @@ class Scheduler:
             # 2: execute, make sure a reply is always sent
             items = self.get_next_batch_to_run()
             if not items:
-                # Brief sleep to avoid busy-spin when there are pending disagg results
-                if is_disagg_encoder and self._pending_disagg:
-                    time.sleep(0.001)
                 continue
 
             identities = [item[0] for item in items]
@@ -1687,15 +1288,7 @@ class Scheduler:
 
                 handler = self.request_handlers.get(type(processed_req))
                 if handler:
-                    # Disagg encoder handler needs identity + is_warmup for deferred reply
-                    if is_disagg_encoder and handler == self._handle_generation:
-                        output_batch = self._handle_generation_disagg_encoder(
-                            reqs,
-                            identity=identities[0],
-                            is_warmup=is_warmup,
-                        )
-                    else:
-                        output_batch = handler(reqs)
+                    output_batch = handler(reqs)
                 else:
                     output_batch = OutputBatch(
                         error=f"Unknown request type: {type(processed_req)}"
@@ -1706,10 +1299,6 @@ class Scheduler:
                     exc_info=True,
                 )
                 output_batch = OutputBatch(error=str(e))
-
-            # If output_batch is None, the reply is deferred (disagg encoder async)
-            if output_batch is None:
-                continue
 
             # 3. return results
             try:

@@ -325,15 +325,11 @@ class ServerArgs:
     # MoE parameters used by Wan2.2
     boundary_ratio: float | None = None
 
-    # Disaggregation
+    # Disaggregation (pool mode only — launched via launch_pool_disagg_server())
     disagg_role: RoleType = RoleType.MONOLITHIC
-    disagg_mode: bool = False  # Auto-launch all 3 roles
-    encoder_gpus: list[int] | None = None
-    denoiser_gpus: list[int] | None = None
-    decoder_gpus: list[int] | None = None
     disagg_timeout: int = 600  # seconds, timeout for pending disagg requests
     disagg_dispatch_policy: str = "round_robin"  # "round_robin" or "max_free_slots"
-    disagg_pool_mode: bool = False  # True for N:M:K independent pool routing
+    disagg_pool_mode: bool = False  # True when running as a pool mode instance
     disagg_p2p_mode: bool = False  # True for P2P transfer (RDMA/TransferEngine)
     disagg_transfer_pool_size: int = (
         256 * 1024 * 1024
@@ -355,10 +351,6 @@ class ServerArgs:
     # Pool mode endpoints (set by launcher, per-instance)
     pool_work_endpoint: str | None = None  # Instance PULL socket (receives work)
     pool_result_endpoint: str | None = None  # Instance PUSH socket (sends results)
-    # ZMQ endpoints for role-to-role communication (populated at launch time)
-    encoder_to_denoiser_endpoint: str | None = None
-    denoiser_to_decoder_endpoint: str | None = None
-    decoder_to_encoder_endpoint: str | None = None
 
     # Logging
     log_level: str = "info"
@@ -669,13 +661,6 @@ class ServerArgs:
         if isinstance(self.disagg_role, str):
             self.disagg_role = RoleType.from_string(self.disagg_role)
 
-        # Validate disagg settings
-        if self.disagg_mode and self.disagg_role != RoleType.MONOLITHIC:
-            raise ValueError(
-                "--disagg-mode auto-launches all roles. Do not combine with "
-                "--disagg-role (which launches a single role manually)."
-            )
-
         # 1. adjust parameters
         self._adjust_parameters()
 
@@ -814,15 +799,7 @@ class ServerArgs:
             "Increase this value if you encounter 'Connection closed by peer' errors after the service is idle. ",
         )
 
-        # Disaggregation
-        parser.add_argument(
-            "--disagg-mode",
-            action="store_true",
-            default=False,
-            help="Enable disaggregated mode: auto-launch encoder, denoiser, and decoder "
-            "as separate processes. Use --encoder-gpus, --denoiser-gpus, --decoder-gpus "
-            "to control GPU assignment.",
-        )
+        # Disaggregation (pool mode — launched via Python API launch_pool_disagg_server())
         parser.add_argument(
             "--disagg-role",
             type=str,
@@ -831,29 +808,7 @@ class ServerArgs:
             help="Role for disaggregated pipeline. 'monolithic' (default) loads all components. "
             "'encoder' loads only text/image encoders. 'denoising' loads only the transformer. "
             "'decoder' loads only the VAE decoder. "
-            "Prefer --disagg-mode for automatic multi-role launch.",
-        )
-        parser.add_argument(
-            "--encoder-gpus",
-            type=int,
-            nargs="+",
-            default=None,
-            help="GPU IDs for the encoder role (default: [0]). Only used with --disagg-mode.",
-        )
-        parser.add_argument(
-            "--denoiser-gpus",
-            type=int,
-            nargs="+",
-            default=None,
-            help="GPU IDs for the denoiser role (default: [1]). Only used with --disagg-mode.",
-        )
-        parser.add_argument(
-            "--decoder-gpus",
-            type=int,
-            nargs="+",
-            default=None,
-            help="GPU IDs for the decoder role (default: [0], shares with encoder). "
-            "Only used with --disagg-mode.",
+            "Set automatically by launch_pool_disagg_server().",
         )
         parser.add_argument(
             "--disagg-timeout",
@@ -869,10 +824,10 @@ class ServerArgs:
             type=str,
             default=ServerArgs.disagg_dispatch_policy,
             choices=["round_robin", "max_free_slots"],
-            help="Dispatch policy for multi-instance disagg routing. "
-            "'round_robin' cycles across encoder instances; "
-            "'max_free_slots' dispatches to the least-loaded encoder. "
-            "Only used with --disagg-mode. Default: round_robin.",
+            help="Dispatch policy for pool mode disagg routing. "
+            "'round_robin' cycles across instances; "
+            "'max_free_slots' dispatches to the least-loaded instance. "
+            "Default: round_robin.",
         )
         parser.add_argument(
             "--disagg-p2p-mode",
