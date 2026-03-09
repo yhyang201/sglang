@@ -23,6 +23,7 @@ from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.configs.models.encoders import T5Config
 from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
 from sglang.multimodal_gen.configs.quantization import NunchakuSVDQuantArgs
+from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 from sglang.multimodal_gen.runtime.layers.quantization.configs.nunchaku_config import (
     NunchakuConfig,
 )
@@ -211,6 +212,9 @@ class ServerArgs:
 
     # MoE parameters used by Wan2.2
     boundary_ratio: float | None = None
+
+    # Disaggregation
+    disagg_role: RoleType = RoleType.MONOLITHIC
 
     # Logging
     log_level: str = "info"
@@ -491,6 +495,10 @@ class ServerArgs:
         # configure logger before use
         configure_logger(server_args=self)
 
+        # Convert string disagg_role to enum (from CLI/config)
+        if isinstance(self.disagg_role, str):
+            self.disagg_role = RoleType.from_string(self.disagg_role)
+
         # 1. adjust parameters
         self._adjust_parameters()
 
@@ -627,6 +635,17 @@ class ServerArgs:
             default=ServerArgs.dist_timeout,
             help="Timeout for torch.distributed operations in seconds. "
             "Increase this value if you encounter 'Connection closed by peer' errors after the service is idle. ",
+        )
+
+        # Disaggregation
+        parser.add_argument(
+            "--disagg-role",
+            type=str,
+            default=ServerArgs.disagg_role.value,
+            choices=RoleType.choices(),
+            help="Role for disaggregated pipeline. 'monolithic' (default) loads all components. "
+            "'encoder' loads only text/image encoders. 'denoising' loads only the transformer. "
+            "'decoder' loads only the VAE decoder.",
         )
 
         # Prompt text file for batch processing
@@ -978,6 +997,10 @@ class ServerArgs:
         # Convert backend string to enum if necessary
         if "backend" in kwargs and isinstance(kwargs["backend"], str):
             kwargs["backend"] = Backend.from_string(kwargs["backend"])
+
+        # Convert disagg_role string to enum if necessary
+        if "disagg_role" in kwargs and isinstance(kwargs["disagg_role"], str):
+            kwargs["disagg_role"] = RoleType.from_string(kwargs["disagg_role"])
 
         kwargs["pipeline_config"] = PipelineConfig.from_kwargs(kwargs)
         return cls(**kwargs)
