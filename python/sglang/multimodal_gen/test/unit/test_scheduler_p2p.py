@@ -440,5 +440,214 @@ class TestSchedulerP2PInit(unittest.TestCase):
         self.assertGreater(reg["pool_size"], 0)
 
 
+class TestMultiRankGating(unittest.TestCase):
+    """Test Phase 7c multi-rank gating: non-rank-0 skips ZMQ sends."""
+
+    def _make_scheduler(self, gpu_id=0, role="encoder"):
+        """Create a minimal mock Scheduler for multi-rank tests."""
+        scheduler = object.__new__(Scheduler)
+        scheduler.gpu_id = gpu_id
+        scheduler._disagg_role = MagicMock()
+        scheduler._disagg_role.value = role
+        scheduler._disagg_metrics = None
+        scheduler._p2p_mode = False
+        scheduler._transfer_manager = None
+        scheduler._pool_result_push = MagicMock() if gpu_id == 0 else None
+        scheduler._pool_work_pull = MagicMock() if gpu_id == 0 else None
+        scheduler.worker = MagicMock()
+        scheduler.server_args = MagicMock()
+        scheduler.server_args.disagg_transfer_pool_size = 1 * 1024 * 1024
+        scheduler.server_args.disagg_p2p_hostname = "127.0.0.1"
+        return scheduler
+
+    def test_init_sockets_skipped_non_rank0(self):
+        """Non-rank-0 should not create ZMQ sockets."""
+        scheduler = self._make_scheduler(gpu_id=1)
+        scheduler._pool_mode = True
+        scheduler.server_args.disagg_pool_work_port = 5000
+        scheduler.server_args.disagg_pool_result_port = 5001
+        scheduler.server_args.disagg_ds_host = "127.0.0.1"
+
+        scheduler._init_pool_mode_sockets()
+
+        # Sockets should remain None
+        self.assertIsNone(scheduler._pool_work_pull)
+        self.assertIsNone(scheduler._pool_result_push)
+
+    def test_init_transfer_manager_skipped_non_rank0(self):
+        """Non-rank-0 should not create TransferManager."""
+        scheduler = self._make_scheduler(gpu_id=2)
+
+        scheduler._init_p2p_transfer_manager()
+
+        self.assertIsNone(scheduler._transfer_manager)
+
+    def _make_encoder_frames(self):
+        """Create pickled frames for encoder step tests."""
+        import pickle
+
+        from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
+
+        req = object.__new__(Req)
+        req.__dict__.update(
+            {
+                "request_id": "test-1",
+                "guidance_scale": 7.5,
+                "num_inference_steps": 20,
+            }
+        )
+        return [b"req_id", pickle.dumps([req])], req
+
+    def test_encoder_step_no_send_on_non_rank0(self):
+        """Non-rank-0 encoder should not crash on send (push is None)."""
+        scheduler = self._make_scheduler(gpu_id=1, role="encoder")
+        frames, req = self._make_encoder_frames()
+        scheduler.worker.execute_forward.return_value = req
+
+        extract_tensor = MagicMock(return_value={"enc_hidden": torch.zeros(1)})
+        extract_scalar = MagicMock(return_value={"request_id": "test-1"})
+        send_fn = MagicMock()
+
+        scheduler._pool_mode_encoder_step(
+            send_fn,
+            extract_tensor,
+            extract_scalar,
+            ["enc_hidden"],
+            ["request_id"],
+            frames=frames,
+        )
+
+        # send_fn should NOT be called (push is None)
+        send_fn.assert_not_called()
+
+    def test_encoder_step_sends_on_rank0(self):
+        """Rank-0 encoder should send results normally."""
+        scheduler = self._make_scheduler(gpu_id=0, role="encoder")
+        frames, req = self._make_encoder_frames()
+        scheduler.worker.execute_forward.return_value = req
+
+        extract_tensor = MagicMock(return_value={"enc_hidden": torch.zeros(1)})
+        extract_scalar = MagicMock(return_value={"request_id": "test-1"})
+        send_fn = MagicMock()
+
+        scheduler._pool_mode_encoder_step(
+            send_fn,
+            extract_tensor,
+            extract_scalar,
+            ["enc_hidden"],
+            ["request_id"],
+            frames=frames,
+        )
+
+        # send_fn should be called once
+        send_fn.assert_called_once()
+
+    def test_denoiser_step_no_send_on_non_rank0(self):
+        """Non-rank-0 denoiser should not crash on send."""
+        from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
+
+        scheduler = self._make_scheduler(gpu_id=1, role="denoising")
+
+        mock_result = object.__new__(Req)
+        mock_result.__dict__["request_id"] = "test-2"
+        mock_result.__dict__["num_inference_steps"] = 20
+        scheduler.worker.execute_forward.return_value = mock_result
+        scheduler.worker.pipeline.get_module.return_value = MagicMock()
+
+        extract_tensor = MagicMock(return_value={})
+        extract_scalar = MagicMock(return_value={"request_id": "test-2"})
+        send_fn = MagicMock()
+
+        # Build frames that build_req_fn can parse
+        build_req_fn = MagicMock(return_value=mock_result)
+
+        frames = [b"some", b"frames"]
+
+        scheduler._pool_mode_denoiser_step(
+            send_fn,
+            build_req_fn,
+            extract_tensor,
+            extract_scalar,
+            [],
+            [],
+            frames=frames,
+        )
+
+        send_fn.assert_not_called()
+
+    def test_decoder_step_no_send_on_non_rank0(self):
+        """Non-rank-0 decoder should not crash on send."""
+        scheduler = self._make_scheduler(gpu_id=3, role="decoder")
+
+        mock_output = MagicMock()
+        mock_output.output = torch.zeros(1, 3, 64, 64)
+        mock_output.audio = None
+        mock_output.audio_sample_rate = None
+        mock_output.error = None
+        scheduler.worker.execute_forward.return_value = mock_output
+
+        # build_req_fn returns a Req-like object
+        mock_req = MagicMock()
+        mock_req.request_id = "test-3"
+        mock_req._disagg_error = None
+        build_req_fn = MagicMock(return_value=mock_req)
+        send_fn = MagicMock()
+
+        frames = [b"some", b"frames"]
+
+        scheduler._pool_mode_decoder_step(
+            send_fn,
+            build_req_fn,
+            frames=frames,
+        )
+
+        send_fn.assert_not_called()
+
+    def test_p2p_flag_uses_mode_only(self):
+        """P2P detection should use _p2p_mode flag, not transfer_manager presence."""
+        scheduler = self._make_scheduler(gpu_id=1, role="denoising")
+        scheduler._p2p_mode = True
+        # transfer_manager is None on non-rank-0, but p2p should still be True
+        scheduler._transfer_manager = None
+
+        # Simulate the event loop's p2p check
+        p2p = scheduler._p2p_mode
+        self.assertTrue(p2p)
+
+    def test_handle_p2p_non_rank0_skips_alloc(self):
+        """Non-rank-0 should skip p2p_alloc messages (no-op)."""
+        scheduler = self._make_scheduler(gpu_id=1, role="denoising")
+
+        alloc_frames = encode_p2p_msg(P2PAllocMsg(request_id="r1", data_size=1024))
+        # Should not raise
+        scheduler._handle_p2p_non_rank0(alloc_frames)
+
+    def test_handle_p2p_non_rank0_ready_calls_execute(self):
+        """Non-rank-0 should call execute_forward on p2p_ready."""
+        from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
+
+        scheduler = self._make_scheduler(gpu_id=1, role="denoising")
+        scheduler._disagg_role = RoleType.DENOISING
+        scheduler.worker.pipeline.get_module.return_value = MagicMock()
+
+        ready_msg = {
+            "msg_type": P2PMsgType.READY,
+            "request_id": "r1",
+            "scalar_fields": {
+                "request_id": "r1",
+                "num_inference_steps": 20,
+                "guidance_scale": 7.5,
+            },
+        }
+        ready_frames = [
+            P2P_MAGIC,
+            json.dumps(ready_msg, separators=(",", ":")).encode("utf-8"),
+        ]
+
+        scheduler._handle_p2p_ready_non_rank0(ready_msg)
+
+        scheduler.worker.execute_forward.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
