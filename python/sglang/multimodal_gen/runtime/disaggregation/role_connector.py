@@ -350,3 +350,77 @@ def create_denoiser_to_decoder_receiver(
         DENOISER_TO_DECODER_SCALAR_FIELDS,
         device=device,
     )
+
+
+# --- Pool mode helpers (DiffusionServer-mediated transfers) ---
+
+
+def pack_encoder_output(req: Req) -> tuple[bytes, list]:
+    """Pack encoder output for relay via DiffusionServer.
+
+    Returns (metadata_bytes, buffers) ready for send_multipart.
+    """
+    from sglang.multimodal_gen.runtime.disaggregation.tensor_transport import (
+        pack_tensors,
+    )
+
+    tensor_fields = _extract_tensor_fields(req, ENCODER_TO_DENOISER_TENSOR_FIELDS)
+    scalar_fields = _extract_scalar_fields(req, ENCODER_TO_DENOISER_SCALAR_FIELDS)
+    return pack_tensors(tensor_fields, scalar_fields)
+
+
+def pack_denoiser_output(req: Req) -> tuple[bytes, list]:
+    """Pack denoiser output for relay via DiffusionServer."""
+    from sglang.multimodal_gen.runtime.disaggregation.tensor_transport import (
+        pack_tensors,
+    )
+
+    tensor_fields = _extract_tensor_fields(req, DENOISER_TO_DECODER_TENSOR_FIELDS)
+    scalar_fields = _extract_scalar_fields(req, DENOISER_TO_DECODER_SCALAR_FIELDS)
+    return pack_tensors(tensor_fields, scalar_fields)
+
+
+def build_req_from_frames(
+    parts: list,
+    transition: str,
+    device: str | torch.device = "cpu",
+) -> Req:
+    """Build a Req from multipart ZMQ frames (received via relay).
+
+    Args:
+        parts: ZMQ multipart frames (metadata JSON + tensor buffers)
+        transition: "encoder_to_denoiser" or "denoiser_to_decoder"
+        device: target device for tensors
+    """
+    from sglang.multimodal_gen.runtime.disaggregation.tensor_transport import (
+        unpack_tensors,
+    )
+
+    tensor_fields, scalar_fields = unpack_tensors(parts, device=device)
+
+    if transition == "encoder_to_denoiser":
+        scalar_field_names = ENCODER_TO_DENOISER_SCALAR_FIELDS
+    elif transition == "denoiser_to_decoder":
+        scalar_field_names = DENOISER_TO_DECODER_SCALAR_FIELDS
+    else:
+        raise ValueError(f"Unknown transition: {transition}")
+
+    # Build Req
+    init_kwargs = {}
+    if "request_id" in scalar_fields:
+        init_kwargs["request_id"] = scalar_fields["request_id"]
+    if "guidance_scale" in scalar_fields:
+        init_kwargs["guidance_scale"] = scalar_fields["guidance_scale"]
+
+    req = Req(**init_kwargs)
+    _apply_scalar_fields(req, scalar_fields, scalar_field_names)
+    _apply_tensor_fields(req, tensor_fields)
+
+    # Recreate torch.Generator from seed
+    seed = scalar_fields.get("seed")
+    if seed is not None:
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(int(seed))
+        req.generator = generator
+
+    return req

@@ -8,7 +8,285 @@ RFC: https://github.com/sgl-project/sglang/issues/19512
 - **Primary value**: Memory savings (offload encoder weights from denoising GPU), enabling SP for denoising, heterogeneous parallelism
 - **Constraint**: BS=1 only; Denoising dominates 99.9%+ of total time
 
-## Phase 1: Role Abstraction & Weight Separation (Single Machine)
+---
+
+## Implementation Progress
+
+### Commit 1 — Phase 1: Role Abstraction & Weight Separation ✅
+
+> Corresponds to [Original Plan Phase 1](#original-plan-phase-1-role-abstraction--weight-separation-single-machine)
+
+`ff99f9a2c` — `[Diffusion] Add disaggregation Phase 1: role-based weight separation`
+
+- `runtime/disaggregation/roles.py` — `RoleType` enum, `get_module_role()`, `filter_modules_for_role()`
+- `runtime/pipelines_core/composed_pipeline_base.py` — Filter `_required_config_modules` and stages by `role_affinity`
+- `runtime/server_args.py` — `--disagg-role` (encoder/denoising/decoder/monolithic)
+- `runtime/pipelines_core/stages/base.py` — `role_affinity` property on stage classes
+
+### Commit 2 — Phase 2: ZMQ Zero-Copy IPC ✅
+
+> Corresponds to [Original Plan Phase 2](#original-plan-phase-2-multi-process-deployment-single-machine-ipc)
+
+`74f9bee52` — `[Diffusion] Add disaggregation Phase 2: ZMQ zero-copy IPC`
+
+- `runtime/disaggregation/tensor_transport.py` — `TensorWrapper` (zero-copy via `__buffer__`), `send_tensors()` / `recv_tensors()` over ZMQ multipart
+- `runtime/disaggregation/role_connector.py` — `RoleConnectorSender` / `RoleConnectorReceiver` with per-transition field lists
+- `runtime/managers/scheduler.py` — Disagg-aware event loops for denoiser/decoder; encoder sends to denoiser and waits for decoder result
+
+**Deviation from plan**: Used ZMQ zero-copy multipart instead of `transfer_buffer.py` + `ipc_channel.py`. The plan noted "start with ZMQ" as the simple-first approach; CUDA IPC / RDMA deferred to later phases.
+
+### Commit 3 — Phase 3: CLI Integration & Launch Orchestration ✅
+
+> Partially covers [Original Plan Phase 2](#original-plan-phase-2-multi-process-deployment-single-machine-ipc) (launch_server) and [Original Plan Phase 3](#original-plan-phase-3-diffusionserver----request-routing--orchestration) (basic single-instance routing)
+
+`9d12bed9b` — `[Diffusion] Add disaggregation Phase 3: CLI integration and launch orchestration`
+
+- `runtime/server_args.py` — `--disagg-mode`, `--encoder-gpus`, `--denoiser-gpus`, `--decoder-gpus`
+- `runtime/launch_server.py` — `launch_disagg_server()` auto-spawns 3 role process groups with per-role `ServerArgs` (via `from_kwargs` to trigger `__post_init__` parallelism recalculation)
+- `runtime/entrypoints/cli/serve.py` — CLI entry point dispatches to `launch_disagg_server`
+- `runtime/managers/scheduler.py` — Denoiser/decoder receive tensors directly on GPU; decoder preserves raw output tensor for return to encoder
+- `test/server/test_disagg_server.py` — Server-level E2E test
+
+**Deviation from plan**: Routing logic is embedded in the encoder scheduler (not a separate DiffusionServer). Supports single-instance only (1 encoder + 1 denoiser + 1 decoder). Multi-instance orchestration deferred.
+
+### Commit 5 — Phase 3 Completion: Multi-Instance Orchestration (Pool-Based) ✅
+
+> Completes [Original Plan Phase 3](#original-plan-phase-3-diffusionserver----request-routing--orchestration) — RFC-compliant N:M:K pool-based pipeline orchestration
+
+**DiffusionServer as global pipeline orchestrator** — dispatches at every role transition:
+```
+Client → DiffusionServer → Encoder[i] → DiffusionServer → Denoiser[j] → DiffusionServer → Decoder[k] → DiffusionServer → Client
+```
+
+- `runtime/disaggregation/request_state.py` — `RequestState` enum (9 states: Pending → EncoderRunning → EncoderDone → DenoisingRunning → ... → Done/Failed/TimedOut), `RequestRecord`, `RequestTracker` (thread-safe lifecycle manager with per-role instance assignment)
+- `runtime/disaggregation/dispatch_policy.py` — `DispatchPolicy` ABC, `RoundRobin`, `MaxFreeSlotsFirst`, `PoolDispatcher` (wraps 3 independent per-role policies), `create_dispatch_policy()` factory
+- `runtime/disaggregation/diffusion_server.py` — `DiffusionServer` (ROUTER frontend + PUSH/PULL per-role pools, state-machine-driven dispatch at each role transition, zero-copy multipart relay for tensor data, per-role dispatch policies, timeout handling, error propagation)
+- `runtime/disaggregation/role_connector.py` — Added `pack_encoder_output()`, `pack_denoiser_output()`, `build_req_from_frames()` for pool-mode serialization
+- `runtime/managers/scheduler.py` — Added `_pool_mode_event_loop()` (unified for all roles), `_pool_mode_encoder_step()`, `_pool_mode_denoiser_step()`, `_pool_mode_decoder_step()`, `_init_pool_mode_sockets()`
+- `runtime/launch_server.py` — `launch_pool_disagg_server()` spawns N:M:K independent role instances and wires DiffusionServer
+- `runtime/server_args.py` — `--disagg-dispatch-policy`, `disagg_pool_mode`, `pool_work_endpoint`, `pool_result_endpoint`
+- `test/unit/test_request_state.py` — 14 tests for state machine transitions, tracking, snapshots
+- `test/unit/test_dispatch_policy.py` — 13 tests for RoundRobin, MaxFreeSlotsFirst, PoolDispatcher, factory
+- `test/unit/test_diffusion_server.py` — 5 tests including full pipeline flow (Client→Encoder→Denoiser→Decoder→Client) with live ZMQ and tensor relay
+
+**Socket topology**:
+```
+DiffusionServer:
+  ROUTER (bind) ← HTTP server DEALER connects
+  PUSH (connect) → Encoder[i] PULL (bind)     × N
+  PUSH (connect) → Denoiser[j] PULL (bind)    × M
+  PUSH (connect) → Decoder[k] PULL (bind)     × K
+  PULL (bind) ← Encoder PUSH (connect)        × 1 shared
+  PULL (bind) ← Denoiser PUSH (connect)       × 1 shared
+  PULL (bind) ← Decoder PUSH (connect)        × 1 shared
+```
+
+**Backward compatible**: Chain mode (`--disagg-mode`) with 1:1:1 instances still works as before.
+
+### Commit 4 — Phase 4: Async Pipelining, Timeouts & Observability ✅
+
+> Not in original plan — added based on functional gaps identified after Phase 3
+
+`b1afa5643` — `[Diffusion] Add disaggregation Phase 4: async pipelining, timeouts, and observability`
+
+**P0 — Async request pipelining**:
+- Encoder is non-blocking: encode → fire-and-forget to denoiser → stash identity in `_pending_disagg` → immediately accept next request
+- `_poll_disagg_results()` drains decoder results via `zmq.NOBLOCK` each loop iteration
+- Multiple requests can be in-flight across roles simultaneously
+
+**P1 — Timeout & error propagation**:
+- `--disagg-timeout` flag (default 600s); `_check_disagg_timeouts()` returns errors for stale requests
+- `RoleConnectorReceiver.recv(timeout_ms=...)` via `zmq.RCVTIMEO` prevents permanent blocking on upstream crash
+- Denoiser error forwarding: sets `_disagg_error` marker → decoder forwards to encoder
+
+**P2 — Batch draining**:
+- Denoiser/decoder `_disagg_event_loop()` drains queued requests via `try_recv()` after first blocking recv
+- Processes batch sequentially (true GPU batching requires pipeline stage refactoring)
+
+**P3 — Observability**:
+- `runtime/disaggregation/metrics.py` — `DisaggMetrics` class: completed/failed/in-flight/timed-out counts, latency (last/avg/max), throughput (60s rolling RPS), queue depth
+- `GET /stats` HTTP endpoint queries encoder metrics via `GetDisaggStatsReq`
+
+---
+
+## Remaining Work (RFC-Aligned)
+
+Below maps directly to RFC sections and TODO items. See [RFC](https://github.com/sgl-project/sglang/issues/19512) for full context.
+
+### RFC Coverage Summary
+
+| RFC Section | TODO | Status | Target Phase |
+|-------------|------|--------|--------------|
+| 1. Role-Based Decomposition | — | ✅ Done | Commit 1 |
+| 3. DiffusionServer — Server Core | 1.1 | ✅ Done | Commit 5 |
+| 3. DiffusionServer — Dispatch Loop | 1.3 | ✅ Done | Commit 5 |
+| 3. DiffusionServer — State Tracker (FreeBufferSlots/TTA) | 1.2 | ❌ | Phase 5 |
+| 3. DiffusionServer — Callback (slot increment on completion) | 1.2 | ❌ | Phase 5 |
+| 2. TransferBuffer — MetaBuffer | 3.1 | ❌ | Phase 6 |
+| 2. TransferBuffer — TensorBuffer + Buddy Allocator | 3.2, 3.3 | ❌ | Phase 6 |
+| 2. TransferManager — Engine Setup (RDMA/RPC) | 2.1 | ❌ | Phase 7 |
+| 2. TransferManager — Receive Loop | 2.2 | ❌ | Phase 7 |
+| 2. TransferManager — Send Loop + transfer_slice | 2.3 | ❌ | Phase 7 |
+| 2. TransferringQueue / SwappingQueue | 4.4 | ❌ | Phase 7 |
+| 4. E2E Workflow — P2P data transfer (bypass DS) | — | ❌ | Phase 7 |
+| 5. CUDA Stream Overlap — 3-stream scheduling | 4.2 | ❌ | Phase 8 |
+| 5. CUDA Stream Overlap — Request-level trigger | 4.3 | ❌ | Phase 8 |
+| 4. DisaggUtils — Role Weights | 4.1 | ✅ Done | Commit 1 |
+| Future — etcd P2P Routing | — | ❌ | Future |
+
+---
+
+### Phase 5: DiffusionServer — Capacity-Aware Dispatch (RFC §3 TODO 1.2)
+
+> Current DiffusionServer dispatches immediately (round-robin / max-free-slots heuristic). RFC requires **admission control** based on actual buffer capacity.
+
+**Goal**: DiffusionServer tracks real capacity per role instance and queues requests when all instances are full.
+
+**Files to create/modify**:
+
+| File | Action | Description |
+|------|--------|-------------|
+| `runtime/disaggregation/diffusion_server.py` | **Modify** | Add `FreeBufferSlots` dict per role instance, `TryToAdd` (TTA) queues per role type |
+| `runtime/disaggregation/request_state.py` | **Modify** | Split states: `EncoderWaiting` (in TTA) vs `EncoderRunning` (dispatched), same for Denoising/Decoder |
+| `runtime/disaggregation/dispatch_policy.py` | **Modify** | `MaxFreeSlotsFirst` reads actual `FreeBufferSlots` instead of heuristic |
+
+**Key design**:
+- Each role instance reports initial capacity (number of concurrent requests it can buffer) at registration
+- `dispatch_event_loop` pops from TTA queue only when a target instance has `FreeBufferSlots > 0`
+- On role completion callback: increment `FreeBufferSlots`, try to pop next request from TTA
+- State transitions per RFC: `Waiting` (in TTA queue) → `OnGoing` (dispatched to instance) — for Denoising, remains `Waiting` even after DS selects instance, transitions to `OnGoing` only after upstream confirms transfer complete
+
+**Wire protocol addition**:
+```
+Role instance → DiffusionServer:  {"type": "slot_free", "instance_id": "enc-0", "request_id": "xxx"}
+Role instance → DiffusionServer:  {"type": "register", "instance_id": "enc-0", "capacity": 4}
+```
+
+---
+
+### Phase 5.5: Per-Role Parallelism
+
+> [Original Plan Phase 4](#original-plan-phase-4-enable-independent-parallelism-per-role) — independent of RFC data transfer, high practical value
+
+**Goal**: Multi-GPU denoiser with SP/TP (e.g., `--denoiser-gpus 1 2 3 4 --denoiser-sp 4`).
+
+**Remaining work**:
+- Per-role parallelism CLI args (`--denoiser-tp`, `--denoiser-sp`, `--encoder-tp`, etc.)
+- `distributed/parallel_state.py` support for per-role NCCL group initialization
+- Validate multi-GPU denoiser with Wan2.1 on 4+ GPUs
+
+---
+
+### Phase 6: TransferBuffer — Pinned Memory Pool (RFC §2 TODO 3.1–3.3)
+
+> Current: tensors are serialized/deserialized per transfer via ZMQ multipart. RFC requires pre-allocated pinned memory pools with buddy-system allocation.
+
+**Goal**: CPU-side pinned memory staging area for each role, enabling zero-copy RDMA and avoiding per-request allocation overhead.
+
+**Files to create/modify**:
+
+| File | Action | Description |
+|------|--------|-------------|
+| `runtime/disaggregation/transfer_buffer.py` | **New** | `TransferBuffer` base, `TransferMetaBuffer`, `TransferTensorBuffer` |
+| `runtime/disaggregation/transfer_allocator.py` | **New** | `TransferTensorBufferAllocator` — buddy-system slot management (split/aggregate/coalesce) |
+
+**Key design**:
+- `TransferMetaBuffer`: stores lightweight non-tensor `Req` metadata (prompt, config, timesteps). Simple dict-based, keyed by request_id
+- `TransferTensorBuffer`: pre-allocated `torch.cuda.pin_memory()` pool of K standard-sized slots
+- `TransferTensorBufferAllocator`:
+  - Initialize with K slots sized for mainstream resolution/duration configs
+  - `allocate(size) → (slot_id, address)`: split larger slot or aggregate contiguous slots
+  - `free(slot_id)`: release + coalesce adjacent free slots (defragmentation)
+  - Role-specific sizing: encoder buffer smaller (fast execution), denoiser buffer larger (slow execution, more requests queued)
+- Integrates with `FreeBufferSlots` in Phase 5: `FreeBufferSlots` = number of available allocator slots
+
+---
+
+### Phase 7: TransferManager + P2P Data Transfer (RFC §2 TODO 2.1–2.3, §4)
+
+> Current: all tensor data routes through DiffusionServer (ZMQ relay). RFC requires **P2P direct transfer** between role instances, with DiffusionServer only on the control plane.
+
+**Goal**: Role instances transfer tensor data directly to each other via RDMA/RPC, DiffusionServer only dispatches metadata.
+
+**Files to create/modify**:
+
+| File | Action | Description |
+|------|--------|-------------|
+| `runtime/disaggregation/transfer_engine.py` | **New** | Wrap `MooncakeTransferEngine` (reuse from `srt/disaggregation/mooncake/`) for RDMA/RPC |
+| `runtime/disaggregation/transfer_manager.py` | **New** | `TransferManager` with `receive_event_loop` and `send_event_loop` |
+| `runtime/disaggregation/diffusion_server.py` | **Modify** | DS sends only metadata (no tensor relay); role instances do P2P |
+| `runtime/managers/scheduler.py` | **Modify** | Add `TransferringQueue`, `SwappingQueue`, `Transfer.Poll` per request |
+
+**P2P workflow (RFC §4 sequence)**:
+```
+1. Encoder finishes forward → swap out tensors to local TransferBuffer (D2H)
+2. Encoder → DiffusionServer: metadata only (request_id, encoder's IP:Port, DP/FSDP info)
+3. DiffusionServer selects Denoiser[j] → sends metadata to Denoiser[j]
+4. Denoiser[j] allocates TransferBuffer slot → sends (IP:Port, buffer_address) back to Encoder
+5. Encoder initiates RDMA/RPC transfer directly to Denoiser[j]'s buffer
+6. Transfer complete → Encoder notifies Denoiser[j] + DiffusionServer
+7. Denoiser[j] swaps tensor from TransferBuffer to GPU (H2D) → starts compute
+```
+
+**TransferManager internals**:
+- `receive_event_loop`: listens for incoming buffer addresses from downstream, transfer completion notifications from upstream. Caches `Instance_ID → Rank_ID → IP:Port + BufferAddress` routing
+- `send_event_loop`: thread pool + task queue for concurrent transfers. Supports `transfer_slice` to handle FSDP (encoder) → SP (denoiser) tensor redistribution
+- Reuse ~70% from existing PD disagg: `MooncakeTransferEngine`, `BaseKVConn` pattern, metadata buffer/poll from `kv_events.py`
+
+**Queue management (RFC TODO 4.4)**:
+- `TransferringQueue`: requests waiting for network data to arrive
+- `SwappingQueue`: requests with data arrived, ready for H2D transfer
+- `Transfer.Poll`: per-request state tracking (analogous to `KV.Poll` in LLM PD disagg)
+
+---
+
+### Phase 8: CUDA Stream Overlap Scheduling (RFC §5 TODO 4.2–4.3)
+
+> Current: synchronous execution per role. RFC specifies 3-stream pipelining for overlap.
+
+**Goal**: Overlap H2D / Compute / D2H within each role to hide transfer latency.
+
+**Files to modify**:
+
+| File | Action | Description |
+|------|--------|-------------|
+| `runtime/managers/scheduler.py` | **Modify** | Replace synchronous event loop with 3-stream overlap loop (RFC §5 pseudocode) |
+
+**3-stream design**:
+```
+Stream 1 (swap_in):   H2D transfer for Batch i+1  (from SwappingQueue → GPU)
+Stream 2 (compute):   Forward pass for Batch i     (on GPU)
+Stream 3 (swap_out):  D2H transfer for Batch i-1   (GPU → TransferBuffer)
+```
+
+**Request-level network trigger** (RFC TODO 4.3):
+- After D2H to TransferBuffer, use non-blocking `torch.cuda.Event.query()` per request
+- When any single request's D2H completes, immediately hand off to TransferManager for network send
+- Decoupled from batch boundaries — avoids pipeline bubbles
+
+**Reality check**: With 50-step denoising and BS=1, overlap benefit is <0.1%. This becomes valuable when:
+- Step count drops (consistency models, 1–4 steps)
+- Multi-request batching is enabled
+- Encoder/decoder become heavier (future high-res models)
+
+---
+
+### Future: Decentralized P2P Routing via etcd (RFC Future Map)
+
+Replace centralized DiffusionServer with decentralized architecture:
+- **Control plane (etcd)**: service discovery, role registration with leases
+- **Data plane (P2P)**: upstream roles perform edge load-balancing using local topology caches
+- **Piggybacked state sync**: downstream nodes piggyback `FreeBufferSlots` in network ACKs
+
+Not planned for near-term. Prerequisite: Phase 7 (P2P transfers) must be stable first.
+
+---
+
+## Original Plan (Reference)
+
+The sections below preserve the original plan for reference. See [Implementation Progress](#implementation-progress) above for what was actually built.
+
+### Original Plan Phase 1: Role Abstraction & Weight Separation (Single Machine)
 
 **Goal**: Each Role only loads its own weights. Validates correctness, gets memory savings immediately.
 
@@ -33,7 +311,7 @@ Each pipeline's `create_pipeline_stages()` already uses `add_stage()` -- we filt
 
 **Validation**: Run monolithic vs encoder+denoising+decoder (same GPU, sequential) and compare outputs bit-for-bit.
 
-## Phase 2: Multi-Process Deployment (Single Machine, IPC)
+### Original Plan Phase 2: Multi-Process Deployment (Single Machine, IPC)
 
 **Goal**: Run Encoder/Denoising/Decoder as separate processes on the same machine, communicating via shared memory or ZMQ.
 
@@ -60,7 +338,7 @@ Denoiser -> Decoder:  latents (~10-50 MB for video)
 - Optimize later with CUDA IPC shared memory for same-machine, RDMA for cross-machine
 - Each role process is a full `Scheduler + GPUWorker`, just with filtered stages
 
-## Phase 3: DiffusionServer -- Request Routing & Orchestration
+### Original Plan Phase 3: DiffusionServer -- Request Routing & Orchestration
 
 **Goal**: A coordinator that receives client requests and routes them through the Encoder -> Denoiser -> Decoder pipeline across role instances.
 
@@ -83,7 +361,7 @@ Client -> DiffusionServer -> Encoder[i] -> (transfer) -> Denoiser[j] -> (transfe
 Pending -> EncoderRunning -> EncoderDone -> DenoisingRunning -> DenoisingDone -> DecoderRunning -> Done
 ```
 
-## Phase 4: Enable Independent Parallelism Per Role
+### Original Plan Phase 4: Enable Independent Parallelism Per Role
 
 **Goal**: Each role can have its own TP/SP/CFG degree.
 
@@ -102,7 +380,7 @@ Denoiser: SP=4 (4 GPUs, sequence parallel for 4K video)
 Decoder: TP=1 (fast enough on 1 GPU)
 ```
 
-## Phase 5: Cross-Machine Transfer (RDMA)
+### Original Plan Phase 5: Cross-Machine Transfer (RDMA)
 
 **Goal**: Enable encoder and denoiser to run on different machines.
 
@@ -119,7 +397,7 @@ Decoder: TP=1 (fast enough on 1 GPU)
 - `BaseKVConn` pattern -- connection interface
 - Metadata buffer / poll patterns from `kv_events.py`
 
-## Phase 6: 3-Stream Pipeline Overlap (Optional/Future)
+### Original Plan Phase 6: 3-Stream Pipeline Overlap (Optional/Future)
 
 **Goal**: Overlap H2D / Compute / D2H within each role for pipelining.
 
@@ -129,13 +407,35 @@ Decoder: TP=1 (fast enough on 1 GPU)
 
 **Defer this unless step counts decrease substantially.**
 
+---
+
 ## Timeline Summary
 
 ```
-Phase 1 (Role Abstraction)     -> 1-2 weeks   | Foundation; immediate memory savings
-Phase 2 (Multi-Process IPC)    -> 2-3 weeks   | Proves disagg works end-to-end
-Phase 3 (DiffusionServer)      -> 2-3 weeks   | Multi-instance orchestration
-Phase 4 (Per-Role Parallelism) -> 1-2 weeks   | Unlocks SP for denoiser (4K video)
-Phase 5 (Cross-Machine RDMA)   -> 2-3 weeks   | Cluster-level deployment
-Phase 6 (3-Stream Overlap)     -> Defer       | <0.1% benefit currently
+RFC §  Original Plan                   Actual / Planned
+────── ──────────────────────────────  ──────────────────────────────────────────
+§1     Phase 1 (Role Abstraction)      Commit 1 ✅
+§4.1   Phase 1 (Role Weights)          Commit 1 ✅
+—      Phase 2 (Multi-Process IPC)     Commit 2 ✅  (ZMQ multipart)
+§3     Phase 3 (DiffusionServer)       Commit 3 ✅  (CLI + single-instance)
+§3     Phase 3 (Pool-Based N:M:K)      Commit 5 ✅  (multi-instance orchestration)
+—      — (Async + Observability)        Commit 4 ✅
+§3     Phase 5 (Capacity-Aware DS)     TODO — FreeBufferSlots, TTA queues, callbacks
+—      Phase 5.5 (Per-Role Parallel)   TODO — SP/TP per role
+§2     Phase 6 (TransferBuffer)        TODO — Pinned memory pool + buddy allocator
+§2,§4  Phase 7 (TransferManager+P2P)   TODO — RDMA/RPC, P2P direct transfer, queues
+§5     Phase 8 (3-Stream Overlap)      TODO — H2D/Compute/D2H pipelining
+Future — (etcd P2P Routing)            Future — decentralized control plane
+```
+
+### Dependency Graph
+
+```
+Phase 5 (Capacity-Aware DS)
+    └──→ Phase 6 (TransferBuffer)      ← FreeBufferSlots ties to allocator capacity
+             └──→ Phase 7 (TransferManager + P2P)   ← needs buffer addresses for RDMA
+                      └──→ Phase 8 (3-Stream Overlap)  ← needs queues from Phase 7
+
+Phase 5.5 (Per-Role Parallelism)       ← independent, can parallel with Phase 5/6
+             └──→ Phase 7 (transfer_slice needs SP/FSDP info)
 ```
