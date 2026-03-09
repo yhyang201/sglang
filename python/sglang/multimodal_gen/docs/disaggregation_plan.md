@@ -83,6 +83,33 @@ DiffusionServer:
 
 **Backward compatible**: Chain mode (`--disagg-mode`) with 1:1:1 instances still works as before.
 
+### Commit 6 — Phase 6: TransferBuffer with Buddy-System Allocator ✅
+
+> Covers [RFC §2 TODO 3.1–3.3](#phase-6-transferbuffer--pinned-memory-pool-rfc-2-todo-3133) — pinned memory pool infrastructure
+
+`[Diffusion] Add disaggregation Phase 6: TransferBuffer with buddy-system allocator`
+
+- `runtime/disaggregation/transfer_allocator.py` — `BuddyAllocator`: power-of-2 buddy-system memory allocator with split/allocate/free/coalesce, thread-safe, `count_free_slots()` for reporting capacity to DiffusionServer
+- `runtime/disaggregation/transfer_buffer.py` — `TransferMetaBuffer` (thread-safe dict-based metadata store) + `TransferTensorBuffer` (contiguous pinned-memory pool backed by BuddyAllocator, supports async D2H/H2D via CUDA streams, batch write/read with manifest)
+- `test/unit/test_transfer_allocator.py` — 25 tests: init, alloc/split, free/coalesce, slot counting, thread safety, realistic 256 MiB pool with 64 MiB slots
+- `test/unit/test_transfer_buffer.py` — 22 tests: meta buffer CRUD, tensor buffer alloc/free, single/multi-tensor I/O, bfloat16 support, list-of-tensors, Wan2.1-realistic 60 MB encoder output end-to-end
+
+**Key interfaces**:
+- `BuddyAllocator.allocate(size, request_id) → offset | None` — find smallest power-of-2 block, split as needed
+- `BuddyAllocator.free(offset)` — release + recursively coalesce with buddy
+- `BuddyAllocator.count_free_slots(slot_size) → int` — how many allocations of given size can fit (feeds `FreeBufferSlots`)
+- `TransferTensorBuffer.allocate(size, request_id) → SlotHandle | None` — allocate pinned memory slot
+- `TransferTensorBuffer.write_tensors_from_gpu(handle, tensors, stream) → manifest` — batch D2H copy with layout descriptor
+- `TransferTensorBuffer.read_tensors_from_manifest(handle, manifest, device, stream) → tensors` — batch H2D read
+- `TransferTensorBuffer.free_slots_count(typical_size) → int` — available capacity for DiffusionServer
+
+**Design notes**:
+- Pool is a single `torch.empty(pool_size, dtype=uint8, pin_memory=True)` allocation — contiguous, RDMA-registerable (Phase 7)
+- `SlotHandle` tracks offset + size + tensor views; passed to TransferManager for network send (Phase 7)
+- Manifest format records per-tensor `{offset, shape, dtype}` within the slot — enables receiver to reconstruct without re-serializing
+- 512-byte alignment between tensors for cache line efficiency
+- Role-specific sizing: encoder pool smaller (fast execution), denoiser pool larger (slow, more concurrent buffering needed)
+
 ### Commit 4 — Phase 4: Async Pipelining, Timeouts & Observability ✅
 
 > Not in original plan — added based on functional gaps identified after Phase 3
@@ -122,8 +149,8 @@ Below maps directly to RFC sections and TODO items. See [RFC](https://github.com
 | 3. DiffusionServer — Dispatch Loop | 1.3 | ✅ Done | Commit 5 |
 | 3. DiffusionServer — State Tracker (FreeBufferSlots/TTA) | 1.2 | ❌ | Phase 5 |
 | 3. DiffusionServer — Callback (slot increment on completion) | 1.2 | ❌ | Phase 5 |
-| 2. TransferBuffer — MetaBuffer | 3.1 | ❌ | Phase 6 |
-| 2. TransferBuffer — TensorBuffer + Buddy Allocator | 3.2, 3.3 | ❌ | Phase 6 |
+| 2. TransferBuffer — MetaBuffer | 3.1 | ✅ Done | Commit 6 |
+| 2. TransferBuffer — TensorBuffer + Buddy Allocator | 3.2, 3.3 | ✅ Done | Commit 6 |
 | 2. TransferManager — Engine Setup (RDMA/RPC) | 2.1 | ❌ | Phase 7 |
 | 2. TransferManager — Receive Loop | 2.2 | ❌ | Phase 7 |
 | 2. TransferManager — Send Loop + transfer_slice | 2.3 | ❌ | Phase 7 |
@@ -177,28 +204,11 @@ Role instance → DiffusionServer:  {"type": "register", "instance_id": "enc-0",
 
 ---
 
-### Phase 6: TransferBuffer — Pinned Memory Pool (RFC §2 TODO 3.1–3.3)
+### Done: Phase 6 — TransferBuffer — Pinned Memory Pool (RFC §2 TODO 3.1–3.3) ✅
 
-> Current: tensors are serialized/deserialized per transfer via ZMQ multipart. RFC requires pre-allocated pinned memory pools with buddy-system allocation.
+> Completed in Commit 6. See [Commit 6](#commit-6--phase-6-transferbuffer-with-buddy-system-allocator-) for details.
 
-**Goal**: CPU-side pinned memory staging area for each role, enabling zero-copy RDMA and avoiding per-request allocation overhead.
-
-**Files to create/modify**:
-
-| File | Action | Description |
-|------|--------|-------------|
-| `runtime/disaggregation/transfer_buffer.py` | **New** | `TransferBuffer` base, `TransferMetaBuffer`, `TransferTensorBuffer` |
-| `runtime/disaggregation/transfer_allocator.py` | **New** | `TransferTensorBufferAllocator` — buddy-system slot management (split/aggregate/coalesce) |
-
-**Key design**:
-- `TransferMetaBuffer`: stores lightweight non-tensor `Req` metadata (prompt, config, timesteps). Simple dict-based, keyed by request_id
-- `TransferTensorBuffer`: pre-allocated `torch.cuda.pin_memory()` pool of K standard-sized slots
-- `TransferTensorBufferAllocator`:
-  - Initialize with K slots sized for mainstream resolution/duration configs
-  - `allocate(size) → (slot_id, address)`: split larger slot or aggregate contiguous slots
-  - `free(slot_id)`: release + coalesce adjacent free slots (defragmentation)
-  - Role-specific sizing: encoder buffer smaller (fast execution), denoiser buffer larger (slow execution, more requests queued)
-- Integrates with `FreeBufferSlots` in Phase 5: `FreeBufferSlots` = number of available allocator slots
+`BuddyAllocator` + `TransferMetaBuffer` + `TransferTensorBuffer` with pinned memory pool, async D2H/H2D, manifest-based batch I/O. 47 tests passing. Provides `free_slots_count()` for Phase 5 `FreeBufferSlots` integration and `pool_data_ptr` for Phase 7 RDMA registration.
 
 ---
 
@@ -422,7 +432,7 @@ RFC §  Original Plan                   Actual / Planned
 —      — (Async + Observability)        Commit 4 ✅
 §3     Phase 5 (Capacity-Aware DS)     TODO — FreeBufferSlots, TTA queues, callbacks
 —      Phase 5.5 (Per-Role Parallel)   TODO — SP/TP per role
-§2     Phase 6 (TransferBuffer)        TODO — Pinned memory pool + buddy allocator
+§2     Phase 6 (TransferBuffer)        Commit 6 ✅ (buddy allocator + pinned pool)
 §2,§4  Phase 7 (TransferManager+P2P)   TODO — RDMA/RPC, P2P direct transfer, queues
 §5     Phase 8 (3-Stream Overlap)      TODO — H2D/Compute/D2H pipelining
 Future — (etcd P2P Routing)            Future — decentralized control plane
@@ -431,11 +441,11 @@ Future — (etcd P2P Routing)            Future — decentralized control plane
 ### Dependency Graph
 
 ```
-Phase 5 (Capacity-Aware DS)
-    └──→ Phase 6 (TransferBuffer)      ← FreeBufferSlots ties to allocator capacity
-             └──→ Phase 7 (TransferManager + P2P)   ← needs buffer addresses for RDMA
-                      └──→ Phase 8 (3-Stream Overlap)  ← needs queues from Phase 7
+Phase 6 (TransferBuffer) ✅
+    ├──→ Phase 5 (Capacity-Aware DS)       ← FreeBufferSlots = allocator.count_free_slots()
+    └──→ Phase 7 (TransferManager + P2P)   ← needs pool_data_ptr for RDMA registration
+             └──→ Phase 8 (3-Stream Overlap)  ← needs queues from Phase 7
 
-Phase 5.5 (Per-Role Parallelism)       ← independent, can parallel with Phase 5/6
+Phase 5.5 (Per-Role Parallelism)       ← independent, can parallel with Phase 5/7
              └──→ Phase 7 (transfer_slice needs SP/FSDP info)
 ```
