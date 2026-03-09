@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""End-to-end test for disaggregated diffusion server.
+"""End-to-end test for disaggregated diffusion server (pool mode).
 
-Launches a full disagg server via CLI (encoder + denoiser + decoder as separate
-processes), sends a video generation request via the OpenAI-compatible API,
-and validates the output.
+Launches a full pool-mode disagg server via launch_pool_disagg_server()
+(encoder + denoiser + decoder as separate processes orchestrated by
+DiffusionServer), sends a video generation request via the OpenAI-compatible
+API, and validates the output.
 
 Usage:
     # Requires 2+ GPUs (encoder+decoder share GPU 0, denoiser on GPU 1)
@@ -16,19 +17,13 @@ Usage:
 
 from __future__ import annotations
 
+import multiprocessing as mp
 import os
 import time
 
 import pytest
 
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
-from sglang.multimodal_gen.test.server.test_server_utils import (
-    ServerContext,
-    ServerManager,
-)
-from sglang.multimodal_gen.test.test_utils import (
-    get_dynamic_server_port,
-)
 
 logger = init_logger(__name__)
 
@@ -36,29 +31,15 @@ logger = init_logger(__name__)
 DEFAULT_MODEL = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
 
 
-def _build_disagg_extra_args() -> str:
-    """Build CLI extra args for disagg server from env vars."""
-    args = "--disagg-mode"
-
-    encoder_gpus = os.environ.get("DISAGG_ENCODER_GPUS", "0")
-    denoiser_gpus = os.environ.get("DISAGG_DENOISER_GPUS", "1")
-    decoder_gpus = os.environ.get("DISAGG_DECODER_GPUS", "0")
-
-    args += f" --encoder-gpus {encoder_gpus}"
-    args += f" --denoiser-gpus {denoiser_gpus}"
-    args += f" --decoder-gpus {decoder_gpus}"
-
-    # Common args
-    args += " --text-encoder-cpu-offload"
-    args += " --pin-cpu-memory"
-    args += " --warmup"
-
-    return args
+def _parse_gpu_list(env_var: str, default: str) -> list[list[int]]:
+    """Parse GPU assignment from env var. E.g. '0' -> [[0]], '1,2' -> [[1,2]]."""
+    raw = os.environ.get(env_var, default)
+    return [[int(g) for g in raw.split(",")]]
 
 
 @pytest.fixture(scope="module")
-def disagg_server() -> ServerContext:
-    """Launch a disaggregated diffusion server and wait for it to be ready."""
+def disagg_server():
+    """Launch a pool-mode disaggregated diffusion server."""
     import torch
 
     if not torch.cuda.is_available():
@@ -66,48 +47,89 @@ def disagg_server() -> ServerContext:
     if torch.cuda.device_count() < 2:
         pytest.skip("Requires 2+ GPUs for disaggregated mode")
 
+    from sglang.multimodal_gen.runtime.launch_server import launch_pool_disagg_server
+    from sglang.multimodal_gen.runtime.server_args import ServerArgs
+
     model = os.environ.get("DISAGG_MODEL", DEFAULT_MODEL)
-    port = int(os.environ.get("SGLANG_TEST_SERVER_PORT", get_dynamic_server_port()))
-    extra_args = _build_disagg_extra_args()
+    port = int(os.environ.get("SGLANG_TEST_SERVER_PORT", "30088"))
+
+    encoder_gpus = _parse_gpu_list("DISAGG_ENCODER_GPUS", "0")
+    denoiser_gpus = _parse_gpu_list("DISAGG_DENOISER_GPUS", "1")
+    decoder_gpus = _parse_gpu_list("DISAGG_DECODER_GPUS", "0")
+
+    server_args = ServerArgs.from_kwargs(
+        model_path=model,
+        port=port,
+        host="127.0.0.1",
+        warmup=True,
+        text_encoder_cpu_offload=True,
+        pin_cpu_memory=True,
+    )
 
     logger.info(
-        "Starting disagg server: model=%s, port=%d, extra_args=%s",
+        "Starting pool disagg server: model=%s, port=%d, "
+        "encoder_gpus=%s, denoiser_gpus=%s, decoder_gpus=%s",
         model,
         port,
-        extra_args,
+        encoder_gpus,
+        denoiser_gpus,
+        decoder_gpus,
     )
 
-    manager = ServerManager(
-        model=model,
-        port=port,
-        wait_deadline=float(os.environ.get("SGLANG_TEST_WAIT_SECS", "600")),
-        extra_args=extra_args,
+    # Launch in a subprocess so we can clean it up
+    ctx = mp.get_context("spawn")
+    server_process = ctx.Process(
+        target=launch_pool_disagg_server,
+        args=(server_args, encoder_gpus, denoiser_gpus, decoder_gpus, True),
+        daemon=True,
     )
-    ctx = manager.start()
+    server_process.start()
 
-    try:
-        yield ctx
-    finally:
-        ctx.cleanup()
+    # Wait for server to be ready
+    import requests
+
+    deadline = time.time() + float(os.environ.get("SGLANG_TEST_WAIT_SECS", "600"))
+    ready = False
+    while time.time() < deadline:
+        try:
+            resp = requests.get(f"http://127.0.0.1:{port}/health", timeout=2)
+            if resp.status_code == 200:
+                ready = True
+                break
+        except Exception:
+            pass
+        time.sleep(2)
+
+    if not ready:
+        server_process.kill()
+        pytest.fail("Disagg server did not become ready in time")
+
+    yield {"port": port, "model": model, "process": server_process}
+
+    # Cleanup
+    server_process.kill()
+    server_process.join(timeout=10)
 
 
 class TestDisaggServer:
-    """End-to-end tests for disaggregated diffusion server."""
+    """End-to-end tests for pool-mode disaggregated diffusion server."""
 
-    def test_video_generation(self, disagg_server: ServerContext):
+    def test_video_generation(self, disagg_server):
         """Test T2V generation through the full disagg pipeline."""
         from openai import OpenAI
 
+        port = disagg_server["port"]
+        model = disagg_server["model"]
+
         client = OpenAI(
-            base_url=f"http://127.0.0.1:{disagg_server.port}/v1",
+            base_url=f"http://127.0.0.1:{port}/v1",
             api_key="unused",
         )
 
         prompt = "A curious raccoon exploring a garden"
 
-        # Create video job
         job = client.videos.create(
-            model=disagg_server.model,
+            model=model,
             prompt=prompt,
             size="832x480",
             extra_body={
@@ -120,7 +142,7 @@ class TestDisaggServer:
         logger.info("Created video job: %s", video_id)
 
         # Poll for completion
-        timeout = 300  # 5 minutes
+        timeout = 300
         deadline = time.time() + timeout
         completed = False
 
@@ -134,7 +156,6 @@ class TestDisaggServer:
 
         assert completed, f"Video job {video_id} did not complete within {timeout}s"
 
-        # Download and validate
         resp = client.videos.download_content(video_id=video_id)
         content = resp.read()
 
@@ -145,9 +166,10 @@ class TestDisaggServer:
             len(content),
         )
 
-    def test_health_check(self, disagg_server: ServerContext):
+    def test_health_check(self, disagg_server):
         """Test that the health endpoint works."""
         import requests
 
-        resp = requests.get(f"http://127.0.0.1:{disagg_server.port}/health")
+        port = disagg_server["port"]
+        resp = requests.get(f"http://127.0.0.1:{port}/health")
         assert resp.status_code == 200

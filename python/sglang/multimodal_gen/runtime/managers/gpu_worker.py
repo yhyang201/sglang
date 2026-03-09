@@ -517,6 +517,7 @@ def run_scheduler_process(
             port_args=port_args,
             task_pipes_to_slaves=task_pipes_to_slaves,
             result_pipes_from_slaves=result_pipes_from_slaves,
+            local_rank=local_rank,
         )
         logger.info(f"Worker {rank}: Scheduler loop started.")
         pipe_writer.send(

@@ -1,27 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Role connectors for disaggregated diffusion pipelines.
+Role connectors for disaggregated diffusion pipelines (pool mode).
 
 Handles serialization/deserialization of Req fields between pipeline roles:
   Encoder -> Denoiser: text embeddings, latents, timesteps, metadata
   Denoiser -> Decoder: denoised latents, metadata
 
-Uses ZMQ PUSH/PULL with zero-copy tensor transport (send_multipart).
+Pool mode uses DiffusionServer as a relay: role instances pack/unpack
+tensor data via pack_encoder_output / pack_denoiser_output / build_req_from_frames.
 """
 
 import logging
 
 import torch
-import zmq
 
-from sglang.multimodal_gen.runtime.disaggregation.tensor_transport import (
-    recv_tensors,
-    send_tensors,
-)
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import (
     Req,
 )
-from sglang.multimodal_gen.runtime.utils.common import get_zmq_socket
 
 logger = logging.getLogger(__name__)
 
@@ -151,205 +146,6 @@ def _apply_tensor_fields(req: Req, tensor_fields: dict):
     """Apply tensor fields to a Req object."""
     for name, value in tensor_fields.items():
         setattr(req, name, value)
-
-
-class RoleConnectorSender:
-    """Sends Req data from one role to the next via ZMQ PUSH.
-
-    Usage:
-        sender = RoleConnectorSender(context, endpoint, tensor_field_names, scalar_field_names)
-        sender.send(req)
-        sender.close()
-    """
-
-    def __init__(
-        self,
-        context: zmq.Context,
-        endpoint: str,
-        tensor_field_names: list[str],
-        scalar_field_names: list[str],
-    ):
-        self._tensor_field_names = tensor_field_names
-        self._scalar_field_names = scalar_field_names
-        self._socket, self._endpoint = get_zmq_socket(
-            context, zmq.PUSH, endpoint, bind=True
-        )
-        # Resolve actual endpoint (needed when binding to port 0 or wildcard)
-        actual = self._socket.getsockopt(zmq.LAST_ENDPOINT)
-        if isinstance(actual, bytes):
-            actual = actual.decode("utf-8")
-        if actual:
-            self._endpoint = actual
-        logger.info("RoleConnectorSender bound at %s", self._endpoint)
-
-    @property
-    def endpoint(self) -> str:
-        return self._endpoint
-
-    def send(self, req: Req) -> None:
-        """Extract and send relevant fields from Req."""
-        tensor_fields = _extract_tensor_fields(req, self._tensor_field_names)
-        scalar_fields = _extract_scalar_fields(req, self._scalar_field_names)
-        send_tensors(self._socket, tensor_fields, scalar_fields)
-        logger.debug(
-            "Sent %d tensor fields, %d scalar fields for request %s",
-            len(tensor_fields),
-            len(scalar_fields),
-            getattr(req, "request_id", "unknown"),
-        )
-
-    def close(self):
-        self._socket.close()
-
-
-class RoleConnectorReceiver:
-    """Receives Req data from a previous role via ZMQ PULL.
-
-    Usage:
-        receiver = RoleConnectorReceiver(context, endpoint, tensor_field_names, scalar_field_names)
-        req = receiver.recv()  # blocking
-        receiver.close()
-    """
-
-    def __init__(
-        self,
-        context: zmq.Context,
-        endpoint: str,
-        tensor_field_names: list[str],
-        scalar_field_names: list[str],
-        device: str | torch.device = "cpu",
-    ):
-        self._tensor_field_names = tensor_field_names
-        self._scalar_field_names = scalar_field_names
-        self._device = device
-        self._socket, self._endpoint = get_zmq_socket(
-            context, zmq.PULL, endpoint, bind=False
-        )
-        logger.info("RoleConnectorReceiver connected to %s", endpoint)
-
-    def recv(self, flags: int = 0, timeout_ms: int | None = None) -> Req:
-        """Receive and reconstruct a Req with the transferred fields.
-
-        Args:
-            flags: ZMQ flags (e.g., zmq.NOBLOCK)
-            timeout_ms: Optional receive timeout in milliseconds.
-                If set, raises TimeoutError when no message arrives in time.
-
-        Returns:
-            A new Req populated with the received tensor and scalar fields.
-
-        Raises:
-            zmq.Again: if flags includes NOBLOCK and no message is ready.
-            TimeoutError: if timeout_ms is set and expires before a message.
-        """
-        # Apply timeout via socket option (restored after recv)
-        old_rcvtimeo = None
-        if timeout_ms is not None:
-            old_rcvtimeo = self._socket.getsockopt(zmq.RCVTIMEO)
-            self._socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
-        try:
-            tensor_fields, scalar_fields = recv_tensors(
-                self._socket, flags=flags, device=self._device
-            )
-        except zmq.Again:
-            if timeout_ms is not None:
-                raise TimeoutError(
-                    f"RoleConnectorReceiver.recv timed out after {timeout_ms}ms"
-                ) from None
-            raise
-        finally:
-            if old_rcvtimeo is not None:
-                self._socket.setsockopt(zmq.RCVTIMEO, old_rcvtimeo)
-
-        # Build a minimal Req with received data
-        # Use scalar_fields to initialize Req (request_id, prompt params, etc.)
-        init_kwargs = {}
-        # request_id and prompt are needed for Req initialization
-        if "request_id" in scalar_fields:
-            init_kwargs["request_id"] = scalar_fields["request_id"]
-        # Req.validate() needs guidance_scale and negative_prompt
-        if "guidance_scale" in scalar_fields:
-            init_kwargs["guidance_scale"] = scalar_fields["guidance_scale"]
-
-        req = Req(**init_kwargs)
-
-        _apply_scalar_fields(req, scalar_fields, self._scalar_field_names)
-        _apply_tensor_fields(req, tensor_fields)
-
-        # Recreate torch.Generator from seed (generators can't be serialized)
-        seed = scalar_fields.get("seed")
-        if seed is not None:
-            generator = torch.Generator(device="cpu")
-            generator.manual_seed(int(seed))
-            req.generator = generator
-
-        logger.debug(
-            "Received %d tensor fields, %d scalar fields for request %s",
-            len(tensor_fields),
-            len(scalar_fields),
-            getattr(req, "request_id", "unknown"),
-        )
-        return req
-
-    def try_recv(self) -> Req | None:
-        """Non-blocking receive. Returns None if no message available."""
-        try:
-            return self.recv(flags=zmq.NOBLOCK)
-        except zmq.Again:
-            return None
-
-    def close(self):
-        self._socket.close()
-
-
-def create_encoder_to_denoiser_sender(
-    context: zmq.Context, endpoint: str
-) -> RoleConnectorSender:
-    """Create a sender for the Encoder -> Denoiser transition."""
-    return RoleConnectorSender(
-        context,
-        endpoint,
-        ENCODER_TO_DENOISER_TENSOR_FIELDS,
-        ENCODER_TO_DENOISER_SCALAR_FIELDS,
-    )
-
-
-def create_encoder_to_denoiser_receiver(
-    context: zmq.Context, endpoint: str, device: str | torch.device = "cpu"
-) -> RoleConnectorReceiver:
-    """Create a receiver for the Encoder -> Denoiser transition."""
-    return RoleConnectorReceiver(
-        context,
-        endpoint,
-        ENCODER_TO_DENOISER_TENSOR_FIELDS,
-        ENCODER_TO_DENOISER_SCALAR_FIELDS,
-        device=device,
-    )
-
-
-def create_denoiser_to_decoder_sender(
-    context: zmq.Context, endpoint: str
-) -> RoleConnectorSender:
-    """Create a sender for the Denoiser -> Decoder transition."""
-    return RoleConnectorSender(
-        context,
-        endpoint,
-        DENOISER_TO_DECODER_TENSOR_FIELDS,
-        DENOISER_TO_DECODER_SCALAR_FIELDS,
-    )
-
-
-def create_denoiser_to_decoder_receiver(
-    context: zmq.Context, endpoint: str, device: str | torch.device = "cpu"
-) -> RoleConnectorReceiver:
-    """Create a receiver for the Denoiser -> Decoder transition."""
-    return RoleConnectorReceiver(
-        context,
-        endpoint,
-        DENOISER_TO_DECODER_TENSOR_FIELDS,
-        DENOISER_TO_DECODER_SCALAR_FIELDS,
-        device=device,
-    )
 
 
 # --- Pool mode helpers (DiffusionServer-mediated transfers) ---

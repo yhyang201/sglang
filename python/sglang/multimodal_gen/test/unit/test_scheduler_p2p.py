@@ -455,6 +455,7 @@ class TestMultiRankGating(unittest.TestCase):
         scheduler._pool_result_push = MagicMock() if gpu_id == 0 else None
         scheduler._pool_work_pull = MagicMock() if gpu_id == 0 else None
         scheduler.worker = MagicMock()
+        scheduler.worker.local_rank = gpu_id
         scheduler.server_args = MagicMock()
         scheduler.server_args.disagg_transfer_pool_size = 1 * 1024 * 1024
         scheduler.server_args.disagg_p2p_hostname = "127.0.0.1"
