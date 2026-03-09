@@ -456,13 +456,7 @@ class DiffusersPipeline(ComposedPipelineBase):
             else:
                 raise
 
-        # Apply CPU offloading or move to GPU
-        # enable_model_cpu_offload moves components to GPU on-demand and offloads
-        # them back to CPU after use, reducing peak GPU memory.
-        # This is incompatible with .to(device) which loads everything at once.
-        # In the native sglang pipeline, offload flags control individual components,
-        # but for the diffusers backend, enable_model_cpu_offload is pipeline-level
-        # (all-or-nothing), so we enable it if any component offload is requested.
+        # Use CPU offload (all-or-nothing in diffusers) if any component offload is requested.
         any_offload = (
             server_args.dit_cpu_offload
             or server_args.text_encoder_cpu_offload
