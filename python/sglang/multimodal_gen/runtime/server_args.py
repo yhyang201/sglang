@@ -220,6 +220,11 @@ class ServerArgs:
     denoiser_gpus: list[int] | None = None
     decoder_gpus: list[int] | None = None
     disagg_timeout: int = 600  # seconds, timeout for pending disagg requests
+    disagg_dispatch_policy: str = "round_robin"  # "round_robin" or "max_free_slots"
+    disagg_pool_mode: bool = False  # True for N:M:K independent pool routing
+    # Pool mode endpoints (set by launcher, per-instance)
+    pool_work_endpoint: str | None = None  # Instance PULL socket (receives work)
+    pool_result_endpoint: str | None = None  # Instance PUSH socket (sends results)
     # ZMQ endpoints for role-to-role communication (populated at launch time)
     encoder_to_denoiser_endpoint: str | None = None
     denoiser_to_decoder_endpoint: str | None = None
@@ -702,6 +707,16 @@ class ServerArgs:
             "Encoder returns an error if the decoder result is not received "
             "within this period. Also used as recv timeout for denoiser/decoder. "
             "Default: 600.",
+        )
+        parser.add_argument(
+            "--disagg-dispatch-policy",
+            type=str,
+            default=ServerArgs.disagg_dispatch_policy,
+            choices=["round_robin", "max_free_slots"],
+            help="Dispatch policy for multi-instance disagg routing. "
+            "'round_robin' cycles across encoder instances; "
+            "'max_free_slots' dispatches to the least-loaded encoder. "
+            "Only used with --disagg-mode. Default: round_robin.",
         )
         parser.add_argument(
             "--encoder-to-denoiser-endpoint",

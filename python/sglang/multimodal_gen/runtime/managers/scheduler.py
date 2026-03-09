@@ -136,13 +136,21 @@ class Scheduler:
 
         # Phase 4 P3: Per-role observability metrics
         self._disagg_metrics = None
+        self._pool_mode = getattr(server_args, "disagg_pool_mode", False)
+        # Pool mode sockets (set by _init_pool_mode_sockets)
+        self._pool_work_pull = None
+        self._pool_result_push = None
+
         if self._disagg_role != RoleType.MONOLITHIC:
             from sglang.multimodal_gen.runtime.disaggregation.metrics import (
                 DisaggMetrics,
             )
 
             self._disagg_metrics = DisaggMetrics(role=self._disagg_role.value)
-            self._init_disagg_connectors()
+            if self._pool_mode:
+                self._init_pool_mode_sockets()
+            else:
+                self._init_disagg_connectors()
 
     def get_disagg_metrics(self) -> dict | None:
         """Return disagg role metrics snapshot, or None if not in disagg mode."""
@@ -759,6 +767,240 @@ class Scheduler:
                     e,
                 )
 
+    def _init_pool_mode_sockets(self):
+        """Initialize ZMQ sockets for pool mode (DiffusionServer-mediated)."""
+        sa = self.server_args
+
+        # PULL: receive work from DiffusionServer
+        self._pool_work_pull, _ = get_zmq_socket(
+            self.context, zmq.PULL, sa.pool_work_endpoint, bind=True
+        )
+        # PUSH: send results to DiffusionServer
+        self._pool_result_push, _ = get_zmq_socket(
+            self.context, zmq.PUSH, sa.pool_result_endpoint, bind=False
+        )
+        logger.info(
+            "Pool mode %s: work_pull=%s, result_push=%s",
+            self._disagg_role.value.upper(),
+            sa.pool_work_endpoint,
+            sa.pool_result_endpoint,
+        )
+
+    def _pool_mode_event_loop(self) -> None:
+        """Event loop for all roles in pool mode (DiffusionServer-mediated).
+
+        Each role:
+        1. Receives work from DiffusionServer via PULL socket
+        2. Processes the request
+        3. Sends result to DiffusionServer via PUSH socket
+
+        The data format depends on the role:
+        - Encoder: receives [request_id, pickled_req], sends tensor multipart
+        - Denoiser: receives tensor multipart, sends tensor multipart
+        - Decoder: receives tensor multipart, sends tensor multipart
+        """
+        from sglang.multimodal_gen.runtime.disaggregation.role_connector import (
+            DENOISER_TO_DECODER_SCALAR_FIELDS,
+            DENOISER_TO_DECODER_TENSOR_FIELDS,
+            ENCODER_TO_DENOISER_SCALAR_FIELDS,
+            ENCODER_TO_DENOISER_TENSOR_FIELDS,
+            _extract_scalar_fields,
+            _extract_tensor_fields,
+            build_req_from_frames,
+        )
+        from sglang.multimodal_gen.runtime.disaggregation.tensor_transport import (
+            send_tensors,
+        )
+
+        role_name = self._disagg_role.value.upper()
+        logger.info("Pool mode %s event loop started, waiting for work...", role_name)
+
+        while self._running:
+            try:
+                if self._disagg_role == RoleType.ENCODER:
+                    self._pool_mode_encoder_step(
+                        send_tensors,
+                        _extract_tensor_fields,
+                        _extract_scalar_fields,
+                        ENCODER_TO_DENOISER_TENSOR_FIELDS,
+                        ENCODER_TO_DENOISER_SCALAR_FIELDS,
+                    )
+                elif self._disagg_role == RoleType.DENOISING:
+                    self._pool_mode_denoiser_step(
+                        send_tensors,
+                        build_req_from_frames,
+                        _extract_tensor_fields,
+                        _extract_scalar_fields,
+                        DENOISER_TO_DECODER_TENSOR_FIELDS,
+                        DENOISER_TO_DECODER_SCALAR_FIELDS,
+                    )
+                elif self._disagg_role == RoleType.DECODER:
+                    self._pool_mode_decoder_step(
+                        send_tensors,
+                        build_req_from_frames,
+                    )
+
+                self._consecutive_error_count = 0
+
+            except Exception as e:
+                self._consecutive_error_count += 1
+                logger.error(
+                    "Pool %s: error (attempt %d/%d): %s",
+                    role_name,
+                    self._consecutive_error_count,
+                    self._max_consecutive_errors,
+                    e,
+                    exc_info=True,
+                )
+                if self._consecutive_error_count >= self._max_consecutive_errors:
+                    raise RuntimeError(
+                        f"Pool {role_name} terminated after "
+                        f"{self._max_consecutive_errors} consecutive errors: {e}"
+                    ) from e
+
+        self._pool_work_pull.close()
+        self._pool_result_push.close()
+
+    def _pool_mode_encoder_step(
+        self,
+        send_tensors_fn,
+        extract_tensor,
+        extract_scalar,
+        tensor_field_names,
+        scalar_field_names,
+    ):
+        """Single encoder step in pool mode."""
+        # Receive: [request_id_bytes, pickled_req_bytes]
+        frames = self._pool_work_pull.recv_multipart()
+        pickled_req = frames[-1]
+        reqs = pickle.loads(pickled_req)
+        if not isinstance(reqs, list):
+            reqs = [reqs]
+
+        req = reqs[0]
+        request_id = getattr(req, "request_id", "unknown")
+
+        if self._disagg_metrics:
+            self._disagg_metrics.record_request_start(request_id)
+
+        # Run encoder stages
+        req_result = self.worker.execute_forward(reqs, return_req=True)
+
+        if not isinstance(req_result, Req):
+            # Error — send error via scalar fields
+            error_msg = getattr(req_result, "error", "encoder error")
+            send_tensors_fn(
+                self._pool_result_push,
+                {},
+                {"request_id": request_id, "_disagg_error": str(error_msg)},
+            )
+            if self._disagg_metrics:
+                self._disagg_metrics.record_request_failed(request_id)
+            return
+
+        # Pack and send encoder output
+        tensor_fields = extract_tensor(req_result, tensor_field_names)
+        scalar_fields = extract_scalar(req_result, scalar_field_names)
+        send_tensors_fn(self._pool_result_push, tensor_fields, scalar_fields)
+
+        if self._disagg_metrics:
+            self._disagg_metrics.record_request_complete(request_id)
+
+        logger.debug("Pool ENCODER: processed %s", request_id)
+
+    def _pool_mode_denoiser_step(
+        self,
+        send_tensors_fn,
+        build_req_fn,
+        extract_tensor,
+        extract_scalar,
+        tensor_field_names,
+        scalar_field_names,
+    ):
+        """Single denoiser step in pool mode."""
+        # Receive tensor multipart from DiffusionServer relay
+        frames = self._pool_work_pull.recv_multipart(copy=False)
+        req = build_req_fn(frames, "encoder_to_denoiser", device="cuda")
+        request_id = getattr(req, "request_id", "unknown")
+
+        if self._disagg_metrics:
+            self._disagg_metrics.record_request_start(request_id)
+
+        # Initialize scheduler timesteps
+        scheduler_mod = self.worker.pipeline.get_module("scheduler")
+        num_steps = getattr(req, "num_inference_steps", None)
+        if scheduler_mod is not None and num_steps is not None:
+            device = torch.device(f"cuda:{self.gpu_id}")
+            scheduler_mod.set_timesteps(num_steps, device=device)
+
+        # Run denoising
+        result = self.worker.execute_forward([req], return_req=True)
+
+        if isinstance(result, Req):
+            tensor_fields = extract_tensor(result, tensor_field_names)
+            scalar_fields = extract_scalar(result, scalar_field_names)
+            send_tensors_fn(self._pool_result_push, tensor_fields, scalar_fields)
+            if self._disagg_metrics:
+                self._disagg_metrics.record_request_complete(request_id)
+        else:
+            error_msg = getattr(result, "error", "denoiser error")
+            send_tensors_fn(
+                self._pool_result_push,
+                {},
+                {"request_id": request_id, "_disagg_error": str(error_msg)},
+            )
+            if self._disagg_metrics:
+                self._disagg_metrics.record_request_failed(request_id)
+
+        logger.debug("Pool DENOISER: processed %s", request_id)
+
+    def _pool_mode_decoder_step(self, send_tensors_fn, build_req_fn):
+        """Single decoder step in pool mode."""
+        # Receive tensor multipart from DiffusionServer relay
+        frames = self._pool_work_pull.recv_multipart(copy=False)
+        req = build_req_fn(frames, "denoiser_to_decoder", device="cuda")
+        request_id = getattr(req, "request_id", "unknown")
+
+        # Check for upstream error
+        disagg_error = getattr(req, "_disagg_error", None)
+        if disagg_error:
+            send_tensors_fn(
+                self._pool_result_push,
+                {},
+                {"request_id": request_id, "error": f"Denoiser error: {disagg_error}"},
+            )
+            return
+
+        if self._disagg_metrics:
+            self._disagg_metrics.record_request_start(request_id)
+
+        req.save_output = False
+        req.return_file_paths_only = False
+
+        output_batch = self.worker.execute_forward([req])
+
+        # Pack result
+        tensor_fields = {}
+        scalar_fields = {"request_id": request_id}
+        if output_batch.output is not None:
+            tensor_fields["output"] = output_batch.output
+        if output_batch.audio is not None:
+            tensor_fields["audio"] = output_batch.audio
+        if output_batch.audio_sample_rate is not None:
+            scalar_fields["audio_sample_rate"] = output_batch.audio_sample_rate
+        if output_batch.error is not None:
+            scalar_fields["error"] = output_batch.error
+
+        send_tensors_fn(self._pool_result_push, tensor_fields, scalar_fields)
+
+        if self._disagg_metrics:
+            if output_batch.error:
+                self._disagg_metrics.record_request_failed(request_id)
+            else:
+                self._disagg_metrics.record_request_complete(request_id)
+
+        logger.debug("Pool DECODER: processed %s", request_id)
+
     def _cleanup_disagg_connectors(self):
         """Clean up disagg connector sockets."""
         if self._role_sender is not None:
@@ -775,7 +1017,12 @@ class Scheduler:
         The main event loop that listens for ZMQ requests.
         Handles abortion
         """
-        # For DENOISING/DECODER roles, use the disagg event loop
+        # Pool mode: all roles use the pool event loop
+        if self._pool_mode and self._disagg_role != RoleType.MONOLITHIC:
+            self._pool_mode_event_loop()
+            return
+
+        # For DENOISING/DECODER roles, use the disagg event loop (chain mode)
         if self._disagg_role in (RoleType.DENOISING, RoleType.DECODER):
             self._disagg_event_loop()
             return
