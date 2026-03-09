@@ -206,15 +206,29 @@ FreeBufferSlots per instance + TryToAdd (TTA) queues per role + completion callb
 
 ---
 
-### Phase 5.5: Per-Role Parallelism
+### Commit 8 — Phase 5.5: Per-Role Parallelism CLI Args ✅
 
-> [Original Plan Phase 4](#original-plan-phase-4-enable-independent-parallelism-per-role) — independent of RFC data transfer, high practical value
+> Covers [Original Plan Phase 4](#original-plan-phase-4-enable-independent-parallelism-per-role) — independent of RFC data transfer, high practical value
 
-**Goal**: Multi-GPU denoiser with SP/TP (e.g., `--denoiser-gpus 1 2 3 4 --denoiser-sp 4`).
+**Goal**: Each role can have its own TP/SP/Ulysses/Ring degree (e.g., `--denoiser-gpus 1 2 3 4 --denoiser-sp 4`).
 
-**Remaining work**:
-- Per-role parallelism CLI args (`--denoiser-tp`, `--denoiser-sp`, `--encoder-tp`, etc.)
-- `distributed/parallel_state.py` support for per-role NCCL group initialization
+`[Diffusion] Add disaggregation Phase 5.5: per-role parallelism CLI args`
+
+- `runtime/server_args.py` — Added 12 per-role parallelism fields: `encoder_tp`, `encoder_sp`, `encoder_ulysses`, `encoder_ring`, `denoiser_tp`, `denoiser_sp`, `denoiser_ulysses`, `denoiser_ring`, `decoder_tp`, `decoder_sp`, `decoder_ulysses`, `decoder_ring`. All default to None (auto-derive from num_gpus). Added `get_role_parallelism(role_type) → dict` helper method.
+- `runtime/server_args.py` — 12 new CLI args: `--encoder-tp`, `--encoder-sp`, `--encoder-ulysses`, `--encoder-ring`, `--denoiser-tp`, `--denoiser-sp`, `--denoiser-ulysses`, `--denoiser-ring`, `--decoder-tp`, `--decoder-sp`, `--decoder-ulysses`, `--decoder-ring`
+- `runtime/launch_server.py` — `launch_disagg_server()` and `launch_pool_disagg_server()` use `get_role_parallelism()` to pass per-role TP/SP/Ulysses/Ring overrides when building per-role `ServerArgs`. When None, `_adjust_parallelism()` auto-derives from `num_gpus` as before.
+- `test/unit/test_server_args_unit.py` — 7 new tests: defaults are None, encoder/denoiser/decoder overrides, monolithic returns all None, mixed roles independent, CLI arg parsing
+
+**Example usage**:
+```bash
+# Encoder TP=1, Denoiser SP=4 (ulysses), Decoder TP=1
+sglang serve --model-path ... --disagg-mode \
+  --encoder-gpus 0 --denoiser-gpus 1 2 3 4 --decoder-gpus 0 \
+  --denoiser-sp 4 --denoiser-ulysses 4
+```
+
+**Remaining for full Phase 4 completion**:
+- `distributed/parallel_state.py` support for per-role NCCL group initialization (if needed beyond current auto-derive)
 - Validate multi-GPU denoiser with Wan2.1 on 4+ GPUs
 
 ---
@@ -446,7 +460,7 @@ RFC §  Original Plan                   Actual / Planned
 §3     Phase 3 (Pool-Based N:M:K)      Commit 5 ✅  (multi-instance orchestration)
 —      — (Async + Observability)        Commit 4 ✅
 §3     Phase 5 (Capacity-Aware DS)     Commit 7 ✅ (FreeBufferSlots, TTA, callbacks)
-—      Phase 5.5 (Per-Role Parallel)   TODO — SP/TP per role
+—      Phase 5.5 (Per-Role Parallel)   Commit 8 ✅ (CLI args + launcher wiring)
 §2     Phase 6 (TransferBuffer)        Commit 6 ✅ (buddy allocator + pinned pool)
 §2,§4  Phase 7 (TransferManager+P2P)   TODO — RDMA/RPC, P2P direct transfer, queues
 §5     Phase 8 (3-Stream Overlap)      TODO — H2D/Compute/D2H pipelining
@@ -459,6 +473,6 @@ Future — (etcd P2P Routing)            Future — decentralized control plane
 Phase 5 (Capacity-Aware DS) ✅ ──┐
 Phase 6 (TransferBuffer) ✅ ─────┼──→ Phase 7 (TransferManager + P2P)
                                  │        └──→ Phase 8 (3-Stream Overlap)
-Phase 5.5 (Per-Role Parallelism) ┘   ← independent, can parallel
+Phase 5.5 (Per-Role Parallelism) ✅ ┘   ← independent, can parallel
              └──→ Phase 7 (transfer_slice needs SP/FSDP info)
 ```

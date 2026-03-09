@@ -222,6 +222,19 @@ class ServerArgs:
     disagg_timeout: int = 600  # seconds, timeout for pending disagg requests
     disagg_dispatch_policy: str = "round_robin"  # "round_robin" or "max_free_slots"
     disagg_pool_mode: bool = False  # True for N:M:K independent pool routing
+    # Per-role parallelism overrides (None = auto-derive from num_gpus)
+    encoder_tp: int | None = None
+    encoder_sp: int | None = None
+    encoder_ulysses: int | None = None
+    encoder_ring: int | None = None
+    denoiser_tp: int | None = None
+    denoiser_sp: int | None = None
+    denoiser_ulysses: int | None = None
+    denoiser_ring: int | None = None
+    decoder_tp: int | None = None
+    decoder_sp: int | None = None
+    decoder_ulysses: int | None = None
+    decoder_ring: int | None = None
     # Pool mode endpoints (set by launcher, per-instance)
     pool_work_endpoint: str | None = None  # Instance PULL socket (receives work)
     pool_result_endpoint: str | None = None  # Instance PUSH socket (sends results)
@@ -232,6 +245,32 @@ class ServerArgs:
 
     # Logging
     log_level: str = "info"
+
+    def get_role_parallelism(self, role_type: "RoleType") -> dict[str, int | None]:
+        """Return per-role parallelism overrides for the given role.
+
+        Returns a dict with keys tp_size, sp_degree, ulysses_degree, ring_degree.
+        Values are None if not explicitly set (auto-derive from num_gpus).
+        """
+        prefix_map = {
+            RoleType.ENCODER: "encoder",
+            RoleType.DENOISING: "denoiser",
+            RoleType.DECODER: "decoder",
+        }
+        prefix = prefix_map.get(role_type)
+        if prefix is None:
+            return {
+                "tp_size": None,
+                "sp_degree": None,
+                "ulysses_degree": None,
+                "ring_degree": None,
+            }
+        return {
+            "tp_size": getattr(self, f"{prefix}_tp"),
+            "sp_degree": getattr(self, f"{prefix}_sp"),
+            "ulysses_degree": getattr(self, f"{prefix}_ulysses"),
+            "ring_degree": getattr(self, f"{prefix}_ring"),
+        }
 
     @property
     def broker_port(self) -> int:
@@ -717,6 +756,79 @@ class ServerArgs:
             "'round_robin' cycles across encoder instances; "
             "'max_free_slots' dispatches to the least-loaded encoder. "
             "Only used with --disagg-mode. Default: round_robin.",
+        )
+        # Per-role parallelism overrides
+        parser.add_argument(
+            "--encoder-tp",
+            type=int,
+            default=None,
+            help="Tensor parallelism for encoder role. Default: auto-derive from encoder GPU count.",
+        )
+        parser.add_argument(
+            "--encoder-sp",
+            type=int,
+            default=None,
+            help="Sequence parallelism for encoder role. Default: auto-derive from encoder GPU count.",
+        )
+        parser.add_argument(
+            "--encoder-ulysses",
+            type=int,
+            default=None,
+            help="Ulysses SP degree for encoder role.",
+        )
+        parser.add_argument(
+            "--encoder-ring",
+            type=int,
+            default=None,
+            help="Ring SP degree for encoder role.",
+        )
+        parser.add_argument(
+            "--denoiser-tp",
+            type=int,
+            default=None,
+            help="Tensor parallelism for denoiser role. Default: auto-derive from denoiser GPU count.",
+        )
+        parser.add_argument(
+            "--denoiser-sp",
+            type=int,
+            default=None,
+            help="Sequence parallelism for denoiser role. Default: auto-derive from denoiser GPU count.",
+        )
+        parser.add_argument(
+            "--denoiser-ulysses",
+            type=int,
+            default=None,
+            help="Ulysses SP degree for denoiser role.",
+        )
+        parser.add_argument(
+            "--denoiser-ring",
+            type=int,
+            default=None,
+            help="Ring SP degree for denoiser role.",
+        )
+        parser.add_argument(
+            "--decoder-tp",
+            type=int,
+            default=None,
+            help="Tensor parallelism for decoder role. Default: auto-derive from decoder GPU count.",
+        )
+        parser.add_argument(
+            "--decoder-sp",
+            type=int,
+            default=None,
+            help="Sequence parallelism for decoder role. Default: auto-derive from decoder GPU count.",
+        )
+        parser.add_argument(
+            "--decoder-ulysses",
+            type=int,
+            default=None,
+            help="Ulysses SP degree for decoder role.",
+        )
+        parser.add_argument(
+            "--decoder-ring",
+            type=int,
+            default=None,
+            help="Ring SP degree for decoder role.",
         )
         parser.add_argument(
             "--encoder-to-denoiser-endpoint",
