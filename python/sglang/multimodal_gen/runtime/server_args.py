@@ -215,6 +215,10 @@ class ServerArgs:
 
     # Disaggregation
     disagg_role: RoleType = RoleType.MONOLITHIC
+    disagg_mode: bool = False  # Auto-launch all 3 roles
+    encoder_gpus: list[int] | None = None
+    denoiser_gpus: list[int] | None = None
+    decoder_gpus: list[int] | None = None
     # ZMQ endpoints for role-to-role communication (populated at launch time)
     encoder_to_denoiser_endpoint: str | None = None
     denoiser_to_decoder_endpoint: str | None = None
@@ -503,6 +507,13 @@ class ServerArgs:
         if isinstance(self.disagg_role, str):
             self.disagg_role = RoleType.from_string(self.disagg_role)
 
+        # Validate disagg settings
+        if self.disagg_mode and self.disagg_role != RoleType.MONOLITHIC:
+            raise ValueError(
+                "--disagg-mode auto-launches all roles. Do not combine with "
+                "--disagg-role (which launches a single role manually)."
+            )
+
         # 1. adjust parameters
         self._adjust_parameters()
 
@@ -643,13 +654,44 @@ class ServerArgs:
 
         # Disaggregation
         parser.add_argument(
+            "--disagg-mode",
+            action="store_true",
+            default=False,
+            help="Enable disaggregated mode: auto-launch encoder, denoiser, and decoder "
+            "as separate processes. Use --encoder-gpus, --denoiser-gpus, --decoder-gpus "
+            "to control GPU assignment.",
+        )
+        parser.add_argument(
             "--disagg-role",
             type=str,
             default=ServerArgs.disagg_role.value,
             choices=RoleType.choices(),
             help="Role for disaggregated pipeline. 'monolithic' (default) loads all components. "
             "'encoder' loads only text/image encoders. 'denoising' loads only the transformer. "
-            "'decoder' loads only the VAE decoder.",
+            "'decoder' loads only the VAE decoder. "
+            "Prefer --disagg-mode for automatic multi-role launch.",
+        )
+        parser.add_argument(
+            "--encoder-gpus",
+            type=int,
+            nargs="+",
+            default=None,
+            help="GPU IDs for the encoder role (default: [0]). Only used with --disagg-mode.",
+        )
+        parser.add_argument(
+            "--denoiser-gpus",
+            type=int,
+            nargs="+",
+            default=None,
+            help="GPU IDs for the denoiser role (default: [1]). Only used with --disagg-mode.",
+        )
+        parser.add_argument(
+            "--decoder-gpus",
+            type=int,
+            nargs="+",
+            default=None,
+            help="GPU IDs for the decoder role (default: [0], shares with encoder). "
+            "Only used with --disagg-mode.",
         )
         parser.add_argument(
             "--encoder-to-denoiser-endpoint",

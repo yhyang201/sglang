@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""End-to-end test for disaggregated pipeline with real model.
+"""Component-level test for disaggregated pipeline with real model.
 
-Tests the full Encoder -> Denoiser -> Decoder flow with Wan2.1-T2V-1.3B
-across separate GPU processes.
+Tests the pipeline + IPC layer directly (bypassing scheduler/HTTP server).
+For the full server-level E2E test, see:
+    test/server/test_disagg_server.py
 
 Usage:
     CUDA_VISIBLE_DEVICES=1,2,3 python -m pytest test/unit/test_disagg_e2e.py -v -s

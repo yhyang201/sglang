@@ -1,5 +1,6 @@
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
+import dataclasses
 import multiprocessing as mp
 import os
 import signal
@@ -204,8 +205,6 @@ def launch_disagg_server(
         decoder_gpus: GPU IDs for decoder role. Default: [0] (shares with encoder)
         launch_http_server: Whether to launch the HTTP server (for encoder)
     """
-    from copy import deepcopy
-
     from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
     from sglang.multimodal_gen.runtime.utils.common import is_port_available
 
@@ -253,29 +252,60 @@ def launch_disagg_server(
     ]
 
     all_processes = []
+    encoder_role_args = None  # track for HTTP server
+
     for role_type, gpu_ids in role_configs:
-        # Create role-specific server_args
-        role_args = deepcopy(server_args)
-        role_args.disagg_role = role_type
-        role_args.num_gpus = len(gpu_ids)
-        role_args.encoder_to_denoiser_endpoint = e2d_endpoint
-        role_args.denoiser_to_decoder_endpoint = d2d_endpoint
-        role_args.decoder_to_encoder_endpoint = d2e_endpoint
-
-        # Each role needs its own scheduler port and master port
-        role_args.scheduler_port = find_port(
-            server_args.scheduler_port + 100 * (1 + list(RoleType).index(role_type))
-        )
-        role_args.master_port = find_port(
-            (server_args.master_port or 30005)
-            + 100 * (1 + list(RoleType).index(role_type))
-        )
-
-        # Only encoder role needs warmup with HTTP
-        if role_type != RoleType.ENCODER:
-            role_args.warmup = False
-
         num_gpus = len(gpu_ids)
+
+        # Build per-role ServerArgs via from_kwargs to trigger __post_init__
+        # which recalculates parallelism based on this role's num_gpus.
+        role_overrides = {
+            "disagg_role": role_type,
+            "disagg_mode": False,  # prevent validation conflict
+            "num_gpus": num_gpus,
+            "encoder_to_denoiser_endpoint": e2d_endpoint,
+            "denoiser_to_decoder_endpoint": d2d_endpoint,
+            "decoder_to_encoder_endpoint": d2e_endpoint,
+            "scheduler_port": find_port(
+                server_args.scheduler_port + 100 * (1 + list(RoleType).index(role_type))
+            ),
+            "master_port": find_port(
+                (server_args.master_port or 30005)
+                + 100 * (1 + list(RoleType).index(role_type))
+            ),
+            # Reset parallelism so _adjust_parallelism re-derives from num_gpus
+            "tp_size": None,
+            "sp_degree": None,
+            "ulysses_degree": None,
+            "ring_degree": None,
+        }
+
+        # Only encoder role needs warmup
+        if role_type != RoleType.ENCODER:
+            role_overrides["warmup"] = False
+
+        # Merge: start from original server_args fields, apply overrides
+        base_dict = {
+            f.name: getattr(server_args, f.name)
+            for f in dataclasses.fields(server_args)
+        }
+        base_dict.update(role_overrides)
+        # Remove fields that are not __init__ params (properties, etc.)
+        base_dict.pop("pipeline_config", None)
+        role_args = ServerArgs.from_kwargs(**base_dict)
+
+        if role_type == RoleType.ENCODER:
+            encoder_role_args = role_args
+
+        logger.info(
+            "Disagg %s: num_gpus=%d, tp_size=%s, sp_degree=%s, " "ulysses=%s, ring=%s",
+            role_type.value.upper(),
+            role_args.num_gpus,
+            role_args.tp_size,
+            role_args.sp_degree,
+            role_args.ulysses_degree,
+            role_args.ring_degree,
+        )
 
         # Pipes for master-slave coordination within this role
         task_pipes_w = []
@@ -361,15 +391,20 @@ def launch_disagg_server(
     logger.info("All disagg roles ready")
 
     if launch_http_server:
-        logger.info("Starting FastAPI server (connected to ENCODER scheduler).")
-        launch_http_server_only(server_args)
+        # HTTP server must connect to the ENCODER's scheduler port
+        http_args = encoder_role_args if encoder_role_args is not None else server_args
+        logger.info(
+            "Starting FastAPI server (connected to ENCODER scheduler at port %d).",
+            http_args.scheduler_port,
+        )
+        launch_http_server_only(http_args)
 
     return all_processes
 
 
 def _run_disagg_role_process(
     gpu_id: int,
-    local_rank: int,
+    _local_rank: int,
     rank: int,
     server_args: ServerArgs,
     pipe_writer: mp.connection.Connection,
@@ -379,14 +414,18 @@ def _run_disagg_role_process(
     """Entry point for a disagg role process.
 
     Sets CUDA_VISIBLE_DEVICES to the specified GPU and runs the scheduler.
+    Each process sees a single GPU (remapped via CUDA_VISIBLE_DEVICES).
+    For multi-GPU roles, torch.distributed coordinates across processes
+    using master_port and rank.
     """
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
-    # Run the normal scheduler process with local_rank=0
-    # (since CUDA_VISIBLE_DEVICES remaps to a single GPU)
+    # Each process sees exactly one GPU via CUDA_VISIBLE_DEVICES remapping,
+    # so local_rank is always 0. The rank parameter is used for distributed
+    # coordination across processes within the same role.
     run_scheduler_process(
         local_rank=0,
-        rank=0,
+        rank=rank,
         master_port=server_args.master_port,
         server_args=server_args,
         pipe_writer=pipe_writer,
@@ -415,6 +454,14 @@ if __name__ == "__main__":
     server_args = prepare_server_args(sys.argv[1:])
 
     try:
-        launch_server(server_args)
+        if server_args.disagg_mode:
+            launch_disagg_server(
+                server_args,
+                encoder_gpus=server_args.encoder_gpus,
+                denoiser_gpus=server_args.denoiser_gpus,
+                decoder_gpus=server_args.decoder_gpus,
+            )
+        else:
+            launch_server(server_args)
     finally:
         kill_process_tree(os.getpid(), include_parent=False)
