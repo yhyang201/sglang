@@ -363,9 +363,9 @@ class Scheduler:
             )
 
         elif self._disagg_role == RoleType.DENOISING:
-            # Denoiser receives from encoder
+            # Denoiser receives from encoder (tensors go directly to GPU)
             self._role_receiver = create_encoder_to_denoiser_receiver(
-                self.context, sa.encoder_to_denoiser_endpoint
+                self.context, sa.encoder_to_denoiser_endpoint, device="cuda"
             )
             # Denoiser sends to decoder
             self._role_sender = create_denoiser_to_decoder_sender(
@@ -378,9 +378,9 @@ class Scheduler:
             )
 
         elif self._disagg_role == RoleType.DECODER:
-            # Decoder receives from denoiser
+            # Decoder receives from denoiser (tensors go directly to GPU)
             self._role_receiver = create_denoiser_to_decoder_receiver(
-                self.context, sa.denoiser_to_decoder_endpoint
+                self.context, sa.denoiser_to_decoder_endpoint, device="cuda"
             )
             # Decoder sends result back to encoder
             result_socket, _ = get_zmq_socket(
@@ -450,6 +450,11 @@ class Scheduler:
                         )
 
                 elif self._disagg_role == RoleType.DECODER:
+                    # In disagg mode, the decoder must return the raw output tensor
+                    # (not save to file and clear), so the encoder can receive it.
+                    req.save_output = False
+                    req.return_file_paths_only = False
+
                     # Run decoding stages, get OutputBatch with final output
                     output_batch = self.worker.execute_forward([req])
                     duration_s = time.monotonic() - start_time
@@ -461,6 +466,14 @@ class Scheduler:
                     }
                     if output_batch.output is not None:
                         tensor_fields["output"] = output_batch.output
+                    else:
+                        logger.warning(
+                            "Disagg DECODER: output_batch.output is None for request %s, "
+                            "error=%s, output_file_paths=%s",
+                            getattr(req, "request_id", "unknown"),
+                            output_batch.error,
+                            output_batch.output_file_paths,
+                        )
                     if output_batch.audio is not None:
                         tensor_fields["audio"] = output_batch.audio
                     if output_batch.audio_sample_rate is not None:

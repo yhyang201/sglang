@@ -8,7 +8,10 @@ from typing import cast
 
 from sglang.multimodal_gen.apps.webui import run_sgl_diffusion_webui
 from sglang.multimodal_gen.runtime.entrypoints.cli.cli_types import CLISubcommand
-from sglang.multimodal_gen.runtime.launch_server import launch_server
+from sglang.multimodal_gen.runtime.launch_server import (
+    launch_disagg_server,
+    launch_server,
+)
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.utils import FlexibleArgumentParser
@@ -31,7 +34,16 @@ def add_multimodal_gen_serve_args(parser: argparse.ArgumentParser):
 def execute_serve_cmd(args: argparse.Namespace, unknown_args: list[str] | None = None):
     """The entry point for the serve command."""
     server_args = ServerArgs.from_cli_args(args, unknown_args)
-    launch_server(server_args)
+
+    if server_args.disagg_mode:
+        launch_disagg_server(
+            server_args,
+            encoder_gpus=server_args.encoder_gpus,
+            denoiser_gpus=server_args.denoiser_gpus,
+            decoder_gpus=server_args.decoder_gpus,
+        )
+    else:
+        launch_server(server_args)
 
     if server_args.webui:
         run_sgl_diffusion_webui(server_args)
