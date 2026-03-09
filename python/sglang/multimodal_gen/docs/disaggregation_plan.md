@@ -186,11 +186,11 @@ Below maps directly to RFC sections and TODO items. See [RFC](https://github.com
 | 3. DiffusionServer — Callback (slot increment on completion) | 1.2 | ✅ Done | Commit 7 |
 | 2. TransferBuffer — MetaBuffer | 3.1 | ✅ Done | Commit 6 |
 | 2. TransferBuffer — TensorBuffer + Buddy Allocator | 3.2, 3.3 | ✅ Done | Commit 6 |
-| 2. TransferManager — Engine Setup (RDMA/RPC) | 2.1 | ❌ | Phase 7 |
-| 2. TransferManager — Receive Loop | 2.2 | ❌ | Phase 7 |
-| 2. TransferManager — Send Loop + transfer_slice | 2.3 | ❌ | Phase 7 |
-| 2. TransferringQueue / SwappingQueue | 4.4 | ❌ | Phase 7 |
-| 4. E2E Workflow — P2P data transfer (bypass DS) | — | ❌ | Phase 7 |
+| 2. TransferManager — Engine Setup (RDMA/RPC) | 2.1 | ✅ Done | Commit 9 |
+| 2. TransferManager — Receive Loop | 2.2 | ✅ Done | Commit 10 |
+| 2. TransferManager — Send Loop + transfer_slice | 2.3 | 🔶 Partial (send done, transfer_slice TODO) | Commit 10 / Phase 7c |
+| 2. TransferringQueue / SwappingQueue | 4.4 | ❌ | Phase 7c |
+| 4. E2E Workflow — P2P data transfer (bypass DS) | — | ✅ Done | Commit 10 |
 | 5. CUDA Stream Overlap — 3-stream scheduling | 4.2 | ❌ | Phase 8 |
 | 5. CUDA Stream Overlap — Request-level trigger | 4.3 | ❌ | Phase 8 |
 | 4. DisaggUtils — Role Weights | 4.1 | ✅ Done | Commit 1 |
@@ -241,41 +241,78 @@ sglang serve --model-path ... --disagg-mode \
 
 ---
 
-### Phase 7: TransferManager + P2P Data Transfer (RFC §2 TODO 2.1–2.3, §4)
+### Commit 9 — Phase 7a: TransferEngine + TransferManager + P2P Protocol ✅
 
-> Current: all tensor data routes through DiffusionServer (ZMQ relay). RFC requires **P2P direct transfer** between role instances, with DiffusionServer only on the control plane.
+> Covers [RFC §2 TODO 2.1](#phase-7-transfermanager--p2p-data-transfer-rfc-2-todo-2123-4) — Engine setup, transfer abstraction, P2P protocol
 
-**Goal**: Role instances transfer tensor data directly to each other via RDMA/RPC, DiffusionServer only dispatches metadata.
+`[Diffusion] Add disaggregation Phase 7a: TransferEngine, TransferManager, and P2P protocol`
 
-**Files to create/modify**:
+- `runtime/disaggregation/transfer_engine.py` — **New**: `BaseTransferEngine` ABC, `MooncakeDiffusionEngine` (wraps `srt` `MooncakeTransferEngine` for RDMA), `MockTransferEngine` (in-process ctypes.memmove for unit testing), `create_transfer_engine()` factory with auto-fallback
+- `runtime/disaggregation/p2p_protocol.py` — **New**: P2P control message definitions (`P2PStagedMsg`, `P2PAllocMsg`, `P2PAllocatedMsg`, `P2PPushMsg`, `P2PPushedMsg`, `P2PReadyMsg`, `P2PDoneMsg`, `P2PRegisterMsg`), `encode_p2p_msg()` / `decode_p2p_msg()` / `is_p2p_message()` helpers, `P2P_MAGIC` discriminator
+- `runtime/disaggregation/transfer_manager.py` — **New**: `DiffusionTransferManager` per-instance P2P coordinator: `stage_tensors()` (D2H), `push_to_peer()` (RDMA), `allocate_receive_slot()`, `load_tensors()` (H2D), slot lifecycle management
+- `runtime/disaggregation/diffusion_server.py` — **Modified**: Added `p2p_mode` flag, `_P2PRequestState` tracking, `_P2PTTAEntry`, peer registry, P2P message handlers (`_handle_p2p_register`, `_handle_p2p_staged`, `_handle_p2p_allocated`, `_handle_p2p_pushed`, `_handle_p2p_done`), P2P TTA drain, refactored result handlers via `_handle_role_result` dispatcher
+- `runtime/server_args.py` — Added `--disagg-p2p-mode` CLI arg
+- `runtime/launch_server.py` — Wires `p2p_mode` to DiffusionServer constructor
+- `test/unit/test_transfer_engine.py` — 9 tests: MockTransferEngine data copy, session management, factory
+- `test/unit/test_transfer_manager.py` — 23 tests: staging, receive, full P2P cycle, concurrent transfers, protocol encode/decode
+- `test/unit/test_diffusion_server.py` — 14 tests (+5): P2P init, registration, staged→alloc flow, full E2E handshake
 
-| File | Action | Description |
-|------|--------|-------------|
-| `runtime/disaggregation/transfer_engine.py` | **New** | Wrap `MooncakeTransferEngine` (reuse from `srt/disaggregation/mooncake/`) for RDMA/RPC |
-| `runtime/disaggregation/transfer_manager.py` | **New** | `TransferManager` with `receive_event_loop` and `send_event_loop` |
-| `runtime/disaggregation/diffusion_server.py` | **Modify** | DS sends only metadata (no tensor relay); role instances do P2P |
-| `runtime/managers/scheduler.py` | **Modify** | Add `TransferringQueue`, `SwappingQueue`, `Transfer.Poll` per request |
-
-**P2P workflow (RFC §4 sequence)**:
+**P2P handshake protocol (DS-brokered):**
 ```
-1. Encoder finishes forward → swap out tensors to local TransferBuffer (D2H)
-2. Encoder → DiffusionServer: metadata only (request_id, encoder's IP:Port, DP/FSDP info)
-3. DiffusionServer selects Denoiser[j] → sends metadata to Denoiser[j]
-4. Denoiser[j] allocates TransferBuffer slot → sends (IP:Port, buffer_address) back to Encoder
-5. Encoder initiates RDMA/RPC transfer directly to Denoiser[j]'s buffer
-6. Transfer complete → Encoder notifies Denoiser[j] + DiffusionServer
-7. Denoiser[j] swaps tensor from TransferBuffer to GPU (H2D) → starts compute
+1. Encoder → DS:      p2p_staged   {request_id, data_size, manifest, session_id, slot_offset}
+2. DS → Denoiser:     p2p_alloc    {request_id, data_size, source_role}
+3. Denoiser → DS:     p2p_allocated {request_id, session_id, pool_ptr, slot_offset}
+4. DS → Encoder:      p2p_push     {request_id, dest_session_id, dest_addr, transfer_size}
+5. Encoder → DS:      p2p_pushed   {request_id}
+6. DS → Denoiser:     p2p_ready    {request_id, manifest, slot_offset, scalar_fields}
 ```
 
-**TransferManager internals**:
-- `receive_event_loop`: listens for incoming buffer addresses from downstream, transfer completion notifications from upstream. Caches `Instance_ID → Rank_ID → IP:Port + BufferAddress` routing
-- `send_event_loop`: thread pool + task queue for concurrent transfers. Supports `transfer_slice` to handle FSDP (encoder) → SP (denoiser) tensor redistribution
-- Reuse ~70% from existing PD disagg: `MooncakeTransferEngine`, `BaseKVConn` pattern, metadata buffer/poll from `kv_events.py`
+---
 
-**Queue management (RFC TODO 4.4)**:
-- `TransferringQueue`: requests waiting for network data to arrive
-- `SwappingQueue`: requests with data arrived, ready for H2D transfer
-- `Transfer.Poll`: per-request state tracking (analogous to `KV.Poll` in LLM PD disagg)
+### Commit 10 — Phase 7b: Scheduler P2P Integration ✅
+
+> Covers [RFC §2 TODO 2.2–2.3, §4](#phase-7-transfermanager--p2p-data-transfer-rfc-2-todo-2123-4) — instance-side P2P event loop
+
+`[Diffusion] Add disaggregation Phase 7b: scheduler P2P integration`
+
+**Goal**: Integrate TransferManager into scheduler pool mode event loop. Each role instance handles P2P messages alongside compute work.
+
+- `runtime/managers/scheduler.py` — **Modified**: Added P2P-aware pool mode event loop with `__p2p__` frame discriminator. New methods:
+  - `_init_p2p_transfer_manager()`: Creates TransferTensorBuffer + BaseTransferEngine + DiffusionTransferManager, sends `p2p_register` to DS
+  - `_is_p2p_frames()` / `_handle_p2p_message()`: Static discriminator + dispatcher
+  - `_handle_p2p_alloc()`: Allocates receive slot, sends `p2p_allocated`
+  - `_handle_p2p_push_cmd()`: RDMA pushes staged data to peer, sends `p2p_pushed`, frees staged slot
+  - `_handle_p2p_ready()`: Loads tensors from buffer (H2D), reconstructs Req, dispatches to role compute
+  - `_build_req_from_p2p()`: Reconstructs Req from scalar + tensor dicts (via `object.__new__` to skip validation)
+  - `_p2p_denoiser_compute()`: Run denoising → stage output → send `p2p_done` with staged info for decoder
+  - `_p2p_decoder_compute()`: Run decoding → pack result frames → send `p2p_done` with result
+  - `_pool_mode_encoder_p2p_stage()`: Stage encoder output to TransferBuffer → send `p2p_staged`
+  - Updated `_pool_mode_event_loop()`: Pre-receives frames, checks for P2P, routes to P2P or relay handlers
+  - Updated step methods to accept pre-received `frames` parameter
+- `runtime/server_args.py` — Added `--disagg-transfer-pool-size` (default 256 MiB), `--disagg-p2p-hostname` (default 127.0.0.1)
+- `test/unit/test_scheduler_p2p.py` — **New**: 16 tests covering frame detection, alloc/allocated, push/pushed, Req reconstruction, encoder staging, message dispatch, full E2E data transfer, init + registration
+
+**Instance-side P2P event loop**:
+```python
+while running:
+    frames = pool_work_pull.recv_multipart()
+    if is_p2p_message(frames):
+        msg = decode_p2p_msg(frames)
+        if msg_type == "p2p_alloc":    → allocate_receive_slot → send p2p_allocated
+        elif msg_type == "p2p_push":   → push_to_peer (RDMA) → send p2p_pushed
+        elif msg_type == "p2p_ready":  → load_tensors (H2D) → compute → send p2p_done
+    else:
+        # Existing relay-mode compute work
+```
+
+---
+
+### Phase 7c: Queue Management + transfer_slice (TODO)
+
+> [RFC §4 TODO 4.4](#phase-7-transfermanager--p2p-data-transfer-rfc-2-todo-2123-4) — request queues and SP-aware transfer
+
+**TransferringQueue / SwappingQueue**: requests waiting for P2P data vs ready for H2D
+**transfer_slice**: handle FSDP (encoder) → SP (denoiser) tensor redistribution
 
 ---
 
@@ -462,7 +499,9 @@ RFC §  Original Plan                   Actual / Planned
 §3     Phase 5 (Capacity-Aware DS)     Commit 7 ✅ (FreeBufferSlots, TTA, callbacks)
 —      Phase 5.5 (Per-Role Parallel)   Commit 8 ✅ (CLI args + launcher wiring)
 §2     Phase 6 (TransferBuffer)        Commit 6 ✅ (buddy allocator + pinned pool)
-§2,§4  Phase 7 (TransferManager+P2P)   TODO — RDMA/RPC, P2P direct transfer, queues
+§2     Phase 7a (Engine+Manager+P2P)    Commit 9 ✅ (TransferEngine, TransferManager, protocol)
+§2,§4  Phase 7b (Scheduler P2P)        Commit 10 ✅ (P2P event loop + handlers)
+§4     Phase 7c (Queues+transfer_slice) TODO — TransferringQueue, SwappingQueue
 §5     Phase 8 (3-Stream Overlap)      TODO — H2D/Compute/D2H pipelining
 Future — (etcd P2P Routing)            Future — decentralized control plane
 ```
@@ -471,8 +510,9 @@ Future — (etcd P2P Routing)            Future — decentralized control plane
 
 ```
 Phase 5 (Capacity-Aware DS) ✅ ──┐
-Phase 6 (TransferBuffer) ✅ ─────┼──→ Phase 7 (TransferManager + P2P)
-                                 │        └──→ Phase 8 (3-Stream Overlap)
-Phase 5.5 (Per-Role Parallelism) ✅ ┘   ← independent, can parallel
-             └──→ Phase 7 (transfer_slice needs SP/FSDP info)
+Phase 6 (TransferBuffer) ✅ ─────┼──→ Phase 7a (Engine+Manager+P2P) ✅
+                                 │        └──→ Phase 7b (Scheduler P2P)
+Phase 5.5 (Per-Role Parallelism) ✅ ┘        └──→ Phase 7c (Queues+transfer_slice)
+             └──→ Phase 7c (transfer_slice needs SP/FSDP info)
+                                                  └──→ Phase 8 (3-Stream Overlap)
 ```

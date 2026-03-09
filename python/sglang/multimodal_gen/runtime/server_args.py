@@ -334,6 +334,11 @@ class ServerArgs:
     disagg_timeout: int = 600  # seconds, timeout for pending disagg requests
     disagg_dispatch_policy: str = "round_robin"  # "round_robin" or "max_free_slots"
     disagg_pool_mode: bool = False  # True for N:M:K independent pool routing
+    disagg_p2p_mode: bool = False  # True for P2P transfer (RDMA/TransferEngine)
+    disagg_transfer_pool_size: int = (
+        256 * 1024 * 1024
+    )  # P2P transfer buffer size (bytes)
+    disagg_p2p_hostname: str = "127.0.0.1"  # Hostname for P2P transfer engine
     # Per-role parallelism overrides (None = auto-derive from num_gpus)
     encoder_tp: int | None = None
     encoder_sp: int | None = None
@@ -869,6 +874,28 @@ class ServerArgs:
             "'max_free_slots' dispatches to the least-loaded encoder. "
             "Only used with --disagg-mode. Default: round_robin.",
         )
+        parser.add_argument(
+            "--disagg-p2p-mode",
+            action="store_true",
+            default=False,
+            help="Enable P2P transfer mode (RDMA/TransferEngine). "
+            "Role instances transfer tensors directly instead of relaying "
+            "through DiffusionServer. Requires mooncake-transfer-engine or "
+            "falls back to in-process mock for testing.",
+        )
+        parser.add_argument(
+            "--disagg-transfer-pool-size",
+            type=int,
+            default=256 * 1024 * 1024,
+            help="Size of the P2P transfer buffer pool in bytes (default: 256 MiB).",
+        )
+        parser.add_argument(
+            "--disagg-p2p-hostname",
+            type=str,
+            default="127.0.0.1",
+            help="Hostname for P2P transfer engine (default: 127.0.0.1).",
+        )
+
         # Per-role parallelism overrides
         parser.add_argument(
             "--encoder-tp",
