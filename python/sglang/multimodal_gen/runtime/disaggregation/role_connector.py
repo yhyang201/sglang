@@ -100,6 +100,8 @@ DENOISER_TO_DECODER_SCALAR_FIELDS = [
     "is_warmup",
     "output_file_ext",
     "generate_audio",
+    # Error propagation: set by denoiser when forward() fails
+    "_disagg_error",
 ]
 
 
@@ -225,21 +227,39 @@ class RoleConnectorReceiver:
         )
         logger.info("RoleConnectorReceiver connected to %s", endpoint)
 
-    def recv(self, flags: int = 0) -> Req:
+    def recv(self, flags: int = 0, timeout_ms: int | None = None) -> Req:
         """Receive and reconstruct a Req with the transferred fields.
 
         Args:
             flags: ZMQ flags (e.g., zmq.NOBLOCK)
+            timeout_ms: Optional receive timeout in milliseconds.
+                If set, raises TimeoutError when no message arrives in time.
 
         Returns:
             A new Req populated with the received tensor and scalar fields.
 
         Raises:
             zmq.Again: if flags includes NOBLOCK and no message is ready.
+            TimeoutError: if timeout_ms is set and expires before a message.
         """
-        tensor_fields, scalar_fields = recv_tensors(
-            self._socket, flags=flags, device=self._device
-        )
+        # Apply timeout via socket option (restored after recv)
+        old_rcvtimeo = None
+        if timeout_ms is not None:
+            old_rcvtimeo = self._socket.getsockopt(zmq.RCVTIMEO)
+            self._socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
+        try:
+            tensor_fields, scalar_fields = recv_tensors(
+                self._socket, flags=flags, device=self._device
+            )
+        except zmq.Again:
+            if timeout_ms is not None:
+                raise TimeoutError(
+                    f"RoleConnectorReceiver.recv timed out after {timeout_ms}ms"
+                ) from None
+            raise
+        finally:
+            if old_rcvtimeo is not None:
+                self._socket.setsockopt(zmq.RCVTIMEO, old_rcvtimeo)
 
         # Build a minimal Req with received data
         # Use scalar_fields to initialize Req (request_id, prompt params, etc.)

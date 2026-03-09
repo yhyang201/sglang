@@ -340,6 +340,189 @@ class TestFullDisaggFlow(unittest.TestCase):
         context.term()
 
 
+class TestRecvTimeout(unittest.TestCase):
+    """Test Phase 4 timeout support in RoleConnectorReceiver."""
+
+    def setUp(self):
+        self.context = zmq.Context()
+
+    def tearDown(self):
+        self.context.term()
+
+    def test_receiver_timeout(self):
+        """recv with timeout_ms should raise TimeoutError when no message arrives."""
+        sender = RoleConnectorSender(
+            self.context,
+            "tcp://127.0.0.1:*",
+            ENCODER_TO_DENOISER_TENSOR_FIELDS,
+            ENCODER_TO_DENOISER_SCALAR_FIELDS,
+        )
+        receiver = RoleConnectorReceiver(
+            self.context,
+            sender.endpoint,
+            ENCODER_TO_DENOISER_TENSOR_FIELDS,
+            ENCODER_TO_DENOISER_SCALAR_FIELDS,
+        )
+        time.sleep(0.1)
+
+        start = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            receiver.recv(timeout_ms=200)
+        elapsed = time.monotonic() - start
+        # Should have timed out in ~200ms, not much longer
+        self.assertGreater(elapsed, 0.15)
+        self.assertLess(elapsed, 2.0)
+
+        sender.close()
+        receiver.close()
+
+    def test_receiver_timeout_then_normal_recv(self):
+        """After a timeout, receiver should still be able to recv normally."""
+        sender = RoleConnectorSender(
+            self.context,
+            "tcp://127.0.0.1:*",
+            DENOISER_TO_DECODER_TENSOR_FIELDS,
+            DENOISER_TO_DECODER_SCALAR_FIELDS,
+        )
+        receiver = RoleConnectorReceiver(
+            self.context,
+            sender.endpoint,
+            DENOISER_TO_DECODER_TENSOR_FIELDS,
+            DENOISER_TO_DECODER_SCALAR_FIELDS,
+        )
+        time.sleep(0.1)
+
+        # First: timeout
+        with self.assertRaises(TimeoutError):
+            receiver.recv(timeout_ms=100)
+
+        # Now send a message and recv normally
+        req = Req(prompt="", request_id="timeout-test", guidance_scale=1.0)
+        req.latents = torch.randn(1, 4, 8, 16, 16, dtype=torch.bfloat16)
+        req.height = 128
+        req.width = 128
+        sender.send(req)
+
+        recv_req = receiver.recv(timeout_ms=5000)
+        self.assertEqual(recv_req.request_id, "timeout-test")
+        self.assertEqual(recv_req.latents.shape, torch.Size([1, 4, 8, 16, 16]))
+
+        sender.close()
+        receiver.close()
+
+
+class TestAsyncPipelining(unittest.TestCase):
+    """Test Phase 4 async pipelining — multiple in-flight requests."""
+
+    def test_multiple_concurrent_requests(self):
+        """Encoder sends N requests without blocking, then collects results."""
+        context = zmq.Context()
+
+        # Encoder -> Worker channel
+        e2w_push = context.socket(zmq.PUSH)
+        e2w_port = e2w_push.bind_to_random_port("tcp://127.0.0.1")
+        e2w_pull = context.socket(zmq.PULL)
+        e2w_pull.connect(f"tcp://127.0.0.1:{e2w_port}")
+
+        # Worker -> Encoder result channel
+        w2e_push = context.socket(zmq.PUSH)
+        w2e_port = w2e_push.bind_to_random_port("tcp://127.0.0.1")
+        w2e_pull = context.socket(zmq.PULL)
+        w2e_pull.connect(f"tcp://127.0.0.1:{w2e_port}")
+
+        time.sleep(0.1)
+
+        n_requests = 5
+        errors = []
+
+        # Simulate denoiser+decoder worker with artificial delay
+        def worker():
+            try:
+                for _ in range(n_requests):
+                    tf, sf = recv_tensors(e2w_pull)
+                    # Simulate processing time
+                    time.sleep(0.05)
+                    output = torch.ones(1, 3, 8, 16, 16) * sf["request_idx"]
+                    send_tensors(
+                        w2e_push,
+                        {"output": output},
+                        {
+                            "request_id": sf["request_id"],
+                            "request_idx": sf["request_idx"],
+                        },
+                    )
+            except Exception as e:
+                errors.append(("worker", e))
+
+        worker_thread = threading.Thread(target=worker)
+        worker_thread.start()
+
+        # Encoder: fire-and-forget all requests (non-blocking send)
+        pending = {}
+        for i in range(n_requests):
+            request_id = f"async-test-{i:03d}"
+            send_tensors(
+                e2w_push,
+                {"latents": torch.randn(1, 4, 8, 16, 16)},
+                {"request_id": request_id, "request_idx": i},
+            )
+            pending[request_id] = i
+
+        # Encoder: collect all results
+        results = {}
+        while len(results) < n_requests:
+            tf, sf = recv_tensors(w2e_pull)
+            rid = sf["request_id"]
+            results[rid] = (sf["request_idx"], tf["output"])
+
+        worker_thread.join(timeout=10)
+
+        # All requests should have been processed
+        self.assertEqual(len(errors), 0, f"Errors: {errors}")
+        self.assertEqual(len(results), n_requests)
+        for i in range(n_requests):
+            rid = f"async-test-{i:03d}"
+            idx, output = results[rid]
+            self.assertEqual(idx, i)
+            self.assertTrue(torch.all(output == i))
+
+        for s in [e2w_push, e2w_pull, w2e_push, w2e_pull]:
+            s.close()
+        context.term()
+
+    def test_noblock_recv_drains_multiple(self):
+        """NOBLOCK recv should drain all available messages without blocking."""
+        context = zmq.Context()
+
+        push = context.socket(zmq.PUSH)
+        port = push.bind_to_random_port("tcp://127.0.0.1")
+        pull = context.socket(zmq.PULL)
+        pull.connect(f"tcp://127.0.0.1:{port}")
+
+        time.sleep(0.1)
+
+        # Send 3 messages
+        for i in range(3):
+            send_tensors(push, {}, {"idx": i})
+
+        time.sleep(0.1)  # Let ZMQ deliver
+
+        # Drain all with NOBLOCK
+        collected = []
+        while True:
+            try:
+                _, sf = recv_tensors(pull, flags=zmq.NOBLOCK)
+                collected.append(sf["idx"])
+            except zmq.Again:
+                break
+
+        self.assertEqual(collected, [0, 1, 2])
+
+        push.close()
+        pull.close()
+        context.term()
+
+
 class TestExtractFields(unittest.TestCase):
     """Test the field extraction helpers from role_connector."""
 
