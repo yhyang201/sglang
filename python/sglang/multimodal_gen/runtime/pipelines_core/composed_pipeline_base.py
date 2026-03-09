@@ -15,6 +15,10 @@ from typing import Any, Callable, Literal, cast
 import torch
 from tqdm import tqdm
 
+from sglang.multimodal_gen.runtime.disaggregation.roles import (
+    RoleType,
+    filter_modules_for_role,
+)
 from sglang.multimodal_gen.runtime.loader.component_loaders.component_loader import (
     PipelineComponentLoader,
 )
@@ -83,6 +87,7 @@ class ComposedPipelineBase(ABC):
         use. The pipeline should be stateless and not hold any batch state.
         """
         self.server_args = server_args
+        self._disagg_role = server_args.disagg_role
 
         self.model_path: str = model_path
         self._stages: list[PipelineStage] = []
@@ -94,6 +99,20 @@ class ComposedPipelineBase(ABC):
 
         if self._required_config_modules is None:
             raise NotImplementedError("Subclass must set _required_config_modules")
+
+        # Filter modules based on disaggregation role
+        if self._disagg_role != RoleType.MONOLITHIC:
+            original_modules = list(self._required_config_modules)
+            self._required_config_modules = filter_modules_for_role(
+                self._required_config_modules, self._disagg_role
+            )
+            skipped = set(original_modules) - set(self._required_config_modules)
+            if skipped:
+                logger.info(
+                    "Disagg role=%s: skipping modules %s",
+                    self._disagg_role.value,
+                    sorted(skipped),
+                )
 
         # [module_name, gpu memory usage]
         self.memory_usages: dict[str, float] = {}
@@ -215,7 +234,24 @@ class ComposedPipelineBase(ABC):
                     "MoE pipeline detected. Adding transformer_2 to self.required_config_modules..."
                 )
                 if "transformer_2" not in self.required_config_modules:
-                    self.required_config_modules.append("transformer_2")
+                    # Re-apply disagg role filter: only add transformer_2 if the
+                    # role actually needs denoising modules.
+                    from sglang.multimodal_gen.runtime.disaggregation.roles import (
+                        get_module_role,
+                    )
+
+                    module_role = get_module_role("transformer_2")
+                    if (
+                        self._disagg_role == RoleType.MONOLITHIC
+                        or module_role is None
+                        or module_role == self._disagg_role
+                    ):
+                        self.required_config_modules.append("transformer_2")
+                    else:
+                        logger.info(
+                            "Disagg role=%s: skipping dynamically added module transformer_2",
+                            self._disagg_role.value,
+                        )
             else:
                 logger.info(
                     "Boundary ratio found in model_index.json without transformers; "
@@ -345,6 +381,19 @@ class ComposedPipelineBase(ABC):
     ) -> "ComposedPipelineBase":
 
         assert self.modules is not None, "No modules are registered"
+
+        # Filter stages based on disaggregation role
+        if self._disagg_role != RoleType.MONOLITHIC:
+            if stage.role_affinity != self._disagg_role:
+                if stage_name is None:
+                    stage_name = self._infer_stage_name(stage)
+                logger.info(
+                    "Disagg role=%s: skipping stage %s (affinity=%s)",
+                    self._disagg_role.value,
+                    stage_name,
+                    stage.role_affinity.value,
+                )
+                return self
 
         if stage_name is None:
             stage_name = self._infer_stage_name(stage)
