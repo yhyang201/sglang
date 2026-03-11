@@ -587,6 +587,8 @@ class PipelineConfig:
         )
         from sglang.multimodal_gen.registry import get_pipeline_config_classes
 
+        model_info = None
+
         # If model_path is a safetensors file and pipeline_class_name is specified,
         # try to get PipelineConfig from the registry first
         if is_safetensors_file and pipeline_class_name:
@@ -652,6 +654,11 @@ class PipelineConfig:
             pipeline_config_cls = Flux2FinetunedPipelineConfig
 
         pipeline_config = pipeline_config_cls()
+
+        # Apply task_type override from model info (e.g. diffusers backend
+        # inheriting task_type from a registered native config).
+        if model_info is not None and model_info.task_type_override is not None:
+            pipeline_config.task_type = model_info.task_type_override
 
         # 2. Load PipelineConfig from a json file or a PipelineConfig object if provided
         if isinstance(pipeline_config_or_path, str):

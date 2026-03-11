@@ -40,7 +40,10 @@ from sglang.multimodal_gen.configs.pipeline_configs import (
     WanT2V720PConfig,
     ZImagePipelineConfig,
 )
-from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
+from sglang.multimodal_gen.configs.pipeline_configs.base import (
+    ModelTaskType,
+    PipelineConfig,
+)
 from sglang.multimodal_gen.configs.pipeline_configs.flux import (
     Flux2KleinPipelineConfig,
     Flux2PipelineConfig,
@@ -336,6 +339,7 @@ class ModelInfo:
     pipeline_cls: Type[ComposedPipelineBase]
     sampling_param_cls: Any
     pipeline_config_cls: Type[PipelineConfig]
+    task_type_override: Optional[ModelTaskType] = None
 
 
 def _get_diffusers_model_info(
@@ -361,6 +365,7 @@ def _get_diffusers_model_info(
     )
 
     pipeline_config_cls = DiffusersGenericPipelineConfig
+    task_type_override = None
 
     # If there is a registered native config for this model, inherit its task_type
     if model_path is not None:
@@ -368,17 +373,7 @@ def _get_diffusers_model_info(
         if config_info is not None:
             native_task_type = config_info.pipeline_config_cls.task_type
             if native_task_type != DiffusersGenericPipelineConfig.task_type:
-                pipeline_config_cls = dataclasses.make_dataclass(
-                    "DiffusersGenericPipelineConfig",
-                    [
-                        (
-                            "task_type",
-                            type(native_task_type),
-                            dataclasses.field(default=native_task_type),
-                        )
-                    ],
-                    bases=(DiffusersGenericPipelineConfig,),
-                )
+                task_type_override = native_task_type
                 logger.debug(
                     "Inherited task_type=%s from native config for diffusers backend",
                     native_task_type.name,
@@ -388,6 +383,7 @@ def _get_diffusers_model_info(
         pipeline_cls=DiffusersPipeline,
         sampling_param_cls=DiffusersGenericSamplingParams,
         pipeline_config_cls=pipeline_config_cls,
+        task_type_override=task_type_override,
     )
 
 

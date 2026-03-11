@@ -20,6 +20,21 @@ from sglang.multimodal_gen.test.run_suite import SUITES, collect_test_items, run
 
 logger = init_logger(__name__)
 
+# Case IDs that cannot run with the diffusers backend (used in GT generation mode).
+# GT generation forces --backend diffusers, but these models use pipeline classes
+# that are not available in the pinned diffusers version:
+#   - WanDMDPipeline (TurboWan/FastWan): sglang-only, not in any diffusers release
+#   - Flux2KleinPipeline, QwenImageLayeredPipeline: added in diffusers 0.37.0,
+#     but sglang currently pins 0.36.0
+DIFFUSERS_INCOMPATIBLE_CASE_IDS = {
+    "turbo_wan2_1_t2v_1.3b",
+    "turbo_wan2_2_i2v_a14b_2gpu",
+    "fastwan2_2_ti2v_5b",
+    "flux_2_klein_image_t2i",
+    "flux_2_klein_ti2i_2_gpus",
+    "qwen_image_layered_i2i",
+}
+
 
 def main():
     """Main entry point."""
@@ -48,11 +63,6 @@ def main():
         type=str,
         required=True,
         help="Output directory for generated files",
-    )
-    parser.add_argument(
-        "--continue-on-error",
-        action="store_true",
-        help="Continue processing other cases if one fails",
     )
     parser.add_argument(
         "--case-ids",
@@ -117,6 +127,19 @@ def main():
     # Collect all test items (same as run_suite.py)
     all_test_items = collect_test_items(suite_files_abs, filter_expr=filter_expr)
 
+    # Filter out cases incompatible with diffusers backend.
+    # GT generation forces --backend diffusers; skip cases whose pipeline
+    # classes are not available in the installed diffusers version.
+    before_count = len(all_test_items)
+    all_test_items = [
+        item
+        for item in all_test_items
+        if not any(case_id in item for case_id in DIFFUSERS_INCOMPATIBLE_CASE_IDS)
+    ]
+    skipped = before_count - len(all_test_items)
+    if skipped:
+        logger.info(f"Skipped {skipped} test(s) incompatible with diffusers backend")
+
     if not all_test_items:
         logger.warning(f"No test items found for suite '{args.suite}'.")
         sys.exit(0)
@@ -143,11 +166,7 @@ def main():
     # Run pytest with the specific test items (same as run_suite.py)
     exit_code = run_pytest(my_items)
 
-    if exit_code != 0:
-        if args.continue_on_error:
-            logger.warning(f"pytest exited with code {exit_code}")
-        else:
-            sys.exit(exit_code)
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
