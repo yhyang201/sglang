@@ -18,6 +18,7 @@ class RoleType(str, Enum):
     ENCODER = "encoder"  # Text/image encoding + latent/timestep prep
     DENOISING = "denoising"  # Denoising loop only
     DECODER = "decoder"  # VAE decode only
+    SERVER = "server"  # DiffusionServer head node (no GPU, routes requests)
 
     @classmethod
     def from_string(cls, value: str) -> "RoleType":
@@ -81,7 +82,7 @@ def filter_modules_for_role(module_names: list[str], role: "RoleType") -> list[s
     - DENOISING: denoising modules + shared (no VAE, no text encoders)
     - DECODER: decoder modules + shared
     """
-    if role == RoleType.MONOLITHIC:
+    if role in (RoleType.MONOLITHIC, RoleType.SERVER):
         return module_names
 
     filtered = []

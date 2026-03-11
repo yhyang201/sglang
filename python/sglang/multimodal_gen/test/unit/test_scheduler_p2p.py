@@ -404,6 +404,7 @@ class TestSchedulerP2PInit(unittest.TestCase):
         scheduler.server_args = MagicMock()
         scheduler.server_args.disagg_transfer_pool_size = 1 * 1024 * 1024
         scheduler.server_args.disagg_p2p_hostname = "127.0.0.1"
+        scheduler.server_args.disagg_ib_device = None
 
         # Mock disagg role
         scheduler._disagg_role = MagicMock()
@@ -424,6 +425,7 @@ class TestSchedulerP2PInit(unittest.TestCase):
         scheduler.server_args = MagicMock()
         scheduler.server_args.disagg_transfer_pool_size = 256 * 1024
         scheduler.server_args.disagg_p2p_hostname = "127.0.0.1"
+        scheduler.server_args.disagg_ib_device = None
         scheduler._disagg_role = MagicMock()
         scheduler._disagg_role.value = "denoising"
 

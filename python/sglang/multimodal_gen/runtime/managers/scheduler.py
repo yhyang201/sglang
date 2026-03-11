@@ -414,8 +414,9 @@ class Scheduler:
         sa = self.server_args
 
         # PULL: receive work from DiffusionServer
+        # max_bind_retries=1: port must match what DiffusionServer connects to
         self._pool_work_pull, _ = get_zmq_socket(
-            self.context, zmq.PULL, sa.pool_work_endpoint, bind=True
+            self.context, zmq.PULL, sa.pool_work_endpoint, bind=True, max_bind_retries=1
         )
         # PUSH: send results to DiffusionServer
         self._pool_result_push, _ = get_zmq_socket(
@@ -461,9 +462,11 @@ class Scheduler:
 
         # Create transfer engine
         hostname = getattr(sa, "disagg_p2p_hostname", "127.0.0.1")
+        ib_device = getattr(sa, "disagg_ib_device", None)
         engine = create_transfer_engine(
             hostname=hostname,
             gpu_id=self.gpu_id,
+            ib_device=ib_device,
         )
 
         # Create transfer manager

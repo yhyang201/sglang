@@ -186,6 +186,26 @@ def launch_server(server_args: ServerArgs, launch_http_server: bool = True):
     return processes
 
 
+def parse_gpu_string(gpu_str: str) -> list[list[int]]:
+    """Parse a GPU assignment string into a list of GPU ID lists.
+
+    Format: semicolons separate instances, commas separate GPUs within an instance.
+    Examples:
+        "0"         -> [[0]]
+        "0;4"       -> [[0], [4]]
+        "1,2,3,4"   -> [[1, 2, 3, 4]]
+        "0,1;2,3"   -> [[0, 1], [2, 3]]
+    """
+    instances = []
+    for part in gpu_str.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        gpu_ids = [int(g.strip()) for g in part.split(",")]
+        instances.append(gpu_ids)
+    return instances
+
+
 def launch_pool_disagg_server(
     server_args: ServerArgs,
     encoder_gpus: list[list[int]],
@@ -264,12 +284,11 @@ def launch_pool_disagg_server(
         port_cursor = p + 1
 
     # Per-role-type result endpoints (DS binds PULL, instances connect PUSH)
-    encoder_result_ep = f"tcp://{host}:{find_port(port_cursor)}"
-    port_cursor += 1
-    denoiser_result_ep = f"tcp://{host}:{find_port(port_cursor)}"
-    port_cursor += 1
-    decoder_result_ep = f"tcp://{host}:{find_port(port_cursor)}"
-    port_cursor += 1
+    # Use deterministic convention: scheduler_port + {1,2,3}
+    base_port = server_args.scheduler_port
+    encoder_result_ep = f"tcp://{host}:{base_port + 1}"
+    denoiser_result_ep = f"tcp://{host}:{base_port + 2}"
+    decoder_result_ep = f"tcp://{host}:{base_port + 3}"
 
     logger.info(
         "Pool endpoints allocated: %d work + 3 result endpoints",
@@ -435,10 +454,228 @@ def launch_http_server_only(server_args):
     )
 
 
+def parse_url_string(url_str: str) -> list[str]:
+    """Parse a semicolon-separated URL string into a list.
+
+    Example: "tcp://10.0.0.1:35000;tcp://10.0.0.2:35000" -> ["tcp://...", "tcp://..."]
+    """
+    return [u.strip() for u in url_str.split(";") if u.strip()]
+
+
+def launch_disagg_server(server_args: ServerArgs):
+    """Launch DiffusionServer head node + HTTP server (--disagg-role server).
+
+    No GPU workers are spawned. Connects to remote role instances
+    specified by --encoder-urls, --denoiser-urls, --decoder-urls.
+
+    Result endpoints use deterministic convention:
+        encoder result: scheduler_port + 1
+        denoiser result: scheduler_port + 2
+        decoder result: scheduler_port + 3
+    """
+    from sglang.multimodal_gen.runtime.disaggregation.diffusion_server import (
+        DiffusionServer,
+    )
+
+    configure_logger(server_args)
+
+    for name, val in [
+        ("--encoder-urls", server_args.encoder_urls),
+        ("--denoiser-urls", server_args.denoiser_urls),
+        ("--decoder-urls", server_args.decoder_urls),
+    ]:
+        if val is None:
+            raise ValueError(f"{name} is required for --disagg-role server")
+
+    host = server_args.host or "127.0.0.1"
+    base_port = server_args.scheduler_port
+
+    encoder_work_endpoints = parse_url_string(server_args.encoder_urls)
+    denoiser_work_endpoints = parse_url_string(server_args.denoiser_urls)
+    decoder_work_endpoints = parse_url_string(server_args.decoder_urls)
+
+    encoder_result_ep = f"tcp://{host}:{base_port + 1}"
+    denoiser_result_ep = f"tcp://{host}:{base_port + 2}"
+    decoder_result_ep = f"tcp://{host}:{base_port + 3}"
+
+    frontend_endpoint = f"tcp://{host}:{base_port}"
+
+    logger.info(
+        "Starting DiffusionServer: %d encoder(s), %d denoiser(s), %d decoder(s)",
+        len(encoder_work_endpoints),
+        len(denoiser_work_endpoints),
+        len(decoder_work_endpoints),
+    )
+    logger.info("  Frontend: %s", frontend_endpoint)
+    logger.info("  Encoder work endpoints: %s", encoder_work_endpoints)
+    logger.info("  Denoiser work endpoints: %s", denoiser_work_endpoints)
+    logger.info("  Decoder work endpoints: %s", decoder_work_endpoints)
+    logger.info(
+        "  Result endpoints: encoder=%s, denoiser=%s, decoder=%s",
+        encoder_result_ep,
+        denoiser_result_ep,
+        decoder_result_ep,
+    )
+
+    p2p_mode = getattr(server_args, "disagg_p2p_mode", False)
+    diffusion_server = DiffusionServer(
+        frontend_endpoint=frontend_endpoint,
+        encoder_work_endpoints=encoder_work_endpoints,
+        denoiser_work_endpoints=denoiser_work_endpoints,
+        decoder_work_endpoints=decoder_work_endpoints,
+        encoder_result_endpoint=encoder_result_ep,
+        denoiser_result_endpoint=denoiser_result_ep,
+        decoder_result_endpoint=decoder_result_ep,
+        dispatch_policy_name=server_args.disagg_dispatch_policy,
+        timeout_s=float(server_args.disagg_timeout),
+        p2p_mode=p2p_mode,
+    )
+    diffusion_server.start()
+
+    logger.info(
+        "Starting HTTP server (connected to DiffusionServer at port %d).",
+        base_port,
+    )
+    launch_http_server_only(server_args)
+
+
+def launch_disagg_role(server_args: ServerArgs):
+    """Launch a standalone disaggregated role instance (--disagg-role encoder/denoising/decoder).
+
+    The instance:
+    1. Binds its work PULL socket on tcp://0.0.0.0:{scheduler_port}
+    2. Connects its result PUSH socket to the DiffusionServer head node
+       (derived from --disagg-server-addr + role offset)
+    3. Spawns GPU worker processes for the assigned role.
+    """
+    from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
+
+    configure_logger(server_args)
+
+    role_type = server_args.disagg_role
+    if server_args.disagg_server_addr is None:
+        raise ValueError(
+            "--disagg-server-addr is required for --disagg-role " f"{role_type.value}"
+        )
+
+    # Derive endpoints
+    work_endpoint = server_args.derive_pool_work_endpoint()
+    result_endpoint = server_args.derive_pool_result_endpoint()
+
+    logger.info(
+        "Starting disagg role: %s, num_gpus=%d",
+        role_type.value,
+        server_args.num_gpus,
+    )
+    logger.info("  Work endpoint (bind): %s", work_endpoint)
+    logger.info("  Result endpoint (connect): %s", result_endpoint)
+    if server_args.disagg_p2p_mode:
+        logger.info(
+            "  P2P: hostname=%s, ib_device=%s, pool_size=%d",
+            server_args.disagg_p2p_hostname,
+            server_args.disagg_ib_device,
+            server_args.disagg_transfer_pool_size,
+        )
+
+    # Build role-specific ServerArgs
+    # Use a different port for the scheduler's internal ROUTER socket to avoid
+    # conflicting with the pool work PULL socket (both bind on scheduler_port).
+    from sglang.multimodal_gen.runtime.utils.common import is_port_available
+
+    internal_scheduler_port = server_args.scheduler_port + 10000
+    while not is_port_available(internal_scheduler_port):
+        internal_scheduler_port += 1
+
+    role_par = server_args.get_role_parallelism(role_type)
+    role_overrides = {
+        "disagg_role": role_type,
+        "disagg_pool_mode": True,
+        "pool_work_endpoint": work_endpoint,
+        "pool_result_endpoint": result_endpoint,
+        "warmup": role_type == RoleType.ENCODER,
+        "scheduler_port": internal_scheduler_port,
+        # Per-role parallelism (None = auto-derive from num_gpus)
+        "tp_size": role_par["tp_size"],
+        "sp_degree": role_par["sp_degree"],
+        "ulysses_degree": role_par["ulysses_degree"],
+        "ring_degree": role_par["ring_degree"],
+    }
+
+    base_dict = {
+        f.name: getattr(server_args, f.name) for f in dataclasses.fields(server_args)
+    }
+    base_dict.update(role_overrides)
+    base_dict.pop("pipeline_config", None)
+    role_args = ServerArgs.from_kwargs(**base_dict)
+
+    # Spawn GPU worker processes
+    num_gpus = server_args.num_gpus
+    base_gpu_id = server_args.base_gpu_id
+    pool_ctx = mp.get_context("spawn")
+    processes = []
+
+    for rank_idx in range(num_gpus):
+        reader, writer = pool_ctx.Pipe(duplex=False)
+        gpu_id = base_gpu_id + rank_idx
+
+        process = pool_ctx.Process(
+            target=_run_disagg_role_process,
+            args=(gpu_id, rank_idx, rank_idx, role_args, writer, [], []),
+            name=f"sglang-{role_type.value}-r{rank_idx}",
+            daemon=True,
+        )
+        process.start()
+        processes.append(process)
+
+        try:
+            data = reader.recv()
+        except EOFError:
+            logger.error(
+                "Role %s rank %d is dead.",
+                role_type.value,
+                rank_idx,
+            )
+            raise
+        if data.get("status") != "ready":
+            raise RuntimeError(
+                f"Role {role_type.value} rank {rank_idx} failed to initialize."
+            )
+        reader.close()
+
+    logger.info(
+        "Role %s ready (%d GPU(s), work=%s)",
+        role_type.value.upper(),
+        num_gpus,
+        work_endpoint,
+    )
+
+    # Block until interrupted
+    try:
+        for p in processes:
+            p.join()
+    except KeyboardInterrupt:
+        logger.info("Role %s shutting down.", role_type.value)
+
+
+def dispatch_launch(server_args: ServerArgs):
+    """Route to the correct launch function based on --disagg-role."""
+    from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
+
+    role = server_args.disagg_role
+    if role == RoleType.MONOLITHIC:
+        launch_server(server_args)
+    elif role == RoleType.SERVER:
+        launch_disagg_server(server_args)
+    elif role in (RoleType.ENCODER, RoleType.DENOISING, RoleType.DECODER):
+        launch_disagg_role(server_args)
+    else:
+        raise ValueError(f"Unknown disagg_role: {role}")
+
+
 if __name__ == "__main__":
     server_args = prepare_server_args(sys.argv[1:])
 
     try:
-        launch_server(server_args)
+        dispatch_launch(server_args)
     finally:
         kill_process_tree(os.getpid(), include_parent=False)

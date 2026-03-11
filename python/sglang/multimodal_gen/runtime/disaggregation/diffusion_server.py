@@ -370,6 +370,23 @@ class DiffusionServer:
             reqs = [reqs]
 
         req = reqs[0]
+
+        # Filter out non-Req messages (e.g., ping dicts, stats requests)
+        if isinstance(req, dict) or not hasattr(req, "request_id"):
+            logger.debug(
+                "DiffusionServer: ignoring non-Req message of type %s",
+                type(req).__name__,
+            )
+            # Send empty reply so REQ socket doesn't hang
+            try:
+                frontend.send_multipart(
+                    [client_identity, b"", pickle.dumps({"status": "ignored"})],
+                    zmq.NOBLOCK,
+                )
+            except zmq.Again:
+                pass
+            return
+
         request_id = getattr(req, "request_id", None)
         if request_id is None:
             request_id = f"ds-{time.monotonic()}"
