@@ -106,6 +106,7 @@ class ServerArgs:
 
     # Parallelism
     num_gpus: int = 1
+    base_gpu_id: int = 0
     tp_size: Optional[int] = None
     sp_degree: Optional[int] = None
     # sequence parallelism
@@ -223,6 +224,14 @@ class ServerArgs:
         256 * 1024 * 1024
     )  # P2P transfer buffer size (bytes)
     disagg_p2p_hostname: str = "127.0.0.1"  # Hostname for P2P transfer engine
+    disagg_ib_device: str | None = None  # InfiniBand device for mooncake RDMA
+    disagg_server_addr: str | None = (
+        None  # DS head address for role instances (tcp://host:port)
+    )
+    # Remote instance URLs for --disagg-role server (semicolon-separated)
+    encoder_urls: str | None = None
+    denoiser_urls: str | None = None
+    decoder_urls: str | None = None
     # Per-role parallelism overrides (None = auto-derive from num_gpus)
     encoder_tp: int | None = None
     encoder_sp: int | None = None
@@ -268,6 +277,37 @@ class ServerArgs:
             "ulysses_degree": getattr(self, f"{prefix}_ulysses"),
             "ring_degree": getattr(self, f"{prefix}_ring"),
         }
+
+    # Port offsets for disagg result endpoints (deterministic convention)
+    DISAGG_RESULT_PORT_OFFSETS = {
+        RoleType.ENCODER: 1,
+        RoleType.DENOISING: 2,
+        RoleType.DECODER: 3,
+    }
+
+    def derive_pool_result_endpoint(self) -> str:
+        """Derive the result PUSH endpoint from disagg_server_addr + role.
+
+        Convention: DS binds result PULL on scheduler_port + {1,2,3} for
+        encoder/denoiser/decoder. Role instances connect PUSH to this.
+        """
+        if self.disagg_server_addr is None:
+            raise ValueError("disagg_server_addr is required for per-role launch")
+        addr = self.disagg_server_addr
+        # Parse tcp://host:port
+        if addr.startswith("tcp://"):
+            addr = addr[len("tcp://") :]
+        host, port_str = addr.rsplit(":", 1)
+        base_port = int(port_str)
+        offset = self.DISAGG_RESULT_PORT_OFFSETS[self.disagg_role]
+        return f"tcp://{host}:{base_port + offset}"
+
+    def derive_pool_work_endpoint(self) -> str:
+        """Derive the work PULL bind endpoint for a standalone role instance.
+
+        Binds on 0.0.0.0 using the instance's own scheduler_port.
+        """
+        return f"tcp://0.0.0.0:{self.scheduler_port}"
 
     @property
     def broker_port(self) -> int:
@@ -629,6 +669,13 @@ class ServerArgs:
             help="The number of GPUs to use.",
         )
         parser.add_argument(
+            "--base-gpu-id",
+            type=int,
+            default=ServerArgs.base_gpu_id,
+            help="The starting GPU ID for this instance. Used with --disagg-role "
+            "to place role instances on specific GPUs without CUDA_VISIBLE_DEVICES.",
+        )
+        parser.add_argument(
             "--tp-size",
             type=int,
             default=None,
@@ -693,10 +740,14 @@ class ServerArgs:
             type=str,
             default=ServerArgs.disagg_role.value,
             choices=RoleType.choices(),
-            help="Role for disaggregated pipeline. 'monolithic' (default) loads all components. "
-            "'encoder' loads only text/image encoders. 'denoising' loads only the transformer. "
-            "'decoder' loads only the VAE decoder. "
-            "Set automatically by launch_pool_disagg_server().",
+            help="Role for disaggregated pipeline. "
+            "'monolithic' (default): load all components, run as single server. "
+            "'encoder': run as encoder role instance. "
+            "'denoising': run as denoiser role instance. "
+            "'decoder': run as decoder role instance. "
+            "'server': run as DiffusionServer head node (no GPU, routes requests). "
+            "Role instances require --disagg-server-addr. "
+            "Server requires --encoder-urls, --denoiser-urls, --decoder-urls.",
         )
         parser.add_argument(
             "--disagg-timeout",
@@ -737,6 +788,44 @@ class ServerArgs:
             type=str,
             default="127.0.0.1",
             help="Hostname for P2P transfer engine (default: 127.0.0.1).",
+        )
+        parser.add_argument(
+            "--disagg-ib-device",
+            type=str,
+            default=None,
+            help="InfiniBand device for P2P RDMA transfers (e.g., mlx5_0, mlx5_roce0). "
+            "Required for mooncake transfer engine on multi-machine deployments.",
+        )
+        parser.add_argument(
+            "--disagg-server-addr",
+            type=str,
+            default=None,
+            help="DiffusionServer head node address for per-role launch mode. "
+            "Format: tcp://HOST:PORT (e.g., tcp://192.168.1.1:5655). "
+            "The role instance derives its result endpoint from this address.",
+        )
+
+        # Remote instance URLs for --disagg-role server
+        parser.add_argument(
+            "--encoder-urls",
+            type=str,
+            default=None,
+            help="Encoder instance work endpoints for DiffusionServer head mode. "
+            "Semicolon-separated. Example: 'tcp://10.0.0.1:35000;tcp://10.0.0.2:35000'.",
+        )
+        parser.add_argument(
+            "--denoiser-urls",
+            type=str,
+            default=None,
+            help="Denoiser instance work endpoints for DiffusionServer head mode. "
+            "Semicolon-separated. Example: 'tcp://10.0.0.3:35000;tcp://10.0.0.4:35000'.",
+        )
+        parser.add_argument(
+            "--decoder-urls",
+            type=str,
+            default=None,
+            help="Decoder instance work endpoints for DiffusionServer head mode. "
+            "Semicolon-separated. Example: 'tcp://10.0.0.5:35000;tcp://10.0.0.6:35000'.",
         )
 
         # Per-role parallelism overrides
