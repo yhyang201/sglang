@@ -20,7 +20,7 @@ RFC: https://github.com/sgl-project/sglang/issues/19512
 
 - `runtime/disaggregation/roles.py` — `RoleType` enum, `get_module_role()`, `filter_modules_for_role()`
 - `runtime/pipelines_core/composed_pipeline_base.py` — Filter `_required_config_modules` and stages by `role_affinity`
-- `runtime/server_args.py` — `--disagg-role` (encoder/denoising/decoder/monolithic)
+- `runtime/server_args.py` — `--disagg-role` (encoder/denoiser/decoder/monolithic)
 - `runtime/pipelines_core/stages/base.py` — `role_affinity` property on stage classes
 
 ### Commit 2 — Phase 2: ZMQ Zero-Copy IPC ✅

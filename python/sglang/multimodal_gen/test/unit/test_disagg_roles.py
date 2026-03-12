@@ -14,9 +14,13 @@ class TestRoleType(unittest.TestCase):
     def test_from_string(self):
         self.assertEqual(RoleType.from_string("monolithic"), RoleType.MONOLITHIC)
         self.assertEqual(RoleType.from_string("encoder"), RoleType.ENCODER)
-        self.assertEqual(RoleType.from_string("denoising"), RoleType.DENOISER)
+        self.assertEqual(RoleType.from_string("denoiser"), RoleType.DENOISER)
         self.assertEqual(RoleType.from_string("decoder"), RoleType.DECODER)
         self.assertEqual(RoleType.from_string("ENCODER"), RoleType.ENCODER)
+
+    def test_from_string_backward_compat(self):
+        # "denoising" is accepted as backward-compat alias for "denoiser"
+        self.assertEqual(RoleType.from_string("denoising"), RoleType.DENOISER)
 
     def test_from_string_invalid(self):
         with self.assertRaises(ValueError):
@@ -26,7 +30,7 @@ class TestRoleType(unittest.TestCase):
         choices = RoleType.choices()
         self.assertIn("monolithic", choices)
         self.assertIn("encoder", choices)
-        self.assertIn("denoising", choices)
+        self.assertIn("denoiser", choices)
         self.assertIn("decoder", choices)
 
 
