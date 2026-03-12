@@ -68,18 +68,15 @@ class TestPerRoleParallelism(unittest.TestCase):
             {
                 "model_path": "/fake",
                 "encoder_tp": 2,
-                "encoder_sp": 4,
-                "encoder_ulysses": 2,
-                "encoder_ring": 2,
             }
         )
         from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 
         par = args.get_role_parallelism(RoleType.ENCODER)
         self.assertEqual(par["tp_size"], 2)
-        self.assertEqual(par["sp_degree"], 4)
-        self.assertEqual(par["ulysses_degree"], 2)
-        self.assertEqual(par["ring_degree"], 2)
+        self.assertIsNone(par["sp_degree"])
+        self.assertIsNone(par["ulysses_degree"])
+        self.assertIsNone(par["ring_degree"])
 
     def test_denoiser_overrides(self):
         args = ServerArgs.from_dict(
@@ -104,14 +101,13 @@ class TestPerRoleParallelism(unittest.TestCase):
             {
                 "model_path": "/fake",
                 "decoder_tp": 2,
-                "decoder_sp": 2,
             }
         )
         from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 
         par = args.get_role_parallelism(RoleType.DECODER)
         self.assertEqual(par["tp_size"], 2)
-        self.assertEqual(par["sp_degree"], 2)
+        self.assertIsNone(par["sp_degree"])
         self.assertIsNone(par["ulysses_degree"])
         self.assertIsNone(par["ring_degree"])
 
