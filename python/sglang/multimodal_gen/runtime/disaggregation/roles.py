@@ -4,11 +4,13 @@ Role definitions for diffusion pipeline disaggregation.
 
 Each diffusion pipeline can be decomposed into three roles:
 - ENCODER: Text/image encoding, latent preparation, timestep preparation
-- DENOISING: Iterative denoising loop (the compute-heavy part)
+- DENOISER: Iterative denoising loop (the compute-heavy part)
 - DECODER: VAE decode from latent space to pixel space
 """
 
 from enum import Enum
+
+_ROLE_ALIASES = {"denoising": "denoiser"}
 
 
 class RoleType(str, Enum):
@@ -22,8 +24,9 @@ class RoleType(str, Enum):
 
     @classmethod
     def from_string(cls, value: str) -> "RoleType":
+        v = _ROLE_ALIASES.get(value.lower(), value.lower())
         try:
-            return cls(value.lower())
+            return cls(v)
         except ValueError:
             raise ValueError(
                 f"Invalid role: {value}. Must be one of: {', '.join([r.value for r in cls])}"
@@ -79,7 +82,7 @@ def filter_modules_for_role(module_names: list[str], role: "RoleType") -> list[s
 
     Module loading rules per role:
     - ENCODER: encoder modules + decoder modules (VAE needed for ImageVAEEncoding) + shared
-    - DENOISING: denoising modules + shared (no VAE, no text encoders)
+    - DENOISER: denoising modules + shared (no VAE, no text encoders)
     - DECODER: decoder modules + shared
     """
     if role in (RoleType.MONOLITHIC, RoleType.SERVER):

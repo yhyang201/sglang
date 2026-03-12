@@ -10,7 +10,7 @@ Disaggregation is controlled by a single flag: `--disagg-role`. Each component i
 |----------------|--------------|
 | `monolithic` | (Default) Standard single-server mode |
 | `encoder` | Encoder role instance (text/image encoding) |
-| `denoising` | Denoiser role instance (DiT forward) |
+| `denoiser` | Denoiser role instance (DiT forward) |
 | `decoder` | Decoder role instance (VAE decode) |
 | `server` | DiffusionServer head node + HTTP server (no GPU) |
 
@@ -30,7 +30,7 @@ sglang serve --model-path Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
 
 # Terminal 2: Denoiser (GPU 1)
 sglang serve --model-path Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
-    --disagg-role denoising \
+    --disagg-role denoiser \
     --disagg-server-addr tcp://127.0.0.1:19655 \
     --scheduler-port 19001 \
     --num-gpus 1 --base-gpu-id 1
@@ -81,7 +81,7 @@ sglang serve --model-path Wan-AI/Wan2.1-T2V-14B-Diffusers \
 
 # Machine B (10.0.0.2): Denoiser (4 GPUs with SP)
 sglang serve --model-path Wan-AI/Wan2.1-T2V-14B-Diffusers \
-    --disagg-role denoising \
+    --disagg-role denoiser \
     --disagg-server-addr tcp://10.0.0.4:19655 \
     --scheduler-port 19001 \
     --num-gpus 4 --denoiser-sp 4 --denoiser-ulysses 2 --denoiser-ring 2 \
