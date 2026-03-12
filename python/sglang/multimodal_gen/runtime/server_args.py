@@ -261,7 +261,7 @@ class ServerArgs:
         }
         if role_type == RoleType.ENCODER:
             return {**_none, "tp_size": self.encoder_tp}
-        elif role_type == RoleType.DENOISING:
+        elif role_type == RoleType.DENOISER:
             return {
                 "tp_size": self.denoiser_tp,
                 "sp_degree": self.denoiser_sp,
@@ -275,7 +275,7 @@ class ServerArgs:
     # Port offsets for disagg result endpoints (deterministic convention)
     DISAGG_RESULT_PORT_OFFSETS = {
         RoleType.ENCODER: 1,
-        RoleType.DENOISING: 2,
+        RoleType.DENOISER: 2,
         RoleType.DECODER: 3,
     }
 

@@ -605,7 +605,7 @@ class Scheduler:
                         ENCODER_TO_DENOISER_SCALAR_FIELDS,
                         frames=frames,
                     )
-                elif self._disagg_role == RoleType.DENOISING:
+                elif self._disagg_role == RoleType.DENOISER:
                     self._pool_mode_denoiser_step(
                         send_tensors,
                         build_req_from_frames,
@@ -731,7 +731,7 @@ class Scheduler:
         # Tensor fields will be received via NCCL inside execute_forward.
         req = self._build_req_from_p2p(scalar_fields, {})
 
-        if self._disagg_role == RoleType.DENOISING:
+        if self._disagg_role == RoleType.DENOISER:
             # Initialize scheduler timesteps (same as rank 0)
             scheduler_mod = self.worker.pipeline.get_module("scheduler")
             num_steps = getattr(req, "num_inference_steps", None)
@@ -846,7 +846,7 @@ class Scheduler:
         # 2. Reconstruct Req from scalar fields + loaded tensors
         req = self._build_req_from_p2p(scalar_fields, tensors)
 
-        if self._disagg_role == RoleType.DENOISING:
+        if self._disagg_role == RoleType.DENOISER:
             self._p2p_denoiser_compute(req, request_id, role_name)
         elif self._disagg_role == RoleType.DECODER:
             self._p2p_decoder_compute(req, request_id, role_name)

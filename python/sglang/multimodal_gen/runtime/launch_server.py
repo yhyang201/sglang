@@ -301,7 +301,7 @@ def launch_pool_disagg_server(
     role_configs = [
         (RoleType.ENCODER, encoder_gpus, encoder_work_endpoints, encoder_result_ep),
         (
-            RoleType.DENOISING,
+            RoleType.DENOISER,
             denoiser_gpus,
             denoiser_work_endpoints,
             denoiser_result_ep,
@@ -666,7 +666,7 @@ def dispatch_launch(server_args: ServerArgs):
         launch_server(server_args)
     elif role == RoleType.SERVER:
         launch_disagg_server(server_args)
-    elif role in (RoleType.ENCODER, RoleType.DENOISING, RoleType.DECODER):
+    elif role in (RoleType.ENCODER, RoleType.DENOISER, RoleType.DECODER):
         launch_disagg_role(server_args)
     else:
         raise ValueError(f"Unknown disagg_role: {role}")

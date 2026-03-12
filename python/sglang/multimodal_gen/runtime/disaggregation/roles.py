@@ -16,7 +16,7 @@ class RoleType(str, Enum):
 
     MONOLITHIC = "monolithic"  # Default: load everything, run all stages
     ENCODER = "encoder"  # Text/image encoding + latent/timestep prep
-    DENOISING = "denoising"  # Denoising loop only
+    DENOISER = "denoiser"  # Denoising loop only
     DECODER = "decoder"  # VAE decode only
     SERVER = "server"  # DiffusionServer head node (no GPU, routes requests)
 
@@ -59,7 +59,7 @@ def get_module_role(module_name: str) -> "RoleType | None":
     if any(
         module_name == p or module_name.startswith(p + "_") for p in denoising_prefixes
     ):
-        return RoleType.DENOISING
+        return RoleType.DENOISER
 
     # Decoder-specific modules (VAE, vocoder)
     decoder_prefixes = ("vae", "audio_vae", "video_vae", "vocoder")

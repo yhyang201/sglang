@@ -79,7 +79,7 @@ class TestPerRoleParallelism(unittest.TestCase):
         args = ServerArgs.from_dict({"model_path": "/fake"})
         from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 
-        for role in [RoleType.ENCODER, RoleType.DENOISING, RoleType.DECODER]:
+        for role in [RoleType.ENCODER, RoleType.DENOISER, RoleType.DECODER]:
             par = args.get_role_parallelism(role)
             self.assertIsNone(par["tp_size"])
             self.assertIsNone(par["sp_degree"])
@@ -113,7 +113,7 @@ class TestPerRoleParallelism(unittest.TestCase):
         )
         from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 
-        par = args.get_role_parallelism(RoleType.DENOISING)
+        par = args.get_role_parallelism(RoleType.DENOISER)
         self.assertEqual(par["tp_size"], 1)
         self.assertEqual(par["sp_degree"], 8)
         self.assertEqual(par["ulysses_degree"], 4)
@@ -160,7 +160,7 @@ class TestPerRoleParallelism(unittest.TestCase):
         from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 
         self.assertEqual(args.get_role_parallelism(RoleType.ENCODER)["tp_size"], 1)
-        self.assertEqual(args.get_role_parallelism(RoleType.DENOISING)["tp_size"], 2)
+        self.assertEqual(args.get_role_parallelism(RoleType.DENOISER)["tp_size"], 2)
         self.assertEqual(args.get_role_parallelism(RoleType.DECODER)["tp_size"], 4)
 
     def test_cli_args_parsed(self):
