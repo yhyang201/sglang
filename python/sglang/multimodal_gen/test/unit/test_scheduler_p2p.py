@@ -630,7 +630,7 @@ class TestMultiRankGating(unittest.TestCase):
         from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 
         scheduler = self._make_scheduler(gpu_id=1, role="denoising")
-        scheduler._disagg_role = RoleType.DENOISING
+        scheduler._disagg_role = RoleType.DENOISER
         scheduler.worker.pipeline.get_module.return_value = MagicMock()
 
         ready_msg = {

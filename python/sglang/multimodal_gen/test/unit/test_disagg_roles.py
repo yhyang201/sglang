@@ -14,7 +14,7 @@ class TestRoleType(unittest.TestCase):
     def test_from_string(self):
         self.assertEqual(RoleType.from_string("monolithic"), RoleType.MONOLITHIC)
         self.assertEqual(RoleType.from_string("encoder"), RoleType.ENCODER)
-        self.assertEqual(RoleType.from_string("denoising"), RoleType.DENOISING)
+        self.assertEqual(RoleType.from_string("denoising"), RoleType.DENOISER)
         self.assertEqual(RoleType.from_string("decoder"), RoleType.DECODER)
         self.assertEqual(RoleType.from_string("ENCODER"), RoleType.ENCODER)
 
@@ -41,8 +41,8 @@ class TestGetModuleRole(unittest.TestCase):
         self.assertEqual(get_module_role("connectors"), RoleType.ENCODER)
 
     def test_denoising_modules(self):
-        self.assertEqual(get_module_role("transformer"), RoleType.DENOISING)
-        self.assertEqual(get_module_role("transformer_2"), RoleType.DENOISING)
+        self.assertEqual(get_module_role("transformer"), RoleType.DENOISER)
+        self.assertEqual(get_module_role("transformer_2"), RoleType.DENOISER)
 
     def test_decoder_modules(self):
         self.assertEqual(get_module_role("vae"), RoleType.DECODER)
@@ -71,7 +71,7 @@ class TestFilterModulesForRole(unittest.TestCase):
         self.assertNotIn("transformer", result)
 
     def test_denoising_skips_encoders_and_vae(self):
-        result = filter_modules_for_role(self.WAN_MODULES, RoleType.DENOISING)
+        result = filter_modules_for_role(self.WAN_MODULES, RoleType.DENOISER)
         self.assertIn("transformer", result)
         self.assertIn("scheduler", result)
         self.assertNotIn("text_encoder", result)
@@ -100,7 +100,7 @@ class TestFilterModulesFlux(unittest.TestCase):
     ]
 
     def test_denoising_skips_all_encoders(self):
-        result = filter_modules_for_role(self.FLUX_MODULES, RoleType.DENOISING)
+        result = filter_modules_for_role(self.FLUX_MODULES, RoleType.DENOISER)
         self.assertEqual(set(result), {"transformer", "scheduler"})
 
     def test_encoder_keeps_all_encoders(self):
@@ -163,7 +163,7 @@ class TestFilterModulesI2V(unittest.TestCase):
         self.assertNotIn("transformer", result)
 
     def test_denoising_skips_all_encoders(self):
-        result = filter_modules_for_role(self.I2V_MODULES, RoleType.DENOISING)
+        result = filter_modules_for_role(self.I2V_MODULES, RoleType.DENOISER)
         self.assertEqual(set(result), {"transformer", "scheduler"})
 
 

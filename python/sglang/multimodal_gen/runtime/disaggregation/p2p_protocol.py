@@ -15,6 +15,17 @@ Message flow (encoder → denoiser via DS):
   5. Encoder → DS: P2P_PUSHED   (RDMA transfer complete)
   6. DS → Denoiser: P2P_READY   (data arrived, process it)
   7. Denoiser → DS: P2P_DONE    (compute finished, here's the result)
+
+Message flow (denoiser → decoder via DS):
+  Same 7-step protocol. Denoiser's P2P_DONE message doubles as the
+  trigger by including staged_for_decoder=True with its buffer info.
+  1. Denoiser → DS: P2P_DONE + staged_for_decoder (data staged in local buffer)
+  2. DS → Decoder: P2P_ALLOC
+  3. Decoder → DS: P2P_ALLOCATED
+  4. DS → Denoiser: P2P_PUSH
+  5. Denoiser → DS: P2P_PUSHED
+  6. DS → Decoder: P2P_READY
+  7. Decoder → DS: P2P_DONE    (final result returned to client)
 """
 
 import json
@@ -145,7 +156,7 @@ class P2PRegisterMsg:
     """Instance → DS: register at startup."""
 
     msg_type: str = P2PMsgType.REGISTER
-    role: str = ""  # "encoder", "denoising", "decoder"
+    role: str = ""  # "encoder", "denoiser", "decoder"
     instance_idx: int = 0
     session_id: str = ""
     pool_ptr: int = 0
