@@ -215,8 +215,8 @@ FreeBufferSlots per instance + TryToAdd (TTA) queues per role + completion callb
 
 `[Diffusion] Add disaggregation Phase 5.5: per-role parallelism CLI args`
 
-- `runtime/server_args.py` — Added 12 per-role parallelism fields: `encoder_tp`, `encoder_sp`, `encoder_ulysses`, `encoder_ring`, `denoiser_tp`, `denoiser_sp`, `denoiser_ulysses`, `denoiser_ring`, `decoder_tp`, `decoder_sp`, `decoder_ulysses`, `decoder_ring`. All default to None (auto-derive from num_gpus). Added `get_role_parallelism(role_type) → dict` helper method.
-- `runtime/server_args.py` — 12 new CLI args: `--encoder-tp`, `--encoder-sp`, `--encoder-ulysses`, `--encoder-ring`, `--denoiser-tp`, `--denoiser-sp`, `--denoiser-ulysses`, `--denoiser-ring`, `--decoder-tp`, `--decoder-sp`, `--decoder-ulysses`, `--decoder-ring`
+- `runtime/server_args.py` — Added 6 per-role parallelism fields: `encoder_tp`, `denoiser_tp`, `denoiser_sp`, `denoiser_ulysses`, `denoiser_ring`, `decoder_tp`. All default to None (auto-derive from num_gpus). Added `get_role_parallelism(role_type) → dict` helper method. Encoder and decoder only support TP override; denoiser supports all four.
+- `runtime/server_args.py` — 6 new CLI args: `--encoder-tp`, `--denoiser-tp`, `--denoiser-sp`, `--denoiser-ulysses`, `--denoiser-ring`, `--decoder-tp`
 - `runtime/launch_server.py` — `launch_disagg_server()` and `launch_pool_disagg_server()` use `get_role_parallelism()` to pass per-role TP/SP/Ulysses/Ring overrides when building per-role `ServerArgs`. When None, `_adjust_parallelism()` auto-derives from `num_gpus` as before.
 - `test/unit/test_server_args_unit.py` — 7 new tests: defaults are None, encoder/denoiser/decoder overrides, monolithic returns all None, mixed roles independent, CLI arg parsing
 

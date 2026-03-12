@@ -234,17 +234,11 @@ class ServerArgs:
     decoder_urls: str | None = None
     # Per-role parallelism overrides (None = auto-derive from num_gpus)
     encoder_tp: int | None = None
-    encoder_sp: int | None = None
-    encoder_ulysses: int | None = None
-    encoder_ring: int | None = None
     denoiser_tp: int | None = None
     denoiser_sp: int | None = None
     denoiser_ulysses: int | None = None
     denoiser_ring: int | None = None
     decoder_tp: int | None = None
-    decoder_sp: int | None = None
-    decoder_ulysses: int | None = None
-    decoder_ring: int | None = None
     # Pool mode endpoints (set by launcher, per-instance)
     pool_work_endpoint: str | None = None  # Instance PULL socket (receives work)
     pool_result_endpoint: str | None = None  # Instance PUSH socket (sends results)
@@ -257,26 +251,26 @@ class ServerArgs:
 
         Returns a dict with keys tp_size, sp_degree, ulysses_degree, ring_degree.
         Values are None if not explicitly set (auto-derive from num_gpus).
+        Encoder and decoder only support tp_size override; denoiser supports all four.
         """
-        prefix_map = {
-            RoleType.ENCODER: "encoder",
-            RoleType.DENOISING: "denoiser",
-            RoleType.DECODER: "decoder",
+        _none = {
+            "tp_size": None,
+            "sp_degree": None,
+            "ulysses_degree": None,
+            "ring_degree": None,
         }
-        prefix = prefix_map.get(role_type)
-        if prefix is None:
+        if role_type == RoleType.ENCODER:
+            return {**_none, "tp_size": self.encoder_tp}
+        elif role_type == RoleType.DENOISING:
             return {
-                "tp_size": None,
-                "sp_degree": None,
-                "ulysses_degree": None,
-                "ring_degree": None,
+                "tp_size": self.denoiser_tp,
+                "sp_degree": self.denoiser_sp,
+                "ulysses_degree": self.denoiser_ulysses,
+                "ring_degree": self.denoiser_ring,
             }
-        return {
-            "tp_size": getattr(self, f"{prefix}_tp"),
-            "sp_degree": getattr(self, f"{prefix}_sp"),
-            "ulysses_degree": getattr(self, f"{prefix}_ulysses"),
-            "ring_degree": getattr(self, f"{prefix}_ring"),
-        }
+        elif role_type == RoleType.DECODER:
+            return {**_none, "tp_size": self.decoder_tp}
+        return _none
 
     # Port offsets for disagg result endpoints (deterministic convention)
     DISAGG_RESULT_PORT_OFFSETS = {
@@ -836,24 +830,6 @@ class ServerArgs:
             help="Tensor parallelism for encoder role. Default: auto-derive from encoder GPU count.",
         )
         parser.add_argument(
-            "--encoder-sp",
-            type=int,
-            default=None,
-            help="Sequence parallelism for encoder role. Default: auto-derive from encoder GPU count.",
-        )
-        parser.add_argument(
-            "--encoder-ulysses",
-            type=int,
-            default=None,
-            help="Ulysses SP degree for encoder role.",
-        )
-        parser.add_argument(
-            "--encoder-ring",
-            type=int,
-            default=None,
-            help="Ring SP degree for encoder role.",
-        )
-        parser.add_argument(
             "--denoiser-tp",
             type=int,
             default=None,
@@ -882,24 +858,6 @@ class ServerArgs:
             type=int,
             default=None,
             help="Tensor parallelism for decoder role. Default: auto-derive from decoder GPU count.",
-        )
-        parser.add_argument(
-            "--decoder-sp",
-            type=int,
-            default=None,
-            help="Sequence parallelism for decoder role. Default: auto-derive from decoder GPU count.",
-        )
-        parser.add_argument(
-            "--decoder-ulysses",
-            type=int,
-            default=None,
-            help="Ulysses SP degree for decoder role.",
-        )
-        parser.add_argument(
-            "--decoder-ring",
-            type=int,
-            default=None,
-            help="Ring SP degree for decoder role.",
         )
         parser.add_argument(
             "--encoder-to-denoiser-endpoint",

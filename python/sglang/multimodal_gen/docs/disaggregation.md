@@ -155,9 +155,9 @@ Set `--disagg-p2p-hostname` to the actual IP on each machine. For multi-machine,
 
 | Flag | Description |
 |------|-------------|
-| `--encoder-tp` / `--encoder-sp` / `--encoder-ulysses` / `--encoder-ring` | Encoder parallelism |
+| `--encoder-tp` | Encoder tensor parallelism |
 | `--denoiser-tp` / `--denoiser-sp` / `--denoiser-ulysses` / `--denoiser-ring` | Denoiser parallelism |
-| `--decoder-tp` / `--decoder-sp` / `--decoder-ulysses` / `--decoder-ring` | Decoder parallelism |
+| `--decoder-tp` | Decoder tensor parallelism |
 
 If not specified, parallelism is auto-derived from `--num-gpus`.
 
