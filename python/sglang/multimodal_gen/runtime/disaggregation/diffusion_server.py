@@ -50,6 +50,18 @@ from sglang.multimodal_gen.runtime.disaggregation.request_state import (
     RequestTracker,
 )
 from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
+from sglang.multimodal_gen.runtime.disaggregation.transport.p2p_protocol import (
+    P2PAllocMsg,
+    P2PMsgType,
+    P2PPushMsg,
+    P2PReadyMsg,
+    decode_p2p_msg,
+    encode_p2p_msg,
+    is_p2p_message,
+)
+from sglang.multimodal_gen.runtime.disaggregation.transport.relay.tensor_transport import (
+    unpack_tensors,
+)
 from sglang.multimodal_gen.runtime.utils.common import get_zmq_socket
 
 logger = logging.getLogger(__name__)
@@ -321,9 +333,6 @@ class DiffusionServer:
 
     def _handle_role_result(self, result_pull: zmq.Socket, role: RoleType) -> None:
         """Dispatch result message to relay or P2P handler."""
-        from sglang.multimodal_gen.runtime.disaggregation.p2p_protocol import (
-            is_p2p_message,
-        )
 
         try:
             frames = result_pull.recv_multipart(zmq.NOBLOCK, copy=True)
@@ -471,9 +480,6 @@ class DiffusionServer:
 
     def _handle_decoder_result_frames(self, frames: list) -> None:
         """Handle decoder result frames (relay mode)."""
-        from sglang.multimodal_gen.runtime.disaggregation.tensor_transport import (
-            unpack_tensors,
-        )
         from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import (
             OutputBatch,
         )
@@ -533,6 +539,9 @@ class DiffusionServer:
             )
 
         logger.debug("DiffusionServer: returned result for %s", request_id)
+        # Clean up P2P state if applicable (P2P decoder results also come
+        # through this path after the optimization to send raw frames)
+        self._p2p_state.pop(request_id, None)
         self._tracker.remove(request_id)
 
     # --- Dispatch helpers ---
@@ -758,10 +767,6 @@ class DiffusionServer:
 
     def _handle_p2p_result(self, frames: list, role: RoleType) -> None:
         """Handle a P2P control message from a role instance."""
-        from sglang.multimodal_gen.runtime.disaggregation.p2p_protocol import (
-            P2PMsgType,
-            decode_p2p_msg,
-        )
 
         try:
             msg = decode_p2p_msg(frames)
@@ -856,10 +861,6 @@ class DiffusionServer:
         self, request_id: str, p2p: _P2PRequestState, denoiser_idx: int
     ) -> None:
         """Send p2p_alloc to denoiser to allocate a receive slot."""
-        from sglang.multimodal_gen.runtime.disaggregation.p2p_protocol import (
-            P2PAllocMsg,
-            encode_p2p_msg,
-        )
 
         self._denoiser_free_slots[denoiser_idx] -= 1
         p2p.receiver_instance = denoiser_idx
@@ -888,10 +889,6 @@ class DiffusionServer:
 
     def _handle_p2p_allocated(self, msg: dict) -> None:
         """Receiver allocated a slot. Send p2p_push to sender."""
-        from sglang.multimodal_gen.runtime.disaggregation.p2p_protocol import (
-            P2PPushMsg,
-            encode_p2p_msg,
-        )
 
         request_id = msg["request_id"]
         p2p = self._p2p_state.get(request_id)
@@ -914,24 +911,34 @@ class DiffusionServer:
             transfer_size=p2p.data_size,
         )
 
-        # Send to the encoder (sender) instance
-        encoder_idx = p2p.sender_instance
-        self._encoder_pushes[encoder_idx].send_multipart(encode_p2p_msg(push_msg))
-        logger.debug(
-            "DiffusionServer P2P: sent push command to encoder[%d] for %s",
-            encoder_idx,
-            request_id,
-        )
+        # Send push to the actual sender (encoder or denoiser depending on stage)
+        sender_idx = p2p.sender_instance
+        record = self._tracker.get(request_id)
+        if record and record.state in (
+            RequestState.DECODER_RUNNING,
+            RequestState.DECODER_WAITING,
+        ):
+            # Denoiser→Decoder transfer: sender is denoiser
+            self._denoiser_pushes[sender_idx].send_multipart(encode_p2p_msg(push_msg))
+            logger.debug(
+                "DiffusionServer P2P: sent push command to denoiser[%d] for %s",
+                sender_idx,
+                request_id,
+            )
+        else:
+            # Encoder→Denoiser transfer: sender is encoder
+            self._encoder_pushes[sender_idx].send_multipart(encode_p2p_msg(push_msg))
+            logger.debug(
+                "DiffusionServer P2P: sent push command to encoder[%d] for %s",
+                sender_idx,
+                request_id,
+            )
 
     def _handle_p2p_pushed(self, msg: dict) -> None:
         """Sender completed RDMA push. Free sender slot and tell receiver data is ready.
 
         Handles both encoder→denoiser and denoiser→decoder transfers.
         """
-        from sglang.multimodal_gen.runtime.disaggregation.p2p_protocol import (
-            P2PReadyMsg,
-            encode_p2p_msg,
-        )
 
         request_id = msg["request_id"]
         p2p = self._p2p_state.get(request_id)
@@ -1061,10 +1068,6 @@ class DiffusionServer:
         self, request_id: str, p2p: _P2PRequestState, decoder_idx: int
     ) -> None:
         """Send p2p_alloc to decoder to allocate a receive slot."""
-        from sglang.multimodal_gen.runtime.disaggregation.p2p_protocol import (
-            P2PAllocMsg,
-            encode_p2p_msg,
-        )
 
         self._decoder_free_slots[decoder_idx] -= 1
         p2p.receiver_instance = decoder_idx
@@ -1086,7 +1089,15 @@ class DiffusionServer:
         self._decoder_pushes[decoder_idx].send_multipart(encode_p2p_msg(alloc_msg))
 
     def _p2p_return_to_client(self, request_id: str, result_frames: list) -> None:
-        """Return P2P result to HTTP client."""
+        """Return P2P result to HTTP client.
+
+        Decodes hex-encoded frames from the P2P decoder, unpacks them into
+        an OutputBatch, and sends the pickled result to the frontend.
+        """
+        from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import (
+            OutputBatch,
+        )
+
         with self._lock:
             client_identity = self._pending.pop(request_id, None)
 
@@ -1095,15 +1106,29 @@ class DiffusionServer:
             return
 
         try:
-            # Decode bytes if they're hex-encoded in the JSON
+            # Decode hex-encoded frames back to bytes
             raw_frames = []
             for f in result_frames:
                 if isinstance(f, str):
                     raw_frames.append(bytes.fromhex(f))
                 else:
                     raw_frames.append(f)
-            self._frontend.send_multipart([client_identity, b""] + raw_frames)
-        except zmq.ZMQError as e:
+
+            # Unpack frames into tensor/scalar fields
+            tensor_fields, scalar_fields = unpack_tensors(raw_frames)
+
+            # Build OutputBatch
+            output_batch = OutputBatch(
+                output=tensor_fields.get("output"),
+                audio=tensor_fields.get("audio"),
+                audio_sample_rate=scalar_fields.get("audio_sample_rate"),
+                error=scalar_fields.get("error"),
+            )
+
+            self._frontend.send_multipart(
+                [client_identity, b"", pickle.dumps(output_batch)]
+            )
+        except Exception as e:
             logger.error(
                 "DiffusionServer P2P: failed to send result for %s: %s",
                 request_id,

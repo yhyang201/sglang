@@ -182,6 +182,8 @@ def get_zmq_socket(
         port_match = re.search(r":(\d+)$", endpoint)
 
         if port_match and max_bind_retries > 1:
+            import time as _time
+
             original_port = int(port_match.group(1))
             last_exception = None
 
@@ -213,6 +215,20 @@ def get_zmq_socket(
                     last_exception = e
                     if e.errno == zmq.EADDRINUSE and attempt < max_bind_retries - 1:
                         # Address already in use, try next port
+                        # Brief sleep to let transient port conflicts resolve
+                        _time.sleep(0.5)
+                        # Re-create socket since ZMQ socket state may be invalid after failed bind
+                        socket.close()
+                        socket = context.socket(socket_type)
+                        if endpoint.find("[") != -1:
+                            socket.setsockopt(zmq.IPV6, 1)
+                        if socket_type == zmq.PUSH:
+                            set_send_opt()
+                        elif socket_type == zmq.PULL:
+                            set_recv_opt()
+                        elif socket_type in [zmq.DEALER, zmq.REQ, zmq.REP, zmq.ROUTER]:
+                            set_send_opt()
+                            set_recv_opt()
                         continue
                     elif attempt == max_bind_retries - 1:
                         # Last attempt failed

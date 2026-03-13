@@ -265,7 +265,8 @@ class GPUWorker:
                 self.do_mem_analysis(output_batch)
 
             duration_ms = (time.monotonic() - start_time) * 1000
-            output_batch.metrics.total_duration_ms = duration_ms
+            if output_batch.metrics is not None:
+                output_batch.metrics.total_duration_ms = duration_ms
 
             # Save output to file and return file path only if requested. Avoid the serialization
             # and deserialization overhead between scheduler_client and gpu_worker.
