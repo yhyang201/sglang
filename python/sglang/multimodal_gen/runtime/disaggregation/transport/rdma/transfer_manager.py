@@ -22,11 +22,11 @@ from dataclasses import dataclass, field
 
 import torch
 
-from sglang.multimodal_gen.runtime.disaggregation.transfer_buffer import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_buffer import (
     SlotHandle,
     TransferTensorBuffer,
 )
-from sglang.multimodal_gen.runtime.disaggregation.transfer_engine import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_engine import (
     BaseTransferEngine,
 )
 

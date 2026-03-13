@@ -4,7 +4,7 @@
 import ctypes
 import unittest
 
-from sglang.multimodal_gen.runtime.disaggregation.transfer_engine import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_engine import (
     BaseTransferEngine,
     MockTransferEngine,
     create_transfer_engine,

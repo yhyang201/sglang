@@ -12,16 +12,16 @@ import unittest
 import torch
 import zmq
 
-from sglang.multimodal_gen.runtime.disaggregation.role_connector import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.relay.tensor_transport import (
+    recv_tensors,
+    send_tensors,
+)
+from sglang.multimodal_gen.runtime.disaggregation.transport.role_connector import (
     _extract_scalar_fields,
     _extract_tensor_fields,
     build_req_from_frames,
     pack_denoiser_output,
     pack_encoder_output,
-)
-from sglang.multimodal_gen.runtime.disaggregation.tensor_transport import (
-    recv_tensors,
-    send_tensors,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 

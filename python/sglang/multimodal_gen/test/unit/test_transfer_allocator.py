@@ -4,7 +4,7 @@
 import threading
 import unittest
 
-from sglang.multimodal_gen.runtime.disaggregation.transfer_allocator import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_allocator import (
     BuddyAllocator,
 )
 

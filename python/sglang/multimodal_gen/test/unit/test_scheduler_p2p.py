@@ -16,20 +16,20 @@ from unittest.mock import MagicMock
 
 import torch
 
-from sglang.multimodal_gen.runtime.disaggregation.p2p_protocol import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.p2p_protocol import (
     P2P_MAGIC,
     P2PAllocMsg,
     P2PMsgType,
     P2PPushMsg,
     encode_p2p_msg,
 )
-from sglang.multimodal_gen.runtime.disaggregation.transfer_buffer import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_buffer import (
     TransferTensorBuffer,
 )
-from sglang.multimodal_gen.runtime.disaggregation.transfer_engine import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_engine import (
     MockTransferEngine,
 )
-from sglang.multimodal_gen.runtime.disaggregation.transfer_manager import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_manager import (
     DiffusionTransferManager,
 )
 from sglang.multimodal_gen.runtime.managers.scheduler import Scheduler

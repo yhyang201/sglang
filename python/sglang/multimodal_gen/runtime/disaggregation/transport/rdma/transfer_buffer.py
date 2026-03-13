@@ -25,8 +25,11 @@ from dataclasses import dataclass, field
 
 import torch
 
-from sglang.multimodal_gen.runtime.disaggregation.transfer_allocator import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_allocator import (
     BuddyAllocator,
+)
+from sglang.multimodal_gen.runtime.disaggregation.transport.relay.tensor_transport import (
+    str_to_dtype,
 )
 
 logger = logging.getLogger(__name__)
@@ -335,7 +338,8 @@ class TransferTensorBuffer:
                     byte_offset += nbytes
                     byte_offset = (byte_offset + 511) & ~511
 
-            manifest[name] = entries
+            if entries:
+                manifest[name] = entries
 
         return manifest
 
@@ -357,13 +361,11 @@ class TransferTensorBuffer:
         Returns:
             Reconstructed tensor fields.
         """
-        from sglang.multimodal_gen.runtime.disaggregation.tensor_transport import (
-            str_to_dtype,
-        )
-
         result: dict[str, torch.Tensor | list[torch.Tensor]] = {}
 
         for name, entries in manifest.items():
+            if not entries:
+                continue
             has_list_index = any("list_index" in e for e in entries)
 
             if has_list_index:

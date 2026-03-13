@@ -5,7 +5,7 @@ import unittest
 
 import torch
 
-from sglang.multimodal_gen.runtime.disaggregation.transfer_buffer import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_buffer import (
     TransferMetaBuffer,
     TransferTensorBuffer,
 )
