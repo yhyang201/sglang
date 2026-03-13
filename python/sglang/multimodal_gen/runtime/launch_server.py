@@ -583,8 +583,14 @@ def launch_disagg_role(server_args: ServerArgs):
     from sglang.multimodal_gen.runtime.utils.common import is_port_available
 
     internal_scheduler_port = server_args.scheduler_port + 10000
+    if internal_scheduler_port > 65535:
+        internal_scheduler_port = server_args.scheduler_port - 10000
+        if internal_scheduler_port < 1024:
+            internal_scheduler_port = 1024
     while not is_port_available(internal_scheduler_port):
         internal_scheduler_port += 1
+        if internal_scheduler_port > 65535:
+            raise RuntimeError("No available port for internal scheduler")
 
     role_par = server_args.get_role_parallelism(role_type)
     role_overrides = {
