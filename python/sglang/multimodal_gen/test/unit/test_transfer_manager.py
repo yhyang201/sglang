@@ -5,13 +5,22 @@ import unittest
 
 import torch
 
-from sglang.multimodal_gen.runtime.disaggregation.transfer_buffer import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.p2p_protocol import (
+    P2PAllocMsg,
+    P2PPushedMsg,
+    P2PPushMsg,
+    P2PStagedMsg,
+    decode_p2p_msg,
+    encode_p2p_msg,
+    is_p2p_message,
+)
+from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_buffer import (
     TransferTensorBuffer,
 )
-from sglang.multimodal_gen.runtime.disaggregation.transfer_engine import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_engine import (
     MockTransferEngine,
 )
-from sglang.multimodal_gen.runtime.disaggregation.transfer_manager import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_manager import (
     DiffusionTransferManager,
     PendingReceive,
     StagedTransfer,
@@ -245,12 +254,6 @@ class TestP2PProtocol(unittest.TestCase):
     """Test P2P protocol message encoding/decoding."""
 
     def test_encode_decode_staged(self):
-        from sglang.multimodal_gen.runtime.disaggregation.p2p_protocol import (
-            P2PStagedMsg,
-            decode_p2p_msg,
-            encode_p2p_msg,
-        )
-
         msg = P2PStagedMsg(
             request_id="r1",
             data_size=1024,
@@ -268,12 +271,6 @@ class TestP2PProtocol(unittest.TestCase):
         self.assertEqual(decoded["data_size"], 1024)
 
     def test_encode_decode_alloc(self):
-        from sglang.multimodal_gen.runtime.disaggregation.p2p_protocol import (
-            P2PAllocMsg,
-            decode_p2p_msg,
-            encode_p2p_msg,
-        )
-
         msg = P2PAllocMsg(request_id="r1", data_size=2048, source_role="encoder")
         frames = encode_p2p_msg(msg)
         decoded = decode_p2p_msg(frames)
@@ -281,12 +278,6 @@ class TestP2PProtocol(unittest.TestCase):
         self.assertEqual(decoded["source_role"], "encoder")
 
     def test_encode_decode_push(self):
-        from sglang.multimodal_gen.runtime.disaggregation.p2p_protocol import (
-            P2PPushMsg,
-            decode_p2p_msg,
-            encode_p2p_msg,
-        )
-
         msg = P2PPushMsg(
             request_id="r1",
             dest_session_id="sess-2",
@@ -299,12 +290,6 @@ class TestP2PProtocol(unittest.TestCase):
         self.assertEqual(decoded["dest_addr"], 0x2000)
 
     def test_is_p2p_message(self):
-        from sglang.multimodal_gen.runtime.disaggregation.p2p_protocol import (
-            P2PPushedMsg,
-            encode_p2p_msg,
-            is_p2p_message,
-        )
-
         p2p_frames = encode_p2p_msg(P2PPushedMsg(request_id="r1"))
         self.assertTrue(is_p2p_message(p2p_frames))
 
@@ -313,10 +298,6 @@ class TestP2PProtocol(unittest.TestCase):
         self.assertFalse(is_p2p_message(non_p2p))
 
     def test_decode_invalid_raises(self):
-        from sglang.multimodal_gen.runtime.disaggregation.p2p_protocol import (
-            decode_p2p_msg,
-        )
-
         with self.assertRaises(ValueError):
             decode_p2p_msg([b"not-p2p", b"{}"])
 

@@ -12,7 +12,15 @@ import zmq
 from sglang.multimodal_gen.runtime.disaggregation.diffusion_server import (
     DiffusionServer,
 )
-from sglang.multimodal_gen.runtime.disaggregation.tensor_transport import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.p2p_protocol import (
+    P2PAllocatedMsg,
+    P2PPushedMsg,
+    P2PRegisterMsg,
+    P2PStagedMsg,
+    decode_p2p_msg,
+    encode_p2p_msg,
+)
+from sglang.multimodal_gen.runtime.disaggregation.transport.relay.tensor_transport import (
     send_tensors,
 )
 
@@ -517,11 +525,6 @@ class TestDiffusionServerP2PProtocol(unittest.TestCase):
 
     def test_p2p_register(self):
         """Test instance registration with DS."""
-        from sglang.multimodal_gen.runtime.disaggregation.p2p_protocol import (
-            P2PRegisterMsg,
-            encode_p2p_msg,
-        )
-
         server = DiffusionServer(
             frontend_endpoint="tcp://127.0.0.1:19970",
             encoder_work_endpoints=["tcp://127.0.0.1:19971"],
@@ -550,12 +553,6 @@ class TestDiffusionServerP2PProtocol(unittest.TestCase):
 
     def test_p2p_staged_and_alloc(self):
         """Test encoder staged → DS selects denoiser → sends alloc."""
-        from sglang.multimodal_gen.runtime.disaggregation.p2p_protocol import (
-            P2PStagedMsg,
-            decode_p2p_msg,
-            encode_p2p_msg,
-        )
-
         ctx = zmq.Context()
         # We need live sockets to capture the alloc message DS sends to denoiser
         denoiser_work_ep = "tcp://127.0.0.1:19980"
@@ -611,14 +608,6 @@ class TestDiffusionServerP2PProtocol(unittest.TestCase):
 
     def test_p2p_full_e2e_handshake(self):
         """Test full P2P handshake: staged → alloc → allocated → push → pushed → ready."""
-        from sglang.multimodal_gen.runtime.disaggregation.p2p_protocol import (
-            P2PAllocatedMsg,
-            P2PPushedMsg,
-            P2PStagedMsg,
-            decode_p2p_msg,
-            encode_p2p_msg,
-        )
-
         ctx = zmq.Context()
         enc_work_ep = "tcp://127.0.0.1:19990"
         den_work_ep = "tcp://127.0.0.1:19991"

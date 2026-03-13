@@ -9,7 +9,7 @@ import unittest
 import torch
 import zmq
 
-from sglang.multimodal_gen.runtime.disaggregation.tensor_transport import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.relay.tensor_transport import (
     TensorDescriptor,
     TensorWrapper,
     dtype_to_str,

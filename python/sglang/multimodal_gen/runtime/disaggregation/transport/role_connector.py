@@ -14,6 +14,10 @@ import logging
 
 import torch
 
+from sglang.multimodal_gen.runtime.disaggregation.transport.relay.tensor_transport import (
+    pack_tensors,
+    unpack_tensors,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import (
     Req,
 )
@@ -156,10 +160,6 @@ def pack_encoder_output(req: Req) -> tuple[bytes, list]:
 
     Returns (metadata_bytes, buffers) ready for send_multipart.
     """
-    from sglang.multimodal_gen.runtime.disaggregation.tensor_transport import (
-        pack_tensors,
-    )
-
     tensor_fields = _extract_tensor_fields(req, ENCODER_TO_DENOISER_TENSOR_FIELDS)
     scalar_fields = _extract_scalar_fields(req, ENCODER_TO_DENOISER_SCALAR_FIELDS)
     return pack_tensors(tensor_fields, scalar_fields)
@@ -167,10 +167,6 @@ def pack_encoder_output(req: Req) -> tuple[bytes, list]:
 
 def pack_denoiser_output(req: Req) -> tuple[bytes, list]:
     """Pack denoiser output for relay via DiffusionServer."""
-    from sglang.multimodal_gen.runtime.disaggregation.tensor_transport import (
-        pack_tensors,
-    )
-
     tensor_fields = _extract_tensor_fields(req, DENOISER_TO_DECODER_TENSOR_FIELDS)
     scalar_fields = _extract_scalar_fields(req, DENOISER_TO_DECODER_SCALAR_FIELDS)
     return pack_tensors(tensor_fields, scalar_fields)
@@ -188,10 +184,6 @@ def build_req_from_frames(
         transition: "encoder_to_denoiser" or "denoiser_to_decoder"
         device: target device for tensors
     """
-    from sglang.multimodal_gen.runtime.disaggregation.tensor_transport import (
-        unpack_tensors,
-    )
-
     tensor_fields, scalar_fields = unpack_tensors(parts, device=device)
 
     if transition == "encoder_to_denoiser":
