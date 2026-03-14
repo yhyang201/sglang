@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Any, Dict, List, Optional, Union
@@ -97,15 +98,19 @@ class AsyncMMDataProcessor:
             )
 
         async def _invoke() -> Dict[str, Any]:
+            t0 = time.perf_counter()
             if self.is_async:
                 # Native async implementation
-                return await self._proc_async(
+                result = await self._proc_async(
                     image_data=image_data,
                     audio_data=audio_data,
                     input_text=input_text_or_ids,
                     request_obj=request_obj,
                     **kwargs,
                 )
+                t1 = time.perf_counter()
+                logger.info(f"[InProc Perf] process={((t1-t0)*1000):.2f}ms (async)")
+                return result
 
             # Synchronous fallback
             sync_fn = getattr(self.mm_processor, "process_mm_data", None)
@@ -122,7 +127,10 @@ class AsyncMMDataProcessor:
                 request_obj=request_obj,
                 **kwargs,
             )
-            return await loop.run_in_executor(self.fallback_exec, fn)
+            result = await loop.run_in_executor(self.fallback_exec, fn)
+            t1 = time.perf_counter()
+            logger.info(f"[InProc Perf] process={((t1-t0)*1000):.2f}ms (sync)")
+            return result
 
         # Apply optional concurrency guard
         if self.semaphore is not None:
