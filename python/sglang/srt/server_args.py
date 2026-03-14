@@ -708,6 +708,7 @@ class ServerArgs:
     # For Multi-Modal
     mm_max_concurrent_calls: int = 32
     mm_per_request_timeout: float = 10.0
+    mm_processor_worker_num: int = 1
     enable_broadcast_mm_inputs_process: bool = False
     enable_prefix_mm_cache: bool = False
     mm_enable_dp_encoder: bool = False
@@ -5507,6 +5508,12 @@ class ServerArgs:
             type=int,
             default=ServerArgs.mm_per_request_timeout,
             help="The timeout for each multi-modal request in seconds.",
+        )
+        parser.add_argument(
+            "--mm-processor-worker-num",
+            type=int,
+            default=ServerArgs.mm_processor_worker_num,
+            help="Number of multimodal processor worker processes (default 1 = in-process).",
         )
         parser.add_argument(
             "--enable-broadcast-mm-inputs-process",

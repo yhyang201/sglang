@@ -271,6 +271,9 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 self.mm_processor,
                 max_concurrent_calls=self.server_args.mm_max_concurrent_calls,
                 timeout_s=self.server_args.mm_per_request_timeout,
+                worker_num=self.server_args.mm_processor_worker_num,
+                server_args=self.server_args,
+                hf_config=self.model_config.hf_config,
             )
 
             if server_args.skip_tokenizer_init:

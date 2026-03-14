@@ -1,6 +1,5 @@
 import asyncio
 import concurrent.futures
-import ctypes
 import logging
 import multiprocessing as mp
 import os
@@ -83,27 +82,7 @@ class InternalError(MMError):
         super().__init__(message, code=HTTPStatus.INTERNAL_SERVER_ERROR)
 
 
-class TensorWrapper:
-    """Wrapper to keep tensor alive while exposing buffer for zero-copy."""
-
-    def __init__(self, tensor):
-        # Ensure tensor is on CPU and contiguous
-        if tensor.is_cuda:
-            tensor = tensor.cpu()
-        if not tensor.is_contiguous():
-            tensor = tensor.contiguous()
-
-        # Keep tensor reference
-        self.tensor = tensor
-        self.shape = list(tensor.shape)
-        self.dtype = tensor.dtype
-
-    def __buffer__(self):
-        data_ptr = self.tensor.data_ptr()
-        total_bytes = self.tensor.numel() * self.tensor.element_size()
-        c_obj = (ctypes.c_char * total_bytes).from_address(data_ptr)
-        c_obj._keep_alive_ref = self
-        return memoryview(c_obj)
+from sglang.srt.utils.zmq_multipart_utils import TensorWrapper  # noqa: E402
 
 
 def _convert(data):

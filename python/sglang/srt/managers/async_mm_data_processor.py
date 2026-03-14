@@ -12,6 +12,7 @@ class AsyncMMDataProcessor:
     Async wrapper for a multimodal processor.
 
     Behavior:
+      - If worker_num > 1: delegates to MMProcessorPool (separate OS processes).
       - If the underlying processor exposes `process_mm_data_async`, call/await it directly.
       - Otherwise, fall back to running a synchronous `process_mm_data` in a thread pool.
       - Optionally guard per-call concurrency via an asyncio.Semaphore.
@@ -24,6 +25,9 @@ class AsyncMMDataProcessor:
         *,
         max_concurrent_calls: Optional[int] = None,
         timeout_s: Optional[float] = None,
+        worker_num: int = 1,
+        server_args: Any = None,
+        hf_config: Any = None,
     ) -> None:
         """
         Args:
@@ -33,23 +37,43 @@ class AsyncMMDataProcessor:
                 - def process_mm_data(...): -> Dict[str, Any]
             max_concurrent_calls: Optional concurrency cap for per-call execution.
             timeout_s: Optional timeout (seconds) for each `process()` call.
+            worker_num: Number of worker processes. 1 = in-process (no change).
+            server_args: ServerArgs, required when worker_num > 1.
+            hf_config: HF model config, required when worker_num > 1.
         """
         self.mm_processor = mm_processor
         self.timeout_s = timeout_s
+        self._pool = None
 
-        # Concurrency guard (None -> unlimited)
-        self.semaphore = (
-            asyncio.Semaphore(max_concurrent_calls) if max_concurrent_calls else None
-        )
+        if worker_num > 1:
+            from sglang.srt.managers.mm_processor_pool import MMProcessorPool
 
-        # Detect async path; if missing, prepare a fallback executor for sync path
-        self._proc_async = getattr(mm_processor, "process_mm_data_async", None)
-        self.is_async = asyncio.iscoroutinefunction(self._proc_async)
-        self.fallback_exec: Optional[ThreadPoolExecutor] = (
-            ThreadPoolExecutor(max_workers=max_concurrent_calls)
-            if not self.is_async
-            else None
-        )
+            self._pool = MMProcessorPool(worker_num, server_args, hf_config)
+            self._pool.start()
+            logger.info(
+                f"AsyncMMDataProcessor: using MMProcessorPool with {worker_num} workers"
+            )
+            # Concurrency/semaphore not needed — pool handles parallelism
+            self.semaphore = None
+            self.is_async = True
+            self._proc_async = None
+            self.fallback_exec = None
+        else:
+            # Concurrency guard (None -> unlimited)
+            self.semaphore = (
+                asyncio.Semaphore(max_concurrent_calls)
+                if max_concurrent_calls
+                else None
+            )
+
+            # Detect async path; if missing, prepare a fallback executor for sync path
+            self._proc_async = getattr(mm_processor, "process_mm_data_async", None)
+            self.is_async = asyncio.iscoroutinefunction(self._proc_async)
+            self.fallback_exec: Optional[ThreadPoolExecutor] = (
+                ThreadPoolExecutor(max_workers=max_concurrent_calls)
+                if not self.is_async
+                else None
+            )
 
     async def process(
         self,
@@ -63,6 +87,14 @@ class AsyncMMDataProcessor:
         """
         Public entrypoint: process a single multimodal request without blocking the event loop.
         """
+        if self._pool is not None:
+            return await self._process_via_pool(
+                image_data=image_data,
+                audio_data=audio_data,
+                input_text_or_ids=input_text_or_ids,
+                request_obj=request_obj,
+                **kwargs,
+            )
 
         async def _invoke() -> Dict[str, Any]:
             if self.is_async:
@@ -104,8 +136,24 @@ class AsyncMMDataProcessor:
             return await asyncio.wait_for(_invoke(), timeout=self.timeout_s)
         return await _invoke()
 
+    async def _process_via_pool(self, **kwargs) -> Dict[str, Any]:
+        """Delegate to MMProcessorPool with optional timeout."""
+        coro = self._pool.process(**kwargs)
+        if self.timeout_s is not None:
+            return await asyncio.wait_for(coro, timeout=self.timeout_s)
+        return await coro
+
     def shutdown(self) -> None:
         """Gracefully shutdown resources owned by this wrapper."""
+        if self._pool is not None:
+            try:
+                self._pool.shutdown()
+            except Exception:
+                logger.exception(
+                    "Error while shutting down MMProcessorPool in AsyncMMDataProcessor"
+                )
+            self._pool = None
+
         try:
             if self.fallback_exec:
                 self.fallback_exec.shutdown(wait=False)
