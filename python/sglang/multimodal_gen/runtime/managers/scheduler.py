@@ -6,6 +6,8 @@ import dataclasses
 import json
 import os
 import pickle
+import queue
+import threading
 import time
 from collections import deque
 from typing import Any, List
@@ -38,6 +40,7 @@ from sglang.multimodal_gen.runtime.disaggregation.transport.role_connector impor
     _extract_scalar_fields,
     _extract_tensor_fields,
     build_req_from_frames,
+    build_req_from_frames_async,
 )
 from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
     _parse_size,
@@ -167,13 +170,49 @@ class Scheduler:
         # P2P transfer manager (set by _init_p2p_transfer_manager)
         self._transfer_manager = None
 
+        # Async transfer infrastructure (Phase 1 + Phase 5 + Phase 8)
+        self._transfer_stream = None
+        self._send_queue = None
+        self._send_thread = None
+        self._bg_result_push = None
+        # Phase 8a: Background RDMA push thread (sender roles)
+        self._rdma_push_queue = None
+        self._rdma_push_thread = None
+        self._rdma_push_zmq = None
+        # Phase 8b: Background recv+H2D prefetch thread (receiver roles)
+        self._compute_ready_queue = None
+        self._recv_prefetch_thread = None
+
         if self._disagg_role != RoleType.MONOLITHIC:
             from sglang.multimodal_gen.runtime.disaggregation.metrics import (
                 DisaggMetrics,
             )
 
             self._disagg_metrics = DisaggMetrics(role=self._disagg_role.value)
+
+            # Phase 1: Dedicated CUDA stream for D2H/H2D transfers
+            device = torch.device(f"cuda:{local_rank}")
+            self._transfer_stream = torch.cuda.Stream(device=device)
+
             self._init_pool_mode_sockets()
+
+            # Phase 5: Background ZMQ send thread (rank 0 only)
+            if self.gpu_id == 0 and self._pool_result_push is not None:
+                self._send_queue = queue.Queue(maxsize=8)
+                # Create a separate ZMQ PUSH socket for the send thread
+                # (ZMQ sockets are NOT thread-safe)
+                sa = self.server_args
+                self._bg_result_push, _ = get_zmq_socket(
+                    self.context,
+                    zmq.PUSH,
+                    sa.pool_result_endpoint,
+                    bind=False,
+                )
+                self._send_thread = threading.Thread(
+                    target=self._background_send_loop, daemon=True
+                )
+                self._send_thread.start()
+
             if self._p2p_mode:
                 self._init_p2p_transfer_manager()
 
@@ -515,6 +554,31 @@ class Scheduler:
         # Create transfer manager
         self._transfer_manager = DiffusionTransferManager(engine=engine, buffer=buffer)
 
+        # Phase 7b: Pre-allocate receive slots for receivers (denoiser/decoder)
+        self._preallocated_slots: dict[int, object] = {}
+        preallocated_slot_info = []
+        if self._disagg_role in (RoleType.DENOISER, RoleType.DECODER):
+            capacity = getattr(sa, "disagg_prealloc_slots", 2)
+            typical_size = 64 * 1024 * 1024  # 64 MiB per slot
+            for i in range(capacity):
+                slot = buffer.allocate(typical_size, f"prealloc_{i}")
+                if slot is not None:
+                    self._preallocated_slots[i] = slot
+                    preallocated_slot_info.append(
+                        {
+                            "offset": slot.offset,
+                            "size": slot.size,
+                            "slot_id": i,
+                            "addr": self._transfer_manager.pool_data_ptr + slot.offset,
+                        }
+                    )
+            if preallocated_slot_info:
+                logger.info(
+                    "P2P %s: pre-allocated %d receive slots",
+                    self._disagg_role.value.upper(),
+                    len(preallocated_slot_info),
+                )
+
         # Register with DiffusionServer
         register_msg = P2PRegisterMsg(
             role=self._disagg_role.value,
@@ -522,14 +586,210 @@ class Scheduler:
             session_id=self._transfer_manager.session_id,
             pool_ptr=self._transfer_manager.pool_data_ptr,
             pool_size=self._transfer_manager.pool_size,
+            preallocated_slots=preallocated_slot_info,
         )
         self._pool_result_push.send_multipart(encode_p2p_msg(register_msg))
         logger.info(
-            "P2P %s: registered with DS (session=%s, pool=%d bytes)",
+            "P2P %s: registered with DS (session=%s, pool=%d bytes, prealloc=%d)",
             self._disagg_role.value.upper(),
             self._transfer_manager.session_id,
             pool_size,
+            len(preallocated_slot_info),
         )
+
+        # Phase 8a: RDMA push thread for sender roles (encoder/denoiser)
+        if self._disagg_role in (RoleType.ENCODER, RoleType.DENOISER):
+            self._rdma_push_queue = queue.Queue(maxsize=4)
+            self._rdma_push_zmq, _ = get_zmq_socket(
+                self.context,
+                zmq.PUSH,
+                sa.pool_result_endpoint,
+                bind=False,
+            )
+            self._rdma_push_thread = threading.Thread(
+                target=self._rdma_push_loop,
+                daemon=True,
+                name=f"rdma-push-{self._disagg_role.value}",
+            )
+            self._rdma_push_thread.start()
+            logger.info(
+                "P2P %s: RDMA push thread started",
+                self._disagg_role.value.upper(),
+            )
+
+        # Phase 8b: Recv prefetch thread for receiver roles (denoiser/decoder)
+        # Only for single-rank P2P mode (multi-rank requires NCCL broadcast)
+        is_single_rank = (
+            sa.sp_degree == 1 and sa.tp_size <= 1 and not sa.enable_cfg_parallel
+        )
+        if (
+            self._disagg_role in (RoleType.DENOISER, RoleType.DECODER)
+            and is_single_rank
+        ):
+            self._compute_ready_queue = queue.Queue(maxsize=4)
+            self._recv_prefetch_thread = threading.Thread(
+                target=self._recv_prefetch_loop,
+                daemon=True,
+                name=f"recv-prefetch-{self._disagg_role.value}",
+            )
+            self._recv_prefetch_thread.start()
+            logger.info(
+                "P2P %s: recv prefetch thread started",
+                self._disagg_role.value.upper(),
+            )
+
+    # ------------------------------------------------------------------
+    # Phase 5: Background ZMQ send
+    # ------------------------------------------------------------------
+
+    def _background_send_loop(self):
+        """Drain send queue and send via dedicated ZMQ socket."""
+        while True:
+            frames = self._send_queue.get()
+            if frames is None:
+                break  # Shutdown signal
+            try:
+                self._bg_result_push.send_multipart(frames, copy=False)
+            except Exception:
+                logger.exception("Background send failed")
+
+    def _enqueue_send(self, frames: list):
+        """Non-blocking enqueue for background send of bulk tensor data."""
+        self._send_queue.put(frames)
+
+    # ------------------------------------------------------------------
+    # Phase 8a: Background RDMA push (sender side)
+    # ------------------------------------------------------------------
+
+    def _rdma_push_loop(self):
+        """Background thread: execute RDMA push + notify DS.
+
+        Runs push_to_peer (blocking RDMA) on a dedicated thread so the
+        main event loop can immediately start processing the next request.
+        """
+        role_name = self._disagg_role.value.upper()
+        while True:
+            item = self._rdma_push_queue.get()
+            if item is None:
+                break  # Shutdown signal
+            request_id, dest_session_id, dest_addr, transfer_size = item
+            try:
+                success = self._transfer_manager.push_to_peer(
+                    request_id=request_id,
+                    dest_session_id=dest_session_id,
+                    dest_addr=dest_addr,
+                    transfer_size=transfer_size,
+                )
+                if success:
+                    self._transfer_manager.free_staged(request_id)
+
+                pushed_msg = P2PPushedMsg(request_id=request_id)
+                self._rdma_push_zmq.send_multipart(encode_p2p_msg(pushed_msg))
+
+                if not success:
+                    logger.error(
+                        "P2P %s: RDMA push failed for %s", role_name, request_id
+                    )
+            except Exception:
+                logger.exception(
+                    "P2P %s: RDMA push thread error for %s", role_name, request_id
+                )
+
+    # ------------------------------------------------------------------
+    # Phase 8b: Background recv + H2D prefetch (receiver side)
+    # ------------------------------------------------------------------
+
+    def _recv_prefetch_loop(self):
+        """Background thread: recv P2P messages and prefetch H2D.
+
+        For p2p_ready: does H2D + Req construction in this thread, then
+        enqueues the ready-to-compute item. This allows H2D of request N+1
+        to overlap with compute of request N on the main thread.
+
+        For p2p_alloc/push and relay messages: passes them through to the
+        main thread for handling.
+        """
+        role_name = self._disagg_role.value.upper()
+        while self._running:
+            try:
+                raw_frames = self._pool_work_pull.recv_multipart()
+                frames = [bytes(f) for f in raw_frames]
+
+                if self._is_p2p_frames(frames):
+                    msg = decode_p2p_msg(frames)
+                    msg_type = msg.get("msg_type", "")
+
+                    if msg_type == P2PMsgType.READY:
+                        # Prefetch: H2D + Req build in this thread
+                        item = self._prefetch_p2p_ready(msg)
+                        self._compute_ready_queue.put(("p2p_compute", item))
+                    else:
+                        # alloc, push: pass to main thread
+                        self._compute_ready_queue.put(("p2p_control", frames))
+                else:
+                    # Relay mode frames: pass through
+                    self._compute_ready_queue.put(("relay", frames))
+
+            except zmq.ZMQError as e:
+                if not self._running:
+                    break
+                logger.error("P2P %s recv prefetch: ZMQ error: %s", role_name, e)
+            except Exception:
+                logger.exception("P2P %s recv prefetch: error", role_name)
+
+    def _prefetch_p2p_ready(self, msg: dict) -> tuple:
+        """Prefetch H2D and build Req for a p2p_ready message.
+
+        Called from the recv prefetch thread. Does H2D on _transfer_stream
+        and builds the Req, so the main thread can start compute immediately.
+
+        Returns (req, h2d_event, request_id, role_name).
+        """
+        request_id = msg["request_id"]
+        manifest = msg.get("manifest", {})
+        scalar_fields = msg.get("scalar_fields", {})
+        role_name = self._disagg_role.value.upper()
+
+        if self._disagg_metrics:
+            self._disagg_metrics.record_request_start(request_id)
+
+        # Phase 7e: pre-allocated slot handling
+        prealloc_slot_id = scalar_fields.pop("_prealloc_slot_id", None)
+        if (
+            prealloc_slot_id is not None
+            and prealloc_slot_id in self._preallocated_slots
+        ):
+            slot = self._preallocated_slots[prealloc_slot_id]
+            self._transfer_manager.register_prealloc_as_receive(request_id, slot)
+
+        # H2D on transfer_stream (non-blocking GPU copy)
+        local_device = f"cuda:{self.worker.local_rank}"
+        tensors, h2d_event = self._transfer_manager.load_tensors_async(
+            request_id,
+            manifest,
+            device=local_device,
+            stream=self._transfer_stream,
+        )
+
+        # Free receive slot
+        if prealloc_slot_id is not None:
+            with self._transfer_manager._lock:
+                self._transfer_manager._pending_receives.pop(request_id, None)
+        else:
+            self._transfer_manager.free_receive_slot(request_id)
+
+        # Build Req (CPU work, overlapped with H2D)
+        req = self._build_req_from_p2p(scalar_fields, tensors)
+
+        # Init scheduler timesteps (CPU work, overlapped with H2D)
+        if self._disagg_role == RoleType.DENOISER:
+            scheduler_mod = self.worker.pipeline.get_module("scheduler")
+            num_steps = getattr(req, "num_inference_steps", None)
+            if scheduler_mod is not None and num_steps is not None:
+                device = torch.device(local_device)
+                scheduler_mod.set_timesteps(num_steps, device=device)
+
+        return (req, h2d_event, request_id, role_name)
 
     def _pool_mode_recv_work(self) -> list[bytes] | None:
         """Receive work frames in pool mode, with multi-rank broadcast.
@@ -577,6 +837,79 @@ class Scheduler:
 
         return frames
 
+    def _pool_mode_prefetch_event_loop(self, role_name: str) -> None:
+        """Event loop for P2P receiver roles with recv prefetch thread.
+
+        Phase 8b: The recv thread reads from ZMQ and does H2D prep.
+        This loop reads from _compute_ready_queue:
+          - "p2p_compute": H2D already done, just wait_event + compute
+          - "p2p_control": alloc/push messages, handle on main thread
+          - "relay": relay-mode frames, handle on main thread
+        """
+        while self._running:
+            try:
+                try:
+                    msg_type, data = self._compute_ready_queue.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+
+                if msg_type == "p2p_compute":
+                    # H2D already done by recv thread
+                    req, h2d_event, request_id, rn = data
+                    # Wait for H2D to complete on compute stream
+                    if h2d_event is not None:
+                        torch.cuda.current_stream().wait_event(h2d_event)
+                    # Run compute
+                    if self._disagg_role == RoleType.DENOISER:
+                        self._p2p_denoiser_compute(req, request_id, rn)
+                    elif self._disagg_role == RoleType.DECODER:
+                        self._p2p_decoder_compute(req, request_id, rn)
+
+                elif msg_type == "p2p_control":
+                    # alloc, push messages — handle on main thread
+                    self._handle_p2p_message(data)
+
+                elif msg_type == "relay":
+                    # Relay mode (shouldn't normally happen in P2P, but handle)
+                    frames = data
+                    if self._disagg_role == RoleType.DENOISER:
+                        self._pool_mode_denoiser_step(
+                            send_tensors,
+                            build_req_from_frames,
+                            _extract_tensor_fields,
+                            _extract_scalar_fields,
+                            DENOISER_TO_DECODER_TENSOR_FIELDS,
+                            DENOISER_TO_DECODER_SCALAR_FIELDS,
+                            frames=frames,
+                        )
+                    elif self._disagg_role == RoleType.DECODER:
+                        self._pool_mode_decoder_step(
+                            send_tensors,
+                            build_req_from_frames,
+                            frames=frames,
+                        )
+
+                self._consecutive_error_count = 0
+
+            except Exception as e:
+                self._consecutive_error_count += 1
+                logger.error(
+                    "Pool %s rank %d prefetch loop: error (attempt %d/%d): %s",
+                    role_name,
+                    self.gpu_id,
+                    self._consecutive_error_count,
+                    self._max_consecutive_errors,
+                    e,
+                    exc_info=True,
+                )
+                if self._consecutive_error_count >= self._max_consecutive_errors:
+                    raise RuntimeError(
+                        f"Pool {role_name} rank {self.gpu_id} terminated after "
+                        f"{self._max_consecutive_errors} consecutive errors: {e}"
+                    ) from e
+
+        self._cleanup_pool_mode()
+
     def _pool_mode_event_loop(self) -> None:
         """Event loop for all roles in pool mode (DiffusionServer-mediated).
 
@@ -593,24 +926,34 @@ class Scheduler:
         In P2P mode (Phase 7b):
         - P2P control messages (p2p_alloc, p2p_push) are rank-0-only.
         - p2p_ready is broadcast to all ranks for compute.
+
+        Phase 8b: When recv prefetch thread is active (single-rank P2P receiver),
+        the main loop reads from _compute_ready_queue instead of ZMQ directly.
         """
         role_name = self._disagg_role.value.upper()
         is_rank0 = self.gpu_id == 0
-        # P2P mode: rank 0 has transfer_manager, non-rank-0 still needs to
-        # detect P2P frames so they participate in p2p_ready compute.
         p2p = self._p2p_mode
         is_multi_rank = (
             self.server_args.sp_degree != 1
             or self.server_args.tp_size > 1
             or self.server_args.enable_cfg_parallel
         )
+        use_prefetch = self._compute_ready_queue is not None
         logger.info(
-            "Pool mode %s rank %d event loop started (p2p=%s, multi_rank=%s)",
+            "Pool mode %s rank %d event loop started "
+            "(p2p=%s, multi_rank=%s, prefetch=%s)",
             role_name,
             self.gpu_id,
             p2p,
             is_multi_rank,
+            use_prefetch,
         )
+
+        # Phase 8b: prefetch event loop — recv thread handles ZMQ + H2D,
+        # main thread only does compute + P2P control messages
+        if use_prefetch:
+            self._pool_mode_prefetch_event_loop(role_name)
+            return
 
         while self._running:
             try:
@@ -671,7 +1014,27 @@ class Scheduler:
                         f"{self._max_consecutive_errors} consecutive errors: {e}"
                     ) from e
 
-        # Cleanup (rank 0 only has sockets/transfer manager)
+        self._cleanup_pool_mode()
+
+    def _cleanup_pool_mode(self):
+        """Clean up all pool mode resources (sockets, threads, transfer manager)."""
+        # Phase 8: shutdown RDMA push thread
+        if self._rdma_push_queue is not None:
+            self._rdma_push_queue.put(None)
+        if self._rdma_push_thread is not None:
+            self._rdma_push_thread.join(timeout=5)
+        if self._rdma_push_zmq is not None:
+            self._rdma_push_zmq.close()
+        # Phase 8b: recv prefetch thread stops when self._running = False
+        if self._recv_prefetch_thread is not None:
+            self._recv_prefetch_thread.join(timeout=5)
+        # Phase 5: shutdown background send thread
+        if self._send_queue is not None:
+            self._send_queue.put(None)
+        if self._send_thread is not None:
+            self._send_thread.join(timeout=5)
+        if self._bg_result_push is not None:
+            self._bg_result_push.close()
         if self._transfer_manager is not None:
             self._transfer_manager.cleanup()
         if self._pool_work_pull is not None:
@@ -795,12 +1158,29 @@ class Scheduler:
         )
 
     def _handle_p2p_push_cmd(self, msg: dict) -> None:
-        """Handle p2p_push: RDMA push staged data to peer, reply with p2p_pushed."""
+        """Handle p2p_push: RDMA push staged data to peer, reply with p2p_pushed.
+
+        Phase 8a: If RDMA push thread is active, enqueue non-blocking.
+        Otherwise fall back to blocking push (e.g., during shutdown).
+        """
         request_id = msg["request_id"]
         dest_session_id = msg.get("dest_session_id", "")
         dest_addr = msg.get("dest_addr", 0)
         transfer_size = msg.get("transfer_size", 0)
 
+        if self._rdma_push_queue is not None:
+            # Non-blocking: enqueue to RDMA push thread
+            self._rdma_push_queue.put(
+                (
+                    request_id,
+                    dest_session_id,
+                    dest_addr,
+                    transfer_size,
+                )
+            )
+            return
+
+        # Fallback: blocking push on main thread
         success = self._transfer_manager.push_to_peer(
             request_id=request_id,
             dest_session_id=dest_session_id,
@@ -809,7 +1189,6 @@ class Scheduler:
         )
 
         if success:
-            # Free local staged slot after successful push
             self._transfer_manager.free_staged(request_id)
 
         pushed_msg = P2PPushedMsg(request_id=request_id)
@@ -825,11 +1204,13 @@ class Scheduler:
     def _handle_p2p_ready(self, msg: dict) -> None:
         """Handle p2p_ready: load tensors from buffer, run compute, send result.
 
-        This is the main P2P compute handler. After the RDMA data arrives:
-        1. Load tensors from the receive slot (H2D)
-        2. Reconstruct a Req from scalar fields + tensors
-        3. Run the role's compute (denoising or decoding)
-        4. Send p2p_done to DS (with staged info for next role if applicable)
+        Phase 3c: Overlap H2D with Req construction and scheduler init.
+        After the RDMA data arrives:
+        1. Start H2D on transfer_stream (non-blocking)
+        2. Build Req from scalar fields + tensors (CPU, overlapped)
+        3. Init scheduler timesteps if denoiser (CPU, overlapped)
+        4. Wait for H2D before compute
+        5. Run the role's compute
         """
 
         request_id = msg["request_id"]
@@ -840,18 +1221,49 @@ class Scheduler:
         if self._disagg_metrics:
             self._disagg_metrics.record_request_start(request_id)
 
-        # 1. Load tensors from receive buffer (H2D)
+        # Phase 7e: If using a pre-allocated slot, register it as pending receive
+        prealloc_slot_id = scalar_fields.pop("_prealloc_slot_id", None)
+        if (
+            prealloc_slot_id is not None
+            and prealloc_slot_id in self._preallocated_slots
+        ):
+            slot = self._preallocated_slots[prealloc_slot_id]
+            self._transfer_manager.register_prealloc_as_receive(request_id, slot)
+
+        # 1. Start H2D on transfer_stream (non-blocking)
         local_device = f"cuda:{self.worker.local_rank}"
-        tensors = self._transfer_manager.load_tensors(
-            request_id, manifest, device=local_device
+        tensors, h2d_event = self._transfer_manager.load_tensors_async(
+            request_id,
+            manifest,
+            device=local_device,
+            stream=self._transfer_stream,
         )
 
-        # Free receive slot after loading to GPU
-        self._transfer_manager.free_receive_slot(request_id)
+        # Free receive slot after H2D is launched (data copied to GPU)
+        if prealloc_slot_id is not None:
+            # Pre-allocated slot: just remove from pending receives, don't free buffer
+            # (DS recycles the slot via _recycle_prealloc_slot)
+            with self._transfer_manager._lock:
+                self._transfer_manager._pending_receives.pop(request_id, None)
+        else:
+            self._transfer_manager.free_receive_slot(request_id)
 
-        # 2. Reconstruct Req from scalar fields + loaded tensors
+        # 2. Build Req from scalar fields + tensors (CPU work, overlapped)
         req = self._build_req_from_p2p(scalar_fields, tensors)
 
+        # 3. Init scheduler timesteps if denoiser (CPU work, overlapped)
+        if self._disagg_role == RoleType.DENOISER:
+            scheduler_mod = self.worker.pipeline.get_module("scheduler")
+            num_steps = getattr(req, "num_inference_steps", None)
+            if scheduler_mod is not None and num_steps is not None:
+                device = torch.device(local_device)
+                scheduler_mod.set_timesteps(num_steps, device=device)
+
+        # 4. Wait for H2D before compute (GPU must see the data)
+        if h2d_event is not None:
+            torch.cuda.current_stream().wait_event(h2d_event)
+
+        # 5. Run compute
         if self._disagg_role == RoleType.DENOISER:
             self._p2p_denoiser_compute(req, request_id, role_name)
         elif self._disagg_role == RoleType.DECODER:
@@ -888,14 +1300,11 @@ class Scheduler:
     def _p2p_denoiser_compute(
         self, req: "Req", request_id: str, role_name: str
     ) -> None:
-        """Run denoiser compute in P2P mode, then stage output for decoder."""
-        # Initialize scheduler timesteps
-        scheduler_mod = self.worker.pipeline.get_module("scheduler")
-        num_steps = getattr(req, "num_inference_steps", None)
-        if scheduler_mod is not None and num_steps is not None:
-            device = torch.device(f"cuda:{self.worker.local_rank}")
-            scheduler_mod.set_timesteps(num_steps, device=device)
+        """Run denoiser compute in P2P mode, then stage output for decoder.
 
+        Note: Scheduler timestep init is done in _handle_p2p_ready (Phase 3c)
+        to overlap with H2D transfer.
+        """
         # Run denoising
         start_time = time.monotonic()
         result = self.worker.execute_forward([req], return_req=True)
@@ -909,7 +1318,7 @@ class Scheduler:
                 self._disagg_metrics.record_request_failed(request_id)
             return
 
-        # Stage denoiser output for decoder transfer
+        # Stage denoiser output for decoder transfer (Phase 3b: async D2H)
         tensor_fields = _extract_tensor_fields(
             result, DENOISER_TO_DECODER_TENSOR_FIELDS
         )
@@ -917,10 +1326,12 @@ class Scheduler:
             result, DENOISER_TO_DECODER_SCALAR_FIELDS
         )
 
-        staged = self._transfer_manager.stage_tensors(
+        # 1. Start D2H on transfer_stream (non-blocking CPU return)
+        staged, d2h_event = self._transfer_manager.stage_tensors_async(
             request_id=request_id,
             tensor_fields=tensor_fields,
             scalar_fields=scalar_fields,
+            stream=self._transfer_stream,
         )
 
         if staged is None:
@@ -933,7 +1344,7 @@ class Scheduler:
                 self._disagg_metrics.record_request_failed(request_id)
             return
 
-        # Send p2p_done with staged info so DS can route to decoder
+        # 2. Build done_data dict while D2H runs (CPU work, overlapped)
         done_data = {
             "msg_type": "p2p_done",
             "request_id": request_id,
@@ -945,10 +1356,14 @@ class Scheduler:
             "manifest": staged.manifest,
             "scalar_fields": staged.scalar_fields,
         }
+        msg_bytes = json.dumps(done_data, separators=(",", ":")).encode("utf-8")
 
-        self._pool_result_push.send_multipart(
-            [P2P_MAGIC, json.dumps(done_data, separators=(",", ":")).encode("utf-8")]
-        )
+        # 3. Wait for D2H to complete before sending
+        if d2h_event is not None:
+            d2h_event.synchronize()
+
+        # 4. Send p2p_done with staged info
+        self._pool_result_push.send_multipart([P2P_MAGIC, msg_bytes])
 
         if self._disagg_metrics:
             self._disagg_metrics.record_request_complete(request_id)
@@ -1063,6 +1478,19 @@ class Scheduler:
                 self._pool_mode_encoder_p2p_stage(
                     request_id, tensor_fields, scalar_fields
                 )
+            elif self._transfer_stream is not None and self._send_queue is not None:
+                # Phase 4c+5: Async D2H + background send
+                from sglang.multimodal_gen.runtime.disaggregation.transport.relay.tensor_transport import (
+                    pack_tensors_async,
+                )
+
+                metadata_bytes, buffers, d2h_event = pack_tensors_async(
+                    tensor_fields, scalar_fields, self._transfer_stream
+                )
+                if d2h_event is not None:
+                    d2h_event.synchronize()
+                parts = [metadata_bytes] + list(buffers)
+                self._enqueue_send(parts)
             else:
                 # Relay mode: send tensor multipart directly
                 send_tensors_fn(self._pool_result_push, tensor_fields, scalar_fields)
@@ -1075,11 +1503,16 @@ class Scheduler:
     def _pool_mode_encoder_p2p_stage(
         self, request_id: str, tensor_fields: dict, scalar_fields: dict
     ) -> None:
-        """Stage encoder output and send p2p_staged to DS."""
-        staged = self._transfer_manager.stage_tensors(
+        """Stage encoder output and send p2p_staged to DS.
+
+        Phase 3a: Overlap D2H with metadata JSON serialization.
+        """
+        # 1. Start D2H on transfer_stream (non-blocking CPU return)
+        staged, d2h_event = self._transfer_manager.stage_tensors_async(
             request_id=request_id,
             tensor_fields=tensor_fields,
             scalar_fields=scalar_fields,
+            stream=self._transfer_stream,
         )
 
         if staged is None:
@@ -1093,6 +1526,7 @@ class Scheduler:
                 self._disagg_metrics.record_request_failed(request_id)
             return
 
+        # 2. Build P2P metadata dict while D2H runs (CPU work, overlapped)
         staged_data = {
             "msg_type": "p2p_staged",
             "request_id": request_id,
@@ -1103,9 +1537,14 @@ class Scheduler:
             "slot_offset": staged.slot.offset if staged.slot else 0,
             "scalar_fields": staged.scalar_fields,
         }
-        self._pool_result_push.send_multipart(
-            [P2P_MAGIC, json.dumps(staged_data, separators=(",", ":")).encode("utf-8")]
-        )
+        msg_bytes = json.dumps(staged_data, separators=(",", ":")).encode("utf-8")
+
+        # 3. Wait for D2H to complete before sending (buffer must be ready)
+        if d2h_event is not None:
+            d2h_event.synchronize()
+
+        # 4. Send P2P staged message
+        self._pool_result_push.send_multipart([P2P_MAGIC, msg_bytes])
 
     def _pool_mode_denoiser_step(
         self,
@@ -1117,23 +1556,42 @@ class Scheduler:
         scalar_field_names,
         frames=None,
     ):
-        """Single denoiser step in pool mode."""
+        """Single denoiser step in pool mode.
+
+        Phase 4d: Async H2D on receive, async D2H + background send on output.
+        """
         # Receive tensor multipart from DiffusionServer relay
         if frames is None:
             frames = self._pool_work_pull.recv_multipart(copy=False)
         local_device = f"cuda:{self.worker.local_rank}"
-        req = build_req_fn(frames, "encoder_to_denoiser", device=local_device)
+
+        # Phase 4d: Async H2D with overlapped Req construction
+        if self._transfer_stream is not None:
+            req, h2d_event = build_req_from_frames_async(
+                frames,
+                "encoder_to_denoiser",
+                device=local_device,
+                stream=self._transfer_stream,
+            )
+        else:
+            req = build_req_fn(frames, "encoder_to_denoiser", device=local_device)
+            h2d_event = None
+
         request_id = getattr(req, "request_id", "unknown")
 
         if self._disagg_metrics:
             self._disagg_metrics.record_request_start(request_id)
 
-        # Initialize scheduler timesteps
+        # Initialize scheduler timesteps (CPU work, overlapped with H2D)
         scheduler_mod = self.worker.pipeline.get_module("scheduler")
         num_steps = getattr(req, "num_inference_steps", None)
         if scheduler_mod is not None and num_steps is not None:
             device = torch.device(local_device)
             scheduler_mod.set_timesteps(num_steps, device=device)
+
+        # Wait for H2D before compute
+        if h2d_event is not None:
+            torch.cuda.current_stream().wait_event(h2d_event)
 
         # Run denoising
         result = self.worker.execute_forward([req], return_req=True)
@@ -1142,7 +1600,23 @@ class Scheduler:
             tensor_fields = extract_tensor(result, tensor_field_names)
             scalar_fields = extract_scalar(result, scalar_field_names)
             if self._pool_result_push is not None:
-                send_tensors_fn(self._pool_result_push, tensor_fields, scalar_fields)
+                if self._transfer_stream is not None and self._send_queue is not None:
+                    # Phase 4c+5: Async D2H + background send
+                    from sglang.multimodal_gen.runtime.disaggregation.transport.relay.tensor_transport import (
+                        pack_tensors_async,
+                    )
+
+                    metadata_bytes, buffers, d2h_event = pack_tensors_async(
+                        tensor_fields, scalar_fields, self._transfer_stream
+                    )
+                    if d2h_event is not None:
+                        d2h_event.synchronize()
+                    parts = [metadata_bytes] + list(buffers)
+                    self._enqueue_send(parts)
+                else:
+                    send_tensors_fn(
+                        self._pool_result_push, tensor_fields, scalar_fields
+                    )
             if self._disagg_metrics:
                 self._disagg_metrics.record_request_complete(request_id)
         else:
@@ -1159,12 +1633,27 @@ class Scheduler:
         logger.debug("Pool DENOISER: processed %s", request_id)
 
     def _pool_mode_decoder_step(self, send_tensors_fn, build_req_fn, frames=None):
-        """Single decoder step in pool mode."""
+        """Single decoder step in pool mode.
+
+        Phase 4d: Async H2D on receive, async D2H + background send on output.
+        """
         # Receive tensor multipart from DiffusionServer relay
         if frames is None:
             frames = self._pool_work_pull.recv_multipart(copy=False)
         local_device = f"cuda:{self.worker.local_rank}"
-        req = build_req_fn(frames, "denoiser_to_decoder", device=local_device)
+
+        # Phase 4d: Async H2D with overlapped Req construction
+        if self._transfer_stream is not None:
+            req, h2d_event = build_req_from_frames_async(
+                frames,
+                "denoiser_to_decoder",
+                device=local_device,
+                stream=self._transfer_stream,
+            )
+        else:
+            req = build_req_fn(frames, "denoiser_to_decoder", device=local_device)
+            h2d_event = None
+
         request_id = getattr(req, "request_id", "unknown")
 
         # Check for upstream error
@@ -1187,6 +1676,10 @@ class Scheduler:
         req.save_output = False
         req.return_file_paths_only = False
 
+        # Wait for H2D before compute
+        if h2d_event is not None:
+            torch.cuda.current_stream().wait_event(h2d_event)
+
         output_batch = self.worker.execute_forward([req])
 
         # Pack result
@@ -1202,7 +1695,21 @@ class Scheduler:
             scalar_fields["error"] = output_batch.error
 
         if self._pool_result_push is not None:
-            send_tensors_fn(self._pool_result_push, tensor_fields, scalar_fields)
+            if self._transfer_stream is not None and self._send_queue is not None:
+                # Phase 4c+5: Async D2H + background send
+                from sglang.multimodal_gen.runtime.disaggregation.transport.relay.tensor_transport import (
+                    pack_tensors_async,
+                )
+
+                metadata_bytes, buffers, d2h_event = pack_tensors_async(
+                    tensor_fields, scalar_fields, self._transfer_stream
+                )
+                if d2h_event is not None:
+                    d2h_event.synchronize()
+                parts = [metadata_bytes] + list(buffers)
+                self._enqueue_send(parts)
+            else:
+                send_tensors_fn(self._pool_result_push, tensor_fields, scalar_fields)
 
         if self._disagg_metrics:
             if output_batch.error:

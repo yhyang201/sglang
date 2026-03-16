@@ -97,6 +97,9 @@ class _P2PRequestState:
     sender_instance: int = -1
     receiver_instance: int = -1
 
+    # Phase 7: pre-allocated slot id (if used), for recycling after compute
+    prealloc_slot_id: int | None = None
+
     def __post_init__(self):
         if self.manifest is None:
             self.manifest = {}
@@ -303,7 +306,7 @@ class DiffusionServer:
 
         try:
             while self._running:
-                events = dict(poller.poll(timeout=100))
+                events = dict(poller.poll(timeout=10))
 
                 self._handle_timeouts()
 
@@ -790,7 +793,10 @@ class DiffusionServer:
             logger.warning("DiffusionServer: unknown P2P msg_type=%s", msg_type)
 
     def _handle_p2p_register(self, msg: dict) -> None:
-        """Instance registers its TransferEngine session + buffer info."""
+        """Instance registers its TransferEngine session + buffer info.
+
+        Phase 7a: Also stores pre-allocated receive slots from receivers.
+        """
         try:
             role = RoleType.from_string(msg.get("role", ""))
         except ValueError:
@@ -804,6 +810,13 @@ class DiffusionServer:
             "pool_ptr": msg.get("pool_ptr", 0),
             "pool_size": msg.get("pool_size", 0),
         }
+        # Phase 7: store pre-allocated slots as a free list per instance
+        prealloc = msg.get("preallocated_slots", [])
+        if prealloc:
+            info["free_preallocated_slots"] = list(prealloc)
+        else:
+            info["free_preallocated_slots"] = []
+
         if role == RoleType.ENCODER:
             self._encoder_peers[idx] = info
         elif role == RoleType.DENOISER:
@@ -811,11 +824,12 @@ class DiffusionServer:
         elif role == RoleType.DECODER:
             self._decoder_peers[idx] = info
         logger.info(
-            "DiffusionServer P2P: registered %s[%d] session=%s pool_ptr=%#x",
+            "DiffusionServer P2P: registered %s[%d] session=%s pool_ptr=%#x prealloc=%d",
             role,
             idx,
             info["session_id"],
             info["pool_ptr"],
+            len(prealloc),
         )
 
     def _handle_p2p_staged(self, msg: dict) -> None:
@@ -860,7 +874,11 @@ class DiffusionServer:
     def _p2p_dispatch_to_denoiser(
         self, request_id: str, p2p: _P2PRequestState, denoiser_idx: int
     ) -> None:
-        """Send p2p_alloc to denoiser to allocate a receive slot."""
+        """Dispatch P2P transfer to denoiser.
+
+        Phase 7c: If the denoiser has pre-allocated slots, skip ALLOC roundtrip
+        and send PUSH directly to the encoder.
+        """
 
         self._denoiser_free_slots[denoiser_idx] -= 1
         p2p.receiver_instance = denoiser_idx
@@ -874,18 +892,51 @@ class DiffusionServer:
         except ValueError:
             pass
 
-        alloc_msg = P2PAllocMsg(
-            request_id=request_id,
-            data_size=p2p.data_size,
-            source_role="encoder",
-        )
-        self._denoiser_pushes[denoiser_idx].send_multipart(encode_p2p_msg(alloc_msg))
-        logger.debug(
-            "DiffusionServer P2P: sent alloc to denoiser[%d] for %s (%d bytes)",
-            denoiser_idx,
-            request_id,
-            p2p.data_size,
-        )
+        # Phase 7c: Try to use a pre-allocated slot (skip ALLOC→ALLOCATED roundtrip)
+        peer_info = self._denoiser_peers.get(denoiser_idx, {})
+        free_slots = peer_info.get("free_preallocated_slots", [])
+        if free_slots:
+            slot_info = free_slots.pop(0)
+            # Store receiver info directly
+            p2p.receiver_session_id = peer_info.get("session_id", "")
+            p2p.receiver_pool_ptr = peer_info.get("pool_ptr", 0)
+            p2p.receiver_slot_offset = slot_info["offset"]
+            p2p.prealloc_slot_id = slot_info.get("slot_id")
+
+            # Send PUSH directly to encoder (skip ALLOC roundtrip)
+            dest_addr = slot_info["addr"]
+            push_msg = P2PPushMsg(
+                request_id=request_id,
+                dest_session_id=p2p.receiver_session_id,
+                dest_addr=dest_addr,
+                transfer_size=p2p.data_size,
+            )
+            sender_idx = p2p.sender_instance
+            self._encoder_pushes[sender_idx].send_multipart(encode_p2p_msg(push_msg))
+            logger.debug(
+                "DiffusionServer P2P: fast-path push to denoiser[%d] for %s "
+                "(prealloc slot %s, %d bytes)",
+                denoiser_idx,
+                request_id,
+                slot_info.get("slot_id"),
+                p2p.data_size,
+            )
+        else:
+            # Fallback: original ALLOC roundtrip
+            alloc_msg = P2PAllocMsg(
+                request_id=request_id,
+                data_size=p2p.data_size,
+                source_role="encoder",
+            )
+            self._denoiser_pushes[denoiser_idx].send_multipart(
+                encode_p2p_msg(alloc_msg)
+            )
+            logger.debug(
+                "DiffusionServer P2P: sent alloc to denoiser[%d] for %s (%d bytes)",
+                denoiser_idx,
+                request_id,
+                p2p.data_size,
+            )
 
     def _handle_p2p_allocated(self, msg: dict) -> None:
         """Receiver allocated a slot. Send p2p_push to sender."""
@@ -963,11 +1014,15 @@ class DiffusionServer:
             self._denoiser_free_slots[sender_idx] += 1
 
         # Tell receiver that data has arrived
+        # Phase 7: include prealloc_slot_id so receiver can use pre-allocated slot
+        scalar_fields = dict(p2p.scalar_fields) if p2p.scalar_fields else {}
+        if p2p.prealloc_slot_id is not None:
+            scalar_fields["_prealloc_slot_id"] = p2p.prealloc_slot_id
         ready_msg = P2PReadyMsg(
             request_id=request_id,
             manifest=p2p.manifest,
             slot_offset=p2p.receiver_slot_offset,
-            scalar_fields=p2p.scalar_fields,
+            scalar_fields=scalar_fields,
         )
 
         receiver_idx = p2p.receiver_instance
@@ -991,6 +1046,29 @@ class DiffusionServer:
             request_id,
         )
 
+    def _recycle_prealloc_slot(self, p2p: _P2PRequestState, role: RoleType) -> None:
+        """Phase 7e: Recycle a pre-allocated slot back to the receiver's free list."""
+        if p2p is None or p2p.prealloc_slot_id is None:
+            return
+        receiver_idx = p2p.receiver_instance
+        if role == RoleType.DENOISER:
+            peer_info = self._denoiser_peers.get(receiver_idx, {})
+        elif role == RoleType.DECODER:
+            peer_info = self._decoder_peers.get(receiver_idx, {})
+        else:
+            return
+        free_list = peer_info.get("free_preallocated_slots", [])
+        # Re-add the slot info for reuse
+        free_list.append(
+            {
+                "offset": p2p.receiver_slot_offset,
+                "size": p2p.data_size,
+                "slot_id": p2p.prealloc_slot_id,
+                "addr": p2p.receiver_pool_ptr + p2p.receiver_slot_offset,
+            }
+        )
+        p2p.prealloc_slot_id = None  # Mark as recycled
+
     def _handle_p2p_done(self, msg: dict, role: RoleType) -> None:
         """Role instance finished compute in P2P mode."""
         request_id = msg.get("request_id", "")
@@ -999,6 +1077,10 @@ class DiffusionServer:
 
         if role == RoleType.DENOISER:
             record = self._tracker.get(request_id)
+
+            # Phase 7e: Recycle denoiser's pre-allocated slot
+            if p2p is not None:
+                self._recycle_prealloc_slot(p2p, RoleType.DENOISER)
 
             if error:
                 # On error, free denoiser slot immediately (no pending transfer)
@@ -1040,6 +1122,10 @@ class DiffusionServer:
                     self._denoiser_free_slots[record.denoiser_instance] += 1
 
         elif role == RoleType.DECODER:
+            # Phase 7e: Recycle decoder's pre-allocated slot
+            if p2p is not None:
+                self._recycle_prealloc_slot(p2p, RoleType.DECODER)
+
             # Free decoder slot
             record = self._tracker.get(request_id)
             if record and record.decoder_instance is not None:
@@ -1067,7 +1153,10 @@ class DiffusionServer:
     def _p2p_dispatch_to_decoder(
         self, request_id: str, p2p: _P2PRequestState, decoder_idx: int
     ) -> None:
-        """Send p2p_alloc to decoder to allocate a receive slot."""
+        """Dispatch P2P transfer to decoder.
+
+        Phase 7c: Same pre-allocated slot fast-path as denoiser dispatch.
+        """
 
         self._decoder_free_slots[decoder_idx] -= 1
         p2p.receiver_instance = decoder_idx
@@ -1081,12 +1170,39 @@ class DiffusionServer:
         except ValueError:
             pass
 
-        alloc_msg = P2PAllocMsg(
-            request_id=request_id,
-            data_size=p2p.data_size,
-            source_role="denoiser",
-        )
-        self._decoder_pushes[decoder_idx].send_multipart(encode_p2p_msg(alloc_msg))
+        # Phase 7c: Try to use a pre-allocated slot
+        peer_info = self._decoder_peers.get(decoder_idx, {})
+        free_slots = peer_info.get("free_preallocated_slots", [])
+        if free_slots:
+            slot_info = free_slots.pop(0)
+            p2p.receiver_session_id = peer_info.get("session_id", "")
+            p2p.receiver_pool_ptr = peer_info.get("pool_ptr", 0)
+            p2p.receiver_slot_offset = slot_info["offset"]
+            p2p.prealloc_slot_id = slot_info.get("slot_id")
+
+            dest_addr = slot_info["addr"]
+            push_msg = P2PPushMsg(
+                request_id=request_id,
+                dest_session_id=p2p.receiver_session_id,
+                dest_addr=dest_addr,
+                transfer_size=p2p.data_size,
+            )
+            sender_idx = p2p.sender_instance
+            self._denoiser_pushes[sender_idx].send_multipart(encode_p2p_msg(push_msg))
+            logger.debug(
+                "DiffusionServer P2P: fast-path push to decoder[%d] for %s "
+                "(prealloc slot %s)",
+                decoder_idx,
+                request_id,
+                slot_info.get("slot_id"),
+            )
+        else:
+            alloc_msg = P2PAllocMsg(
+                request_id=request_id,
+                data_size=p2p.data_size,
+                source_role="denoiser",
+            )
+            self._decoder_pushes[decoder_idx].send_multipart(encode_p2p_msg(alloc_msg))
 
     def _p2p_return_to_client(self, request_id: str, result_frames: list) -> None:
         """Return P2P result to HTTP client.

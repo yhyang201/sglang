@@ -172,6 +172,76 @@ def pack_denoiser_output(req: Req) -> tuple[bytes, list]:
     return pack_tensors(tensor_fields, scalar_fields)
 
 
+def build_req_from_frames_async(
+    parts: list,
+    transition: str,
+    device: str | torch.device = "cpu",
+    stream: torch.cuda.Stream | None = None,
+) -> tuple[Req, torch.cuda.Event | None]:
+    """Build a Req from multipart ZMQ frames with async H2D on the given stream.
+
+    Returns (req, h2d_event). Caller must wait on h2d_event before using
+    tensor fields on the default/compute stream.
+    """
+    tensor_fields, scalar_fields = unpack_tensors(parts, device="cpu")
+
+    if transition == "encoder_to_denoiser":
+        scalar_field_names = ENCODER_TO_DENOISER_SCALAR_FIELDS
+    elif transition == "denoiser_to_decoder":
+        scalar_field_names = DENOISER_TO_DECODER_SCALAR_FIELDS
+    else:
+        raise ValueError(f"Unknown transition: {transition}")
+
+    # H2D on transfer stream (non-blocking)
+    h2d_event = None
+    if stream is not None and device != "cpu" and device != torch.device("cpu"):
+        with torch.cuda.stream(stream):
+            for name in list(tensor_fields.keys()):
+                val = tensor_fields[name]
+                if isinstance(val, torch.Tensor):
+                    tensor_fields[name] = val.to(device, non_blocking=True)
+                elif isinstance(val, list):
+                    tensor_fields[name] = [
+                        (
+                            t.to(device, non_blocking=True)
+                            if isinstance(t, torch.Tensor)
+                            else t
+                        )
+                        for t in val
+                    ]
+            h2d_event = torch.cuda.Event()
+            h2d_event.record()
+    elif device != "cpu" and device != torch.device("cpu"):
+        for name in list(tensor_fields.keys()):
+            val = tensor_fields[name]
+            if isinstance(val, torch.Tensor):
+                tensor_fields[name] = val.to(device)
+            elif isinstance(val, list):
+                tensor_fields[name] = [
+                    t.to(device) if isinstance(t, torch.Tensor) else t for t in val
+                ]
+
+    # Build Req (CPU work, overlapped with H2D)
+    init_kwargs = {}
+    if "request_id" in scalar_fields:
+        init_kwargs["request_id"] = scalar_fields["request_id"]
+    if "guidance_scale" in scalar_fields:
+        init_kwargs["guidance_scale"] = scalar_fields["guidance_scale"]
+
+    req = Req(**init_kwargs)
+    _apply_scalar_fields(req, scalar_fields, scalar_field_names)
+    _apply_tensor_fields(req, tensor_fields)
+
+    # Recreate torch.Generator from seed
+    seed = scalar_fields.get("seed")
+    if seed is not None:
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(int(seed))
+        req.generator = generator
+
+    return req, h2d_event
+
+
 def build_req_from_frames(
     parts: list,
     transition: str,

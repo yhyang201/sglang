@@ -169,6 +169,123 @@ class DiffusionTransferManager:
         )
         return staged
 
+    def stage_tensors_async(
+        self,
+        request_id: str,
+        tensor_fields: dict[str, torch.Tensor | list[torch.Tensor] | None],
+        scalar_fields: dict | None = None,
+        stream: torch.cuda.Stream | None = None,
+    ) -> tuple[StagedTransfer | None, torch.cuda.Event | None]:
+        """Stage GPU tensors into TransferBuffer (D2H), returning a CUDA event
+        instead of blocking on synchronize.
+
+        Returns (StagedTransfer, d2h_done_event) or (None, None) on failure.
+        The caller MUST wait on d2h_done_event before reading the buffer data.
+        """
+        # Calculate required size
+        total_size = 0
+        for name, t in tensor_fields.items():
+            if t is None:
+                continue
+            if isinstance(t, list):
+                for ti in t:
+                    total_size += ti.nelement() * ti.element_size()
+            else:
+                total_size += t.nelement() * t.element_size()
+
+        if total_size == 0:
+            manifest = {}
+            slot = None
+            staged = StagedTransfer(
+                request_id=request_id,
+                slot=slot,
+                manifest=manifest,
+                scalar_fields=scalar_fields or {},
+            )
+            with self._lock:
+                self._staged[request_id] = staged
+            return staged, None
+
+        # Allocate slot in TransferBuffer
+        slot = self._buffer.allocate(total_size, request_id)
+        if slot is None:
+            logger.warning(
+                "TransferManager: failed to allocate %d bytes for %s",
+                total_size,
+                request_id,
+            )
+            return None, None
+
+        # D2H: write tensors to pinned memory
+        manifest = self._buffer.write_tensors_from_gpu(slot, tensor_fields, stream)
+
+        # Record CUDA event instead of blocking synchronize
+        d2h_event = None
+        if stream is not None:
+            d2h_event = torch.cuda.Event()
+            d2h_event.record(stream)
+        elif torch.cuda.is_available():
+            d2h_event = torch.cuda.Event()
+            d2h_event.record(torch.cuda.current_stream())
+
+        staged = StagedTransfer(
+            request_id=request_id,
+            slot=slot,
+            manifest=manifest,
+            scalar_fields=scalar_fields or {},
+        )
+        with self._lock:
+            self._staged[request_id] = staged
+
+        logger.debug(
+            "TransferManager: staged_async %s (%d bytes, offset=%d)",
+            request_id,
+            total_size,
+            slot.offset,
+        )
+        return staged, d2h_event
+
+    def load_tensors_async(
+        self,
+        request_id: str,
+        manifest: dict,
+        device: torch.device | str = "cuda",
+        stream: torch.cuda.Stream | None = None,
+    ) -> tuple[dict[str, torch.Tensor | list[torch.Tensor]], torch.cuda.Event | None]:
+        """Load tensors from receive slot to GPU (H2D), returning a CUDA event.
+
+        The caller MUST ensure the default/compute stream waits on h2d_done_event
+        before using the returned tensors.
+        """
+        with self._lock:
+            pending = self._pending_receives.get(request_id)
+
+        if pending is None:
+            raise ValueError(
+                f"TransferManager: no pending receive slot for {request_id}"
+            )
+
+        tensors = self._buffer.read_tensors_from_manifest(
+            pending.slot, manifest, device=device, stream=stream
+        )
+
+        # Record CUDA event instead of blocking synchronize
+        h2d_event = None
+        if stream is not None:
+            h2d_event = torch.cuda.Event()
+            h2d_event.record(stream)
+        elif torch.cuda.is_available():
+            h2d_event = torch.cuda.Event()
+            h2d_event.record(torch.cuda.current_stream())
+
+        logger.debug(
+            "TransferManager: loaded_async %d tensor fields for %s to %s",
+            len(tensors),
+            request_id,
+            device,
+        )
+        return tensors, h2d_event
+
     def push_to_peer(
         self,
         request_id: str,
@@ -297,6 +414,19 @@ class DiffusionTransferManager:
             device,
         )
         return tensors
+
+    def register_prealloc_as_receive(
+        self, request_id: str, slot: "SlotHandle"
+    ) -> "PendingReceive":
+        """Register a pre-allocated slot as a pending receive.
+
+        Phase 7e: Used when RDMA data was written directly to a pre-allocated
+        slot (fast path), bypassing allocate_receive_slot().
+        """
+        pending = PendingReceive(request_id=request_id, slot=slot)
+        with self._lock:
+            self._pending_receives[request_id] = pending
+        return pending
 
     def free_receive_slot(self, request_id: str) -> None:
         """Free a receive slot after processing."""

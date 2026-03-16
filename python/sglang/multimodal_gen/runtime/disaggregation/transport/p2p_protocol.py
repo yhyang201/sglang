@@ -30,7 +30,7 @@ Message flow (denoiser → decoder via DS):
 
 import json
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -153,7 +153,11 @@ class P2PDoneMsg:
 
 @dataclass
 class P2PRegisterMsg:
-    """Instance → DS: register at startup."""
+    """Instance → DS: register at startup.
+
+    Phase 7a: includes pre-allocated receive slots so DS can bypass
+    the ALLOC→ALLOCATED roundtrip.
+    """
 
     msg_type: str = P2PMsgType.REGISTER
     role: str = ""  # "encoder", "denoiser", "decoder"
@@ -161,6 +165,9 @@ class P2PRegisterMsg:
     session_id: str = ""
     pool_ptr: int = 0
     pool_size: int = 0
+    # Phase 7: pre-allocated receive slots
+    # Each dict: {"offset": int, "size": int, "slot_id": int, "addr": int}
+    preallocated_slots: list = field(default_factory=list)
 
 
 # --- Serialization helpers ---
