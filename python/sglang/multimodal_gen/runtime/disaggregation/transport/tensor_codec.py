@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Zero-copy tensor transport over ZMQ multipart messages.
+Zero-copy tensor codec for ZMQ multipart messages.
 
 Protocol:
   Frame 0:   JSON metadata (tensor descriptors + scalar fields)
@@ -9,7 +9,10 @@ Protocol:
 Sender uses TensorWrapper.__buffer__() for zero-copy with copy=False.
 Receiver uses torch.frombuffer() + reshape + clone to reconstruct tensors.
 
-Reference: sglang/srt/disaggregation/encode_server.py (TensorWrapper pattern)
+Used by:
+  - P2P decoder result path (scheduler → DiffusionServer)
+  - DiffusionServer decoder result handler
+  - TransferBuffer (str_to_dtype)
 """
 
 import ctypes
@@ -252,41 +255,6 @@ def pack_tensors_async(
     metadata_bytes = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
 
     return metadata_bytes, buffers, d2h_event
-
-
-def send_tensors_async(
-    socket: zmq.Socket,
-    tensor_fields: dict[str, torch.Tensor | list[torch.Tensor] | None],
-    scalar_fields: dict | None = None,
-    stream: torch.cuda.Stream | None = None,
-    flags: int = 0,
-) -> None:
-    """Send tensors with async D2H (overlap metadata JSON with D2H copy)."""
-    metadata_bytes, buffers, d2h_event = pack_tensors_async(
-        tensor_fields, scalar_fields, stream
-    )
-    # Wait for D2H (metadata already prepared in parallel)
-    if d2h_event is not None:
-        d2h_event.synchronize()
-    # Send as multipart
-    parts: list = [metadata_bytes]
-    parts.extend(buffers)
-    socket.send_multipart(parts, flags=flags, copy=False)
-
-
-def recv_tensors(
-    socket: zmq.Socket,
-    flags: int = 0,
-    device: str | torch.device = "cpu",
-) -> tuple[dict[str, torch.Tensor | list[torch.Tensor]], dict]:
-    """Receive tensors from ZMQ multipart message.
-
-    Returns:
-        (tensor_fields, scalar_fields) where tensor_fields maps
-        field_name -> Tensor or list[Tensor], and scalar_fields is a dict.
-    """
-    parts = socket.recv_multipart(flags=flags, copy=False)
-    return unpack_tensors(parts, device=device)
 
 
 def unpack_tensors(

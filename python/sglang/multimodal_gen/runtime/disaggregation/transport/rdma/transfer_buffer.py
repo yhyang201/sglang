@@ -29,7 +29,7 @@ import torch
 from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_allocator import (
     BuddyAllocator,
 )
-from sglang.multimodal_gen.runtime.disaggregation.transport.relay.tensor_transport import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.tensor_codec import (
     str_to_dtype,
 )
 

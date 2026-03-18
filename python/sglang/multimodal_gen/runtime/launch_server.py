@@ -386,7 +386,6 @@ def launch_pool_disagg_server(
     # Start DiffusionServer
     frontend_endpoint = f"tcp://{host}:{server_args.scheduler_port}"
 
-    p2p_mode = getattr(server_args, "disagg_p2p_mode", False)
     diffusion_server = DiffusionServer(
         frontend_endpoint=frontend_endpoint,
         encoder_work_endpoints=encoder_work_endpoints,
@@ -397,7 +396,6 @@ def launch_pool_disagg_server(
         decoder_result_endpoint=decoder_result_ep,
         dispatch_policy_name=server_args.disagg_dispatch_policy,
         timeout_s=float(server_args.disagg_timeout),
-        p2p_mode=p2p_mode,
     )
     diffusion_server.start()
 
@@ -517,7 +515,6 @@ def launch_disagg_server(server_args: ServerArgs):
         decoder_result_ep,
     )
 
-    p2p_mode = getattr(server_args, "disagg_p2p_mode", False)
     diffusion_server = DiffusionServer(
         frontend_endpoint=frontend_endpoint,
         encoder_work_endpoints=encoder_work_endpoints,
@@ -528,7 +525,6 @@ def launch_disagg_server(server_args: ServerArgs):
         decoder_result_endpoint=decoder_result_ep,
         dispatch_policy_name=server_args.disagg_dispatch_policy,
         timeout_s=float(server_args.disagg_timeout),
-        p2p_mode=p2p_mode,
     )
     diffusion_server.start()
 
@@ -569,13 +565,12 @@ def launch_disagg_role(server_args: ServerArgs):
     )
     logger.info("  Work endpoint (bind): %s", work_endpoint)
     logger.info("  Result endpoint (connect): %s", result_endpoint)
-    if server_args.disagg_p2p_mode:
-        logger.info(
-            "  P2P: hostname=%s, ib_device=%s, pool_size=%d",
-            server_args.disagg_p2p_hostname,
-            server_args.disagg_ib_device,
-            server_args.disagg_transfer_pool_size,
-        )
+    logger.info(
+        "  P2P: hostname=%s, ib_device=%s, pool_size=%d",
+        server_args.disagg_p2p_hostname,
+        server_args.disagg_ib_device,
+        server_args.disagg_transfer_pool_size,
+    )
 
     # Build role-specific ServerArgs
     # Use a different port for the scheduler's internal ROUTER socket to avoid

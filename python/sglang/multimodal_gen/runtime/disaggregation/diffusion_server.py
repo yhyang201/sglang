@@ -7,10 +7,9 @@ dispatch. It manages independent pools of N encoders, M denoisers, and
 K decoders, dispatching at every role transition only when the target
 instance has free buffer slots.
 
-Two transport modes:
-  - **Relay mode** (default): DS receives and relays tensor data between roles.
-  - **P2P mode** (p2p_mode=True): DS routes only metadata. Role instances
-    transfer tensors directly via RDMA/TransferEngine (RFC §4).
+Tensor transport is P2P via RDMA/TransferEngine. DiffusionServer routes
+only metadata and P2P control messages. The only exception is the decoder
+result path: decoders send final output as regular ZMQ frames.
 
 P2P message flow (encoder → denoiser):
   1. Encoder → DS: p2p_staged (data in local TransferBuffer)
@@ -59,7 +58,7 @@ from sglang.multimodal_gen.runtime.disaggregation.transport.p2p_protocol import 
     encode_p2p_msg,
     is_p2p_message,
 )
-from sglang.multimodal_gen.runtime.disaggregation.transport.relay.tensor_transport import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.tensor_codec import (
     unpack_tensors,
 )
 from sglang.multimodal_gen.runtime.utils.common import get_zmq_socket
@@ -109,11 +108,10 @@ class _P2PRequestState:
 
 @dataclass
 class _RoleTTAEntry:
-    """TTA queue entry for denoiser/decoder dispatch (relay + P2P unified)."""
+    """TTA queue entry for denoiser/decoder dispatch (P2P mode)."""
 
     request_id: str
-    frames: list | None = None  # ZMQ multipart frames (relay mode)
-    p2p_state: _P2PRequestState | None = None  # P2P transfer state (P2P mode)
+    p2p_state: _P2PRequestState | None = None  # P2P transfer state
 
 
 class DiffusionServer:
@@ -139,7 +137,7 @@ class DiffusionServer:
         encoder_capacity: int = 4,
         denoiser_capacity: int = 2,
         decoder_capacity: int = 4,
-        p2p_mode: bool = False,
+        p2p_mode: bool = True,
     ):
         """
         Args:
@@ -155,7 +153,7 @@ class DiffusionServer:
             encoder_capacity: Initial FreeBufferSlots per encoder instance.
             denoiser_capacity: Initial FreeBufferSlots per denoiser instance.
             decoder_capacity: Initial FreeBufferSlots per decoder instance.
-            p2p_mode: If True, DS routes only metadata; instances do P2P transfers.
+            p2p_mode: Kept for API compatibility (always True).
         """
         self._frontend_endpoint = frontend_endpoint
         self._encoder_work_endpoints = encoder_work_endpoints
@@ -335,7 +333,11 @@ class DiffusionServer:
     # --- Event handlers ---
 
     def _handle_role_result(self, result_pull: zmq.Socket, role: RoleType) -> None:
-        """Dispatch result message to relay or P2P handler."""
+        """Dispatch result message to P2P handler or decoder result handler.
+
+        Encoder and denoiser results are always P2P control messages.
+        Decoder results come as regular ZMQ frames (the final output).
+        """
 
         try:
             frames = result_pull.recv_multipart(zmq.NOBLOCK, copy=True)
@@ -346,13 +348,13 @@ class DiffusionServer:
             self._handle_p2p_result(frames, role)
             return
 
-        # Relay mode handlers
-        if role == RoleType.ENCODER:
-            self._handle_encoder_result_frames(frames)
-        elif role == RoleType.DENOISER:
-            self._handle_denoiser_result_frames(frames)
-        elif role == RoleType.DECODER:
+        # Only decoder sends non-P2P frames (final output back to client)
+        if role == RoleType.DECODER:
             self._handle_decoder_result_frames(frames)
+        else:
+            logger.warning(
+                "DiffusionServer: unexpected non-P2P frames from %s", role.value
+            )
 
     def _handle_client_request(self, frontend: zmq.Socket) -> None:
         """Receive client request, dispatch to encoder or enqueue in TTA."""
@@ -420,66 +422,6 @@ class DiffusionServer:
                 payload=payload,
             )
         )
-
-    def _handle_encoder_result_frames(self, frames: list) -> None:
-        """Handle encoder result frames (relay mode)."""
-        request_id = self._extract_request_id(frames)
-        if request_id is None:
-            logger.warning("DiffusionServer: encoder result missing request_id")
-            return
-
-        # Free encoder slot
-        record = self._tracker.get(request_id)
-        if record and record.encoder_instance is not None:
-            self._encoder_free_slots[record.encoder_instance] += 1
-
-        # Check for error
-        error = self._extract_error(frames)
-        if error:
-            self._complete_with_error(request_id, f"Encoder error: {error}")
-            return
-
-        # Transition state
-        try:
-            self._tracker.transition(request_id, RequestState.ENCODER_DONE)
-        except ValueError:
-            pass
-
-        # Enqueue for denoiser, then drain both
-        try:
-            self._tracker.transition(request_id, RequestState.DENOISING_WAITING)
-        except ValueError:
-            pass
-        self._denoiser_tta.append(_RoleTTAEntry(request_id=request_id, frames=frames))
-
-    def _handle_denoiser_result_frames(self, frames: list) -> None:
-        """Handle denoiser result frames (relay mode)."""
-        request_id = self._extract_request_id(frames)
-        if request_id is None:
-            logger.warning("DiffusionServer: denoiser result missing request_id")
-            return
-
-        # Free denoiser slot
-        record = self._tracker.get(request_id)
-        if record and record.denoiser_instance is not None:
-            self._denoiser_free_slots[record.denoiser_instance] += 1
-
-        error = self._extract_error(frames)
-        if error:
-            self._complete_with_error(request_id, f"Denoiser error: {error}")
-            return
-
-        try:
-            self._tracker.transition(request_id, RequestState.DENOISING_DONE)
-        except ValueError:
-            pass
-
-        # Enqueue for decoder, then drain both
-        try:
-            self._tracker.transition(request_id, RequestState.DECODER_WAITING)
-        except ValueError:
-            pass
-        self._decoder_tta.append(_RoleTTAEntry(request_id=request_id, frames=frames))
 
     def _handle_decoder_result_frames(self, frames: list) -> None:
         """Handle decoder result frames (relay mode)."""
@@ -574,52 +516,6 @@ class DiffusionServer:
             self._encoder_free_slots[encoder_idx],
         )
 
-    def _dispatch_to_denoiser(
-        self, request_id: str, frames: list, denoiser_idx: int
-    ) -> None:
-        """Dispatch encoder output to denoiser instance."""
-        self._denoiser_free_slots[denoiser_idx] -= 1
-
-        try:
-            self._tracker.transition(
-                request_id,
-                RequestState.DENOISING_RUNNING,
-                denoiser_instance=denoiser_idx,
-            )
-        except ValueError:
-            pass
-
-        self._denoiser_pushes[denoiser_idx].send_multipart(frames)
-        logger.debug(
-            "DiffusionServer: relayed %s to denoiser[%d] (free=%d)",
-            request_id,
-            denoiser_idx,
-            self._denoiser_free_slots[denoiser_idx],
-        )
-
-    def _dispatch_to_decoder(
-        self, request_id: str, frames: list, decoder_idx: int
-    ) -> None:
-        """Dispatch denoiser output to decoder instance."""
-        self._decoder_free_slots[decoder_idx] -= 1
-
-        try:
-            self._tracker.transition(
-                request_id,
-                RequestState.DECODER_RUNNING,
-                decoder_instance=decoder_idx,
-            )
-        except ValueError:
-            pass
-
-        self._decoder_pushes[decoder_idx].send_multipart(frames)
-        logger.debug(
-            "DiffusionServer: relayed %s to decoder[%d] (free=%d)",
-            request_id,
-            decoder_idx,
-            self._decoder_free_slots[decoder_idx],
-        )
-
     # --- TTA queue draining ---
 
     def _drain_all_queues(self) -> None:
@@ -648,10 +544,7 @@ class DiffusionServer:
             if idx is None:
                 break
             entry = self._denoiser_tta.popleft()
-            if entry.p2p_state is not None:
-                self._p2p_dispatch_to_denoiser(entry.request_id, entry.p2p_state, idx)
-            else:
-                self._dispatch_to_denoiser(entry.request_id, entry.frames, idx)
+            self._p2p_dispatch_to_denoiser(entry.request_id, entry.p2p_state, idx)
 
     def _drain_decoder_tta(self) -> None:
         """Try to dispatch queued decoder requests when slots become available."""
@@ -662,10 +555,7 @@ class DiffusionServer:
             if idx is None:
                 break
             entry = self._decoder_tta.popleft()
-            if entry.p2p_state is not None:
-                self._p2p_dispatch_to_decoder(entry.request_id, entry.p2p_state, idx)
-            else:
-                self._dispatch_to_decoder(entry.request_id, entry.frames, idx)
+            self._p2p_dispatch_to_decoder(entry.request_id, entry.p2p_state, idx)
 
     # --- Helpers ---
 
@@ -674,14 +564,6 @@ class DiffusionServer:
         try:
             metadata = json.loads(frames[0])
             return metadata.get("scalar_fields", {}).get("request_id")
-        except (json.JSONDecodeError, IndexError, TypeError):
-            return None
-
-    def _extract_error(self, frames: list) -> str | None:
-        """Extract error field from the JSON metadata frame."""
-        try:
-            metadata = json.loads(frames[0])
-            return metadata.get("scalar_fields", {}).get("_disagg_error")
         except (json.JSONDecodeError, IndexError, TypeError):
             return None
 

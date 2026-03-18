@@ -179,7 +179,7 @@ from sglang.multimodal_gen.runtime.launch_server import launch_pool_disagg_serve
 server_args = ServerArgs.from_kwargs(
     model_path="Wan-AI/Wan2.1-T2V-14B-Diffusers",
     denoiser_sp=4, denoiser_ulysses=2, denoiser_ring=2,
-    disagg_p2p_mode=True, disagg_ib_device="mlx5_0",
+    disagg_ib_device="mlx5_0",
 )
 
 launch_pool_disagg_server(

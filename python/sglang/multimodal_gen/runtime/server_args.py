@@ -219,7 +219,6 @@ class ServerArgs:
     disagg_timeout: int = 600  # seconds, timeout for pending disagg requests
     disagg_dispatch_policy: str = "round_robin"  # "round_robin" or "max_free_slots"
     disagg_pool_mode: bool = False  # True when running as a pool mode instance
-    disagg_p2p_mode: bool = False  # True for P2P transfer (RDMA/TransferEngine)
     disagg_transfer_pool_size: int = (
         256 * 1024 * 1024
     )  # P2P transfer buffer size (bytes)
