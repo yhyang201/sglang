@@ -258,5 +258,95 @@ class TestTransferTensorBufferBatchIO(unittest.TestCase):
         buf.free(handle)
 
 
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
+class TestTransferTensorBufferGPU(unittest.TestCase):
+    """Test GPU-backed TransferTensorBuffer (GPUDirect RDMA path)."""
+
+    def test_gpu_pool_allocation(self):
+        buf = TransferTensorBuffer(pool_size=1 << 20, role_name="test", device="cuda:0")
+        self.assertEqual(buf.device, "cuda:0")
+        self.assertTrue(buf._pool.is_cuda)
+        handle = buf.allocate(size=4096, request_id="req-1")
+        self.assertIsNotNone(handle)
+        buf.free(handle)
+
+    def test_gpu_write_read_roundtrip(self):
+        """Write a GPU tensor to GPU pool, read it back — no D2H/H2D."""
+        buf = TransferTensorBuffer(pool_size=1 << 20, role_name="test", device="cuda:0")
+        handle = buf.allocate(size=1 << 20, request_id="req-1")
+
+        src = torch.randn(4, 8, dtype=torch.float32, device="cuda:0")
+        nbytes = buf.write_tensor(handle, "test", src, byte_offset=0)
+        self.assertEqual(nbytes, 4 * 8 * 4)
+
+        dst = buf.read_tensor(
+            handle, shape=[4, 8], dtype=torch.float32, byte_offset=0, device="cuda:0"
+        )
+        self.assertTrue(dst.is_cuda)
+        self.assertTrue(torch.allclose(src, dst))
+        buf.free(handle)
+
+    def test_gpu_write_read_bfloat16(self):
+        buf = TransferTensorBuffer(pool_size=1 << 20, role_name="test", device="cuda:0")
+        handle = buf.allocate(size=1 << 20, request_id="req-1")
+
+        src = torch.randn(2, 16, dtype=torch.bfloat16, device="cuda:0")
+        buf.write_tensor(handle, "embeds", src, byte_offset=0)
+
+        dst = buf.read_tensor(
+            handle, shape=[2, 16], dtype=torch.bfloat16, byte_offset=0, device="cuda:0"
+        )
+        self.assertTrue(torch.allclose(src, dst))
+        buf.free(handle)
+
+    def test_gpu_batch_write_read_manifest(self):
+        buf = TransferTensorBuffer(pool_size=4 << 20, role_name="test", device="cuda:0")
+        handle = buf.allocate(size=1 << 20, request_id="req-1")
+
+        tensors = {
+            "prompt_embeds": torch.randn(
+                1, 16, 64, dtype=torch.bfloat16, device="cuda:0"
+            ),
+            "latents": torch.randn(1, 4, 8, 8, dtype=torch.float32, device="cuda:0"),
+        }
+
+        manifest = buf.write_tensors_from_gpu(handle, tensors)
+        result = buf.read_tensors_from_manifest(handle, manifest, device="cuda:0")
+
+        self.assertTrue(
+            torch.allclose(tensors["prompt_embeds"], result["prompt_embeds"])
+        )
+        self.assertTrue(torch.allclose(tensors["latents"], result["latents"]))
+        buf.free(handle)
+
+    def test_gpu_pool_read_to_cpu(self):
+        """Read from GPU pool to CPU (cross-device)."""
+        buf = TransferTensorBuffer(pool_size=1 << 20, role_name="test", device="cuda:0")
+        handle = buf.allocate(size=1 << 20, request_id="req-1")
+
+        src = torch.randn(4, 8, dtype=torch.float32, device="cuda:0")
+        buf.write_tensor(handle, "test", src, byte_offset=0)
+
+        dst = buf.read_tensor(
+            handle, shape=[4, 8], dtype=torch.float32, byte_offset=0, device="cpu"
+        )
+        self.assertFalse(dst.is_cuda)
+        self.assertTrue(torch.allclose(src.cpu(), dst))
+        buf.free(handle)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
+class TestTransferEngineGPUDirect(unittest.TestCase):
+    """Test supports_gpu_direct property on engine classes."""
+
+    def test_mock_engine_no_gpu_direct(self):
+        from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_engine import (
+            MockTransferEngine,
+        )
+
+        engine = MockTransferEngine()
+        self.assertFalse(engine.supports_gpu_direct)
+
+
 if __name__ == "__main__":
     unittest.main()

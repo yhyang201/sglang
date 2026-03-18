@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-TransferBuffer: CPU-side pinned-memory staging area for disaggregated diffusion.
+TransferBuffer: Memory staging area for disaggregated diffusion.
 
 Design reference: RFC §2 — TransferBuffer (Base Class)
 
 Components:
   - TransferMetaBuffer: Lightweight non-tensor request metadata store.
-  - TransferTensorBuffer: Pinned-memory pool for heavy tensor payloads,
+  - TransferTensorBuffer: Memory pool for heavy tensor payloads,
     managed by a BuddyAllocator for dynamic split/aggregate/coalesce.
+    Supports both CPU pinned memory and GPU memory (GPUDirect RDMA).
 
 Usage:
   1. Role computes output on GPU.
-  2. D2H async copy into a TransferTensorBuffer slot (non-blocking).
+  2. Copy into a TransferTensorBuffer slot (GPU→GPU or D2H, non-blocking).
   3. Metadata stored in TransferMetaBuffer.
   4. TransferManager reads from the slot for network transfer (Phase 7).
   5. On completion, slot is freed and coalesced.
@@ -88,16 +89,19 @@ class SlotHandle:
 
 
 class TransferTensorBuffer:
-    """Pinned-memory pool for staging tensor payloads between roles.
+    """Memory pool for staging tensor payloads between roles.
 
-    Wraps a contiguous block of pinned CPU memory with a BuddyAllocator
-    for dynamic slot management. Supports async D2H/H2D copies via
-    CUDA streams.
+    Wraps a contiguous block of memory (CPU pinned or GPU) with a BuddyAllocator
+    for dynamic slot management. Supports async copies via CUDA streams.
+
+    When device is a CUDA device, the pool lives on GPU and enables GPUDirect
+    RDMA — eliminating D2H/H2D copies on the transfer path.
 
     Args:
         pool_size: Total pool size in bytes.
         min_block_size: Minimum allocatable block in bytes (default 1 MiB).
         role_name: Name for logging (e.g., "encoder", "denoiser").
+        device: Pool device — "cpu" for pinned host memory, "cuda:N" for GPU.
     """
 
     def __init__(
@@ -105,24 +109,31 @@ class TransferTensorBuffer:
         pool_size: int,
         min_block_size: int = 1 << 20,
         role_name: str = "unknown",
+        device: str = "cpu",
     ):
         self._role_name = role_name
+        self._device = device
         self._allocator = BuddyAllocator(pool_size, min_block_size)
         actual_size = self._allocator.pool_size
 
-        # Allocate contiguous pinned CPU memory
-        self._pool = torch.empty(actual_size, dtype=torch.uint8, pin_memory=True)
+        # Allocate contiguous memory pool
+        if device == "cpu":
+            self._pool = torch.empty(actual_size, dtype=torch.uint8, pin_memory=True)
+        else:
+            self._pool = torch.empty(actual_size, dtype=torch.uint8, device=device)
         self._pool_ptr = self._pool.data_ptr()
 
         # Track active slots: offset -> SlotHandle
         self._slots: dict[int, SlotHandle] = {}
         self._lock = threading.Lock()
 
+        pool_location = "pinned CPU" if device == "cpu" else f"GPU ({device})"
         logger.info(
-            "TransferTensorBuffer[%s]: allocated %d MiB pinned memory "
+            "TransferTensorBuffer[%s]: allocated %d MiB %s memory "
             "(min_block=%d KiB)",
             role_name,
             actual_size >> 20,
+            pool_location,
             min_block_size >> 10,
         )
 
@@ -131,8 +142,13 @@ class TransferTensorBuffer:
         return self._allocator.pool_size
 
     @property
+    def device(self) -> str:
+        """Device where the pool resides ("cpu" or "cuda:N")."""
+        return self._device
+
+    @property
     def pool_data_ptr(self) -> int:
-        """Base address of the pinned pool. Used for RDMA registration (Phase 7)."""
+        """Base address of the pool. Used for RDMA registration."""
         return self._pool_ptr
 
     def allocate(self, size: int, request_id: str) -> SlotHandle | None:
@@ -200,20 +216,23 @@ class TransferTensorBuffer:
         byte_offset: int = 0,
         stream: torch.cuda.Stream | None = None,
     ) -> int:
-        """Copy a GPU tensor into the slot's pinned buffer (D2H).
+        """Copy a tensor into the pool slot.
+
+        Works for any combination: GPU→GPU (GPUDirect), GPU→CPU (D2H),
+        CPU→CPU. Uses raw byte copy via copy_() which is device-agnostic.
 
         Args:
             handle: Target slot.
             name: Field name for this tensor.
-            tensor: GPU tensor to copy.
+            tensor: Tensor to copy.
             byte_offset: Offset within the slot to write at.
             stream: CUDA stream for async copy (None = default stream).
 
         Returns:
             Number of bytes written.
         """
-        cpu_tensor = tensor.contiguous()
-        nbytes = cpu_tensor.numel() * cpu_tensor.element_size()
+        src_tensor = tensor.contiguous()
+        nbytes = src_tensor.numel() * src_tensor.element_size()
 
         if byte_offset + nbytes > handle.size:
             raise ValueError(
@@ -221,19 +240,17 @@ class TransferTensorBuffer:
                 f"slot_size={handle.size}"
             )
 
-        # Create a typed view into the pinned pool at the correct offset
-        dst = torch.frombuffer(
-            self._pool[
-                handle.offset + byte_offset : handle.offset + byte_offset + nbytes
-            ].numpy(),
-            dtype=cpu_tensor.dtype,
-        ).reshape(cpu_tensor.shape)
+        # Raw byte views — works on both CPU and GPU tensors
+        dst = self._pool[
+            handle.offset + byte_offset : handle.offset + byte_offset + nbytes
+        ]
+        src_bytes = src_tensor.view(torch.uint8).reshape(-1)
 
         if stream is not None:
             with torch.cuda.stream(stream):
-                dst.copy_(cpu_tensor, non_blocking=True)
+                dst.copy_(src_bytes, non_blocking=True)
         else:
-            dst.copy_(cpu_tensor, non_blocking=True)
+            dst.copy_(src_bytes, non_blocking=True)
 
         return nbytes
 
@@ -246,7 +263,11 @@ class TransferTensorBuffer:
         device: torch.device | str = "cpu",
         stream: torch.cuda.Stream | None = None,
     ) -> torch.Tensor:
-        """Read a tensor from the slot's pinned buffer (H2D or CPU read).
+        """Read a tensor from the pool slot.
+
+        Works for any pool device. When the pool and target are on the same
+        device, returns a clone (to decouple from pool slot lifetime).
+        Cross-device reads use .to().
 
         Args:
             handle: Source slot.
@@ -264,21 +285,40 @@ class TransferTensorBuffer:
             nbytes *= s
         nbytes *= torch.tensor([], dtype=dtype).element_size()
 
-        src = torch.frombuffer(
-            self._pool[
-                handle.offset + byte_offset : handle.offset + byte_offset + nbytes
-            ].numpy(),
-            dtype=dtype,
-        ).reshape(shape)
+        # Raw byte slice, then reinterpret as target dtype/shape
+        raw = self._pool[
+            handle.offset + byte_offset : handle.offset + byte_offset + nbytes
+        ]
+        src = raw.view(dtype).reshape(shape)
 
-        if device == "cpu" or device == torch.device("cpu"):
+        # Determine if we need a cross-device transfer or a same-device clone
+        pool_dev = str(self._pool.device)
+        target_dev = (
+            str(device) if not isinstance(device, torch.device) else str(device)
+        )
+
+        same_device = (
+            pool_dev == target_dev
+            or (pool_dev == "cpu" and target_dev == "cpu")
+            or (
+                pool_dev.startswith("cuda")
+                and target_dev.startswith("cuda")
+                and pool_dev == target_dev
+            )
+        )
+
+        if same_device:
+            # Clone to decouple tensor lifetime from pool slot
+            if stream is not None:
+                with torch.cuda.stream(stream):
+                    return src.clone()
             return src.clone()
 
+        # Cross-device transfer
         if stream is not None:
             with torch.cuda.stream(stream):
                 return src.to(device, non_blocking=True)
-        else:
-            return src.to(device, non_blocking=True)
+        return src.to(device, non_blocking=True)
 
     def write_tensors_from_gpu(
         self,

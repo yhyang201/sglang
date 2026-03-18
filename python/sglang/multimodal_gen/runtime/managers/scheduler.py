@@ -539,9 +539,6 @@ class Scheduler:
         # Pool size: configurable, default 256 MiB
         pool_size = getattr(sa, "disagg_transfer_pool_size", 256 * 1024 * 1024)
 
-        # Create pinned memory buffer
-        buffer = TransferTensorBuffer(pool_size=pool_size)
-
         # Create transfer engine
         hostname = getattr(sa, "disagg_p2p_hostname", "127.0.0.1")
         ib_device = getattr(sa, "disagg_ib_device", None)
@@ -549,6 +546,12 @@ class Scheduler:
             hostname=hostname,
             gpu_id=self.gpu_id,
             ib_device=ib_device,
+        )
+
+        # Use GPU buffer when engine supports GPUDirect RDMA, CPU pinned otherwise
+        device = f"cuda:{self.gpu_id}" if engine.supports_gpu_direct else "cpu"
+        buffer = TransferTensorBuffer(
+            pool_size=pool_size, device=device, role_name=self._disagg_role.value
         )
 
         # Create transfer manager

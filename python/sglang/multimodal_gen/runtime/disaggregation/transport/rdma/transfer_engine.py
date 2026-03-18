@@ -41,6 +41,11 @@ class BaseTransferEngine(ABC):
     """Abstract transfer engine for P2P data movement."""
 
     @property
+    def supports_gpu_direct(self) -> bool:
+        """Whether this engine supports GPUDirect RDMA (GPU memory addresses)."""
+        return False
+
+    @property
     @abstractmethod
     def session_id(self) -> str:
         """Unique session identifier for this engine instance."""
@@ -75,6 +80,10 @@ class BaseTransferEngine(ABC):
 
 class MooncakeDiffusionEngine(BaseTransferEngine):
     """Production transfer engine backed by MooncakeTransferEngine (RDMA/RPC)."""
+
+    @property
+    def supports_gpu_direct(self) -> bool:
+        return True
 
     def __init__(
         self,
