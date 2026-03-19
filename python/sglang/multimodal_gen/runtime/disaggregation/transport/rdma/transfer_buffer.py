@@ -1,27 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-TransferBuffer: Memory staging area for disaggregated diffusion.
+TransferTensorBuffer: Memory staging area for disaggregated diffusion.
 
-Design reference: RFC §2 — TransferBuffer (Base Class)
-
-Components:
-  - TransferMetaBuffer: Lightweight non-tensor request metadata store.
-  - TransferTensorBuffer: Memory pool for heavy tensor payloads,
-    managed by a BuddyAllocator for dynamic split/aggregate/coalesce.
-    Supports both CPU pinned memory and GPU memory (GPUDirect RDMA).
+Memory pool for heavy tensor payloads, managed by a BuddyAllocator
+for dynamic split/aggregate/coalesce. Supports both CPU pinned memory
+and GPU memory (GPUDirect RDMA).
 
 Usage:
   1. Role computes output on GPU.
   2. Copy into a TransferTensorBuffer slot (GPU→GPU or D2H, non-blocking).
-  3. Metadata stored in TransferMetaBuffer.
-  4. TransferManager reads from the slot for network transfer (Phase 7).
+  3. Scalar metadata sent via P2P control messages (ZMQ JSON).
+  4. TransferManager reads from the slot for RDMA transfer.
   5. On completion, slot is freed and coalesced.
 """
 
 from __future__ import annotations
 
 import logging
-import threading
 from dataclasses import dataclass, field
 
 import torch
@@ -34,42 +29,6 @@ from sglang.multimodal_gen.runtime.disaggregation.transport.tensor_codec import 
 )
 
 logger = logging.getLogger(__name__)
-
-
-class TransferMetaBuffer:
-    """Lightweight store for non-tensor request metadata.
-
-    Thread-safe dict-based storage keyed by request_id.
-    Stores scalar fields (prompt, config, timesteps, etc.) that are
-    too small to warrant pinned-memory management.
-    """
-
-    def __init__(self):
-        self._store: dict[str, dict] = {}
-        self._lock = threading.Lock()
-
-    def put(self, request_id: str, metadata: dict) -> None:
-        """Store metadata for a request."""
-        with self._lock:
-            self._store[request_id] = metadata
-
-    def get(self, request_id: str) -> dict | None:
-        """Retrieve metadata for a request."""
-        with self._lock:
-            return self._store.get(request_id)
-
-    def remove(self, request_id: str) -> dict | None:
-        """Remove and return metadata for a request."""
-        with self._lock:
-            return self._store.pop(request_id, None)
-
-    def count(self) -> int:
-        with self._lock:
-            return len(self._store)
-
-    def clear(self) -> None:
-        with self._lock:
-            self._store.clear()
 
 
 @dataclass
@@ -123,10 +82,6 @@ class TransferTensorBuffer:
             self._pool = torch.empty(actual_size, dtype=torch.uint8, device=device)
         self._pool_ptr = self._pool.data_ptr()
 
-        # Track active slots: offset -> SlotHandle
-        self._slots: dict[int, SlotHandle] = {}
-        self._lock = threading.Lock()
-
         pool_location = "pinned CPU" if device == "cpu" else f"GPU ({device})"
         logger.info(
             "TransferTensorBuffer[%s]: allocated %d MiB %s memory "
@@ -179,10 +134,6 @@ class TransferTensorBuffer:
             offset=offset,
             size=block.size if block else size,
         )
-
-        with self._lock:
-            self._slots[offset] = handle
-
         return handle
 
     def free(self, handle: SlotHandle) -> bool:
@@ -194,19 +145,7 @@ class TransferTensorBuffer:
         Returns:
             True if freed successfully.
         """
-        ok = self._allocator.free(handle.offset)
-        if ok:
-            with self._lock:
-                self._slots.pop(handle.offset, None)
-        return ok
-
-    def get_slot_tensor(self, handle: SlotHandle) -> torch.Tensor:
-        """Get a raw byte view into the pinned pool for this slot.
-
-        The returned tensor shares memory with the pinned pool.
-        Use for D2H/H2D async copies.
-        """
-        return self._pool[handle.offset : handle.offset + handle.size]
+        return self._allocator.free(handle.offset)
 
     def write_tensor(
         self,
@@ -445,7 +384,5 @@ class TransferTensorBuffer:
     def get_stats(self) -> dict:
         """Return buffer statistics."""
         alloc_stats = self._allocator.get_stats()
-        with self._lock:
-            alloc_stats["active_slots"] = len(self._slots)
-            alloc_stats["role"] = self._role_name
+        alloc_stats["role"] = self._role_name
         return alloc_stats

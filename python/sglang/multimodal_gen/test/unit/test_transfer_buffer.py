@@ -1,60 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for TransferMetaBuffer and TransferTensorBuffer."""
+"""Unit tests for TransferTensorBuffer."""
 
 import unittest
 
 import torch
 
 from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_buffer import (
-    TransferMetaBuffer,
     TransferTensorBuffer,
 )
-
-
-class TestTransferMetaBuffer(unittest.TestCase):
-    """Test metadata buffer operations."""
-
-    def test_put_get(self):
-        buf = TransferMetaBuffer()
-        buf.put("req-1", {"prompt": "hello", "height": 256})
-        meta = buf.get("req-1")
-        self.assertEqual(meta["prompt"], "hello")
-
-    def test_get_missing(self):
-        buf = TransferMetaBuffer()
-        self.assertIsNone(buf.get("nonexistent"))
-
-    def test_remove(self):
-        buf = TransferMetaBuffer()
-        buf.put("req-1", {"a": 1})
-        removed = buf.remove("req-1")
-        self.assertEqual(removed["a"], 1)
-        self.assertIsNone(buf.get("req-1"))
-        self.assertEqual(buf.count(), 0)
-
-    def test_remove_missing(self):
-        buf = TransferMetaBuffer()
-        self.assertIsNone(buf.remove("nonexistent"))
-
-    def test_count(self):
-        buf = TransferMetaBuffer()
-        buf.put("r1", {})
-        buf.put("r2", {})
-        self.assertEqual(buf.count(), 2)
-
-    def test_clear(self):
-        buf = TransferMetaBuffer()
-        buf.put("r1", {})
-        buf.put("r2", {})
-        buf.clear()
-        self.assertEqual(buf.count(), 0)
-
-    def test_overwrite(self):
-        buf = TransferMetaBuffer()
-        buf.put("r1", {"v": 1})
-        buf.put("r1", {"v": 2})
-        self.assertEqual(buf.get("r1")["v"], 2)
-        self.assertEqual(buf.count(), 1)
 
 
 class TestTransferTensorBuffer(unittest.TestCase):
@@ -80,14 +33,6 @@ class TestTransferTensorBuffer(unittest.TestCase):
         h3 = buf.allocate(size=1 << 20, request_id="req-3")
         self.assertIsNotNone(h3)
 
-    def test_get_slot_tensor(self):
-        buf = TransferTensorBuffer(pool_size=1 << 20, role_name="test")
-        handle = buf.allocate(size=4096, request_id="req-1")
-        slot_view = buf.get_slot_tensor(handle)
-        self.assertEqual(slot_view.dtype, torch.uint8)
-        self.assertGreaterEqual(len(slot_view), 4096)
-        buf.free(handle)
-
     def test_pool_is_pinned(self):
         buf = TransferTensorBuffer(pool_size=1 << 20, role_name="test")
         self.assertTrue(buf._pool.is_pinned())
@@ -110,7 +55,6 @@ class TestTransferTensorBuffer(unittest.TestCase):
         buf = TransferTensorBuffer(pool_size=1 << 20, role_name="encoder")
         stats = buf.get_stats()
         self.assertEqual(stats["role"], "encoder")
-        self.assertEqual(stats["active_slots"], 0)
         self.assertGreater(stats["pool_size"], 0)
 
 

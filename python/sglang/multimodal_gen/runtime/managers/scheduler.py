@@ -29,6 +29,15 @@ from sglang.multimodal_gen.runtime.disaggregation.transport.p2p_protocol import 
     encode_p2p_msg,
     is_p2p_message,
 )
+from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_buffer import (
+    TransferTensorBuffer,
+)
+from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_engine import (
+    create_transfer_engine,
+)
+from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_manager import (
+    DiffusionTransferManager,
+)
 from sglang.multimodal_gen.runtime.disaggregation.transport.role_connector import (
     DENOISER_TO_DECODER_SCALAR_FIELDS,
     DENOISER_TO_DECODER_TENSOR_FIELDS,
@@ -426,38 +435,20 @@ class Scheduler:
         sa = self.server_args
 
         # PULL: receive work from DiffusionServer
-        # Port must match what DiffusionServer connects to, so we retry the
-        # same port (with sleep) rather than incrementing to a new one.
-        import time as _time
-
-        last_exc = None
-        for _attempt in range(5):
-            try:
-                self._pool_work_pull, _ = get_zmq_socket(
-                    self.context,
-                    zmq.PULL,
-                    sa.pool_work_endpoint,
-                    bind=True,
-                    max_bind_retries=1,
-                )
-                last_exc = None
-                break
-            except Exception as e:
-                last_exc = e
-                logger.warning(
-                    "Pool work bind attempt %d failed (%s), retrying in 1s...",
-                    _attempt + 1,
-                    e,
-                )
-                _time.sleep(1)
-        if last_exc is not None:
-            raise last_exc
+        self._pool_work_pull, _ = get_zmq_socket(
+            self.context,
+            zmq.PULL,
+            sa.pool_work_endpoint,
+            bind=True,
+            max_bind_retries=5,
+            same_port=True,
+        )
         # PUSH: send results to DiffusionServer
         self._pool_result_push, _ = get_zmq_socket(
             self.context, zmq.PUSH, sa.pool_result_endpoint, bind=False
         )
         logger.info(
-            "Pool mode %s rank 0: work_pull=%s, result_push=%s",
+            "Disagg %s rank 0: work_pull=%s, result_push=%s",
             self._disagg_role.value.upper(),
             sa.pool_work_endpoint,
             sa.pool_result_endpoint,
@@ -472,15 +463,6 @@ class Scheduler:
         """
         if self.gpu_id != 0:
             return
-        from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_buffer import (
-            TransferTensorBuffer,
-        )
-        from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_engine import (
-            create_transfer_engine,
-        )
-        from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_manager import (
-            DiffusionTransferManager,
-        )
 
         sa = self.server_args
 
