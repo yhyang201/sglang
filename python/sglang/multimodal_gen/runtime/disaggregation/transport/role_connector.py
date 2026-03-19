@@ -2,12 +2,14 @@
 """
 Role connectors for disaggregated diffusion pipelines (pool mode).
 
-Field definitions and helpers for extracting/applying Req fields between
-pipeline roles:
-  Encoder -> Denoiser: text embeddings, latents, timesteps, metadata
-  Denoiser -> Decoder: denoised latents, metadata
+Automatic field extraction for transferring Req state between pipeline roles.
+Instead of maintaining per-transition field whitelists, we transfer all
+non-None fields except a small stable exclude set of non-serializable or
+internal-only fields. This ensures new model fields are automatically
+covered without manual updates.
 """
 
+import dataclasses
 import logging
 
 import torch
@@ -15,34 +17,45 @@ import torch
 logger = logging.getLogger(__name__)
 
 
-# --- Field definitions for each role transition ---
+# Fields that should never be transferred between roles.
+# Reasons: non-serializable, internal-only, or receiver rebuilds them locally.
+_EXCLUDE_FIELDS = frozenset(
+    {
+        # Non-serializable / receiver rebuilds locally
+        "sampling_params",  # scalar fields extracted separately
+        "generator",  # rebuilt from seed on receiver
+        "modules",  # pipeline-internal references
+        "metrics",  # receiver creates its own
+        "extra_step_kwargs",  # scheduler-internal state
+        "extra",  # pipeline-internal intermediate state
+        # Raw image inputs (already consumed by encoder, not needed downstream)
+        "condition_image",  # PIL.Image
+        "vae_image",  # PIL.Image
+        "pixel_values",  # PIL.Image or preprocessed
+        "preprocessed_image",  # encoder-internal intermediate
+        "image_embeds",  # encoder-internal; downstream gets prompt_embeds
+        "original_condition_image_size",
+        "vae_image_sizes",
+        # Final outputs (only produced by decoder, never transferred)
+        "output",
+        "audio",
+        "audio_sample_rate",
+        # Trajectory tracking (intermediate debug state)
+        "trajectory_timesteps",
+        "trajectory_latents",
+        "trajectory_audio_latents",
+        # Denoising loop internal state (not needed across roles)
+        "timestep",  # current single timestep (loop variable)
+        "step_index",  # current step index (loop variable)
+        "prompt_template",
+        "max_sequence_length",
+    }
+)
 
-# Tensor fields produced by Encoder stages, consumed by Denoiser
-ENCODER_TO_DENOISER_TENSOR_FIELDS = [
-    "prompt_embeds",
-    "negative_prompt_embeds",
-    "pooled_embeds",
-    "neg_pooled_embeds",
-    "prompt_attention_mask",
-    "negative_attention_mask",
-    "clip_embedding_pos",
-    "clip_embedding_neg",
-    "latents",
-    "timesteps",
-    "y",
-    "image_latent",
-    "latent_ids",
-    # Audio (LTX-2)
-    "audio_prompt_embeds",
-    "negative_audio_prompt_embeds",
-    "audio_latents",
-    "audio_noise",
-]
-
-# Scalar fields from Encoder that Denoiser needs
-ENCODER_TO_DENOISER_SCALAR_FIELDS = [
+# SamplingParams fields to include in scalar extraction.
+# These are commonly needed by downstream roles.
+_SAMPLING_PARAMS_FIELDS = [
     "request_id",
-    "do_classifier_free_guidance",
     "guidance_scale",
     "guidance_scale_2",
     "height",
@@ -50,93 +63,86 @@ ENCODER_TO_DENOISER_SCALAR_FIELDS = [
     "num_frames",
     "fps",
     "num_inference_steps",
-    "eta",
-    "sigmas",
-    "n_tokens",
-    "height_latents",
-    "width_latents",
-    "raw_latent_shape",
-    "raw_audio_latent_shape",
     "seed",
-    "seeds",
-    "is_warmup",
-    "is_prompt_processed",
-    "generate_audio",
-    "output_file_ext",
-    # STA/VSA
-    "STA_param",
-    "is_cfg_negative",
-    "mask_search_final_result_pos",
-    "mask_search_final_result_neg",
-    "VSA_sparsity",
-]
-
-# Tensor fields produced by Denoiser, consumed by Decoder
-DENOISER_TO_DECODER_TENSOR_FIELDS = [
-    "latents",
-    "audio_latents",
-    "noise_pred",
-]
-
-# Scalar fields from Denoiser that Decoder needs
-DENOISER_TO_DECODER_SCALAR_FIELDS = [
-    "request_id",
-    "height",
-    "width",
-    "num_frames",
-    "raw_latent_shape",
-    "raw_audio_latent_shape",
-    "is_warmup",
-    "output_file_ext",
-    "generate_audio",
-    # Error propagation: set by denoiser when forward() fails
-    "_disagg_error",
 ]
 
 
-def _extract_tensor_fields(req, field_names: list[str]) -> dict:
-    """Extract tensor fields from a Req object."""
-    result = {}
-    for name in field_names:
-        value = getattr(req, name, None)
-        if value is not None:
-            result[name] = value
-    return result
+def _is_tensor_like(value) -> bool:
+    """Check if a value is a tensor or a non-empty list of tensors."""
+    if isinstance(value, torch.Tensor):
+        return True
+    if isinstance(value, list) and value and isinstance(value[0], torch.Tensor):
+        return True
+    return False
 
 
-def _extract_scalar_fields(req, field_names: list[str]) -> dict:
-    """Extract scalar fields from a Req, converting to JSON-serializable types."""
-    result = {}
-    for name in field_names:
-        value = getattr(req, name, None)
+def _to_json_serializable(value):
+    """Convert a value to a JSON-serializable form."""
+    if isinstance(value, torch.Tensor):
+        return value.tolist()
+    if isinstance(value, (list, tuple)):
+        converted = []
+        for item in value:
+            if isinstance(item, torch.Tensor):
+                converted.append(item.tolist())
+            else:
+                converted.append(item)
+        return converted
+    return value
+
+
+def _is_default(value, field_info) -> bool:
+    """Check if a value equals the dataclass field's default."""
+    if field_info.default is not dataclasses.MISSING:
+        return value == field_info.default
+    if field_info.default_factory is not dataclasses.MISSING:
+        # For mutable defaults (list, dict), check emptiness
+        if isinstance(value, (list, dict)) and len(value) == 0:
+            return True
+    return False
+
+
+def extract_transfer_fields(req) -> tuple[dict, dict]:
+    """Extract all transferable fields from a Req, split into tensors and scalars.
+
+    Automatically discovers fields by scanning the Req dataclass.
+    Skips None values, default (empty) values, and excluded fields.
+
+    Returns:
+        (tensor_fields, scalar_fields) where tensor_fields contains
+        torch.Tensor or list[torch.Tensor] values, and scalar_fields
+        contains JSON-serializable values.
+    """
+    tensor_fields = {}
+    scalar_fields = {}
+
+    for f in dataclasses.fields(req):
+        if f.name in _EXCLUDE_FIELDS:
+            continue
+
+        value = getattr(req, f.name, None)
         if value is None:
             continue
-        # Convert torch-specific types to JSON-serializable
-        if isinstance(value, torch.Tensor):
-            # Some "scalar" fields may actually be small tensors (e.g., raw_latent_shape)
-            result[name] = value.tolist()
-        elif isinstance(value, (list, tuple)):
-            # Convert any tensor items in lists
-            converted = []
-            for item in value:
-                if isinstance(item, torch.Tensor):
-                    converted.append(item.tolist())
-                else:
-                    converted.append(item)
-            result[name] = converted
+        if _is_default(value, f):
+            continue
+
+        if _is_tensor_like(value):
+            tensor_fields[f.name] = value
         else:
-            result[name] = value
-    return result
+            try:
+                scalar_fields[f.name] = _to_json_serializable(value)
+            except (TypeError, ValueError):
+                # Skip non-serializable values silently
+                pass
 
+    # Also extract key fields from sampling_params
+    sp = getattr(req, "sampling_params", None)
+    if sp is not None:
+        for name in _SAMPLING_PARAMS_FIELDS:
+            if name in scalar_fields:
+                continue  # already extracted from Req directly
+            value = getattr(sp, name, None)
+            if value is not None:
+                scalar_fields[name] = _to_json_serializable(value)
 
-def _apply_scalar_fields(req, scalar_fields: dict, field_names: list[str]):
-    """Apply scalar fields to a Req object."""
-    for name in field_names:
-        if name in scalar_fields:
-            setattr(req, name, scalar_fields[name])
-
-
-def _apply_tensor_fields(req, tensor_fields: dict) -> None:
-    """Apply tensor fields to a Req object."""
-    for name, value in tensor_fields.items():
-        setattr(req, name, value)
+    return tensor_fields, scalar_fields

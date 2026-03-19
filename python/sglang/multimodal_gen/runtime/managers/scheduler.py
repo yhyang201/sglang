@@ -28,12 +28,7 @@ from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_manage
     DiffusionTransferManager,
 )
 from sglang.multimodal_gen.runtime.disaggregation.transport.role_connector import (
-    DENOISER_TO_DECODER_SCALAR_FIELDS,
-    DENOISER_TO_DECODER_TENSOR_FIELDS,
-    ENCODER_TO_DENOISER_SCALAR_FIELDS,
-    ENCODER_TO_DENOISER_TENSOR_FIELDS,
-    _extract_scalar_fields,
-    _extract_tensor_fields,
+    extract_transfer_fields,
 )
 from sglang.multimodal_gen.runtime.disaggregation.transport.tensor_codec import (
     send_tensors,
@@ -935,10 +930,6 @@ class Scheduler:
                 elif self._disagg_role == RoleType.ENCODER:
                     self._disagg_encoder_step(
                         send_tensors,
-                        _extract_tensor_fields,
-                        _extract_scalar_fields,
-                        ENCODER_TO_DENOISER_TENSOR_FIELDS,
-                        ENCODER_TO_DENOISER_SCALAR_FIELDS,
                         frames=frames,
                     )
 
@@ -1259,12 +1250,7 @@ class Scheduler:
             return
 
         # Stage denoiser output for decoder transfer (Phase 3b: async D2H)
-        tensor_fields = _extract_tensor_fields(
-            result, DENOISER_TO_DECODER_TENSOR_FIELDS
-        )
-        scalar_fields = _extract_scalar_fields(
-            result, DENOISER_TO_DECODER_SCALAR_FIELDS
-        )
+        tensor_fields, scalar_fields = extract_transfer_fields(result)
 
         # 1. Start D2H on transfer_stream (non-blocking CPU return)
         staged, d2h_event = self._transfer_manager.stage_tensors_async(
@@ -1373,10 +1359,6 @@ class Scheduler:
     def _disagg_encoder_step(
         self,
         send_tensors_fn,
-        extract_tensor,
-        extract_scalar,
-        tensor_field_names,
-        scalar_field_names,
         frames=None,
     ):
         """Single encoder step in pool mode."""
@@ -1411,8 +1393,7 @@ class Scheduler:
             return
 
         # Pack and send encoder output (rank 0 only sends)
-        tensor_fields = extract_tensor(req_result, tensor_field_names)
-        scalar_fields = extract_scalar(req_result, scalar_field_names)
+        tensor_fields, scalar_fields = extract_transfer_fields(req_result)
 
         if self._pool_result_push is not None:
             if self._transfer_manager is not None:

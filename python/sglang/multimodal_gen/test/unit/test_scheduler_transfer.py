@@ -510,16 +510,10 @@ class TestMultiRankGating(unittest.TestCase):
         frames, req = self._make_encoder_frames()
         scheduler.worker.execute_forward.return_value = req
 
-        extract_tensor = MagicMock(return_value={"enc_hidden": torch.zeros(1)})
-        extract_scalar = MagicMock(return_value={"request_id": "test-1"})
         send_fn = MagicMock()
 
         scheduler._disagg_encoder_step(
             send_fn,
-            extract_tensor,
-            extract_scalar,
-            ["enc_hidden"],
-            ["request_id"],
             frames=frames,
         )
 
