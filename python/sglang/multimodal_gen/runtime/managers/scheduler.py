@@ -550,14 +550,9 @@ class Scheduler:
             )
 
         # Phase 8b: Recv prefetch thread for receiver roles (denoiser/decoder)
-        # Only for single-rank P2P mode (multi-rank requires NCCL broadcast)
-        is_single_rank = (
-            sa.sp_degree == 1 and sa.tp_size <= 1 and not sa.enable_cfg_parallel
-        )
-        if (
-            self._disagg_role in (RoleType.DENOISER, RoleType.DECODER)
-            and is_single_rank
-        ):
+        # Rank 0 only (bg thread does ZMQ recv + H2D; multi-rank gets
+        # scalar fields via broadcast_pyobj from the main thread).
+        if self._disagg_role in (RoleType.DENOISER, RoleType.DECODER):
             self._compute_ready_queue = queue.Queue(maxsize=4)
             self._recv_prefetch_thread = threading.Thread(
                 target=self._recv_prefetch_loop,
@@ -694,7 +689,41 @@ class Scheduler:
                 device = torch.device(local_device)
                 scheduler_mod.set_timesteps(num_steps, device=device)
 
-        return (req, load_event, request_id, role_name, prealloc_slot_id)
+        return (req, load_event, request_id, role_name, prealloc_slot_id, scalar_fields)
+
+    def _broadcast_to_all_ranks(self, data):
+        """Broadcast *data* from rank 0 to all other ranks.
+
+        Rank 0 passes the real payload; non-rank-0 passes ``None``.
+        Broadcasts through all applicable groups (SP, CFG, TP).
+        """
+        sa = self.server_args
+
+        if sa.sp_degree != 1:
+            data = broadcast_pyobj(
+                data,
+                self.worker.sp_group.rank,
+                self.worker.sp_cpu_group,
+                src=self.worker.sp_group.ranks[0],
+            )
+
+        if sa.enable_cfg_parallel:
+            data = broadcast_pyobj(
+                data,
+                self.worker.cfg_group.rank,
+                self.worker.cfg_cpu_group,
+                src=self.worker.cfg_group.ranks[0],
+            )
+
+        if sa.tp_size > 1:
+            data = broadcast_pyobj(
+                data,
+                self.worker.tp_group.rank,
+                self.worker.tp_cpu_group,
+                src=self.worker.tp_group.ranks[0],
+            )
+
+        return data
 
     def _disagg_recv_work(self) -> list[bytes] | None:
         """Receive work frames in pool mode, with multi-rank broadcast.
@@ -704,62 +733,46 @@ class Scheduler:
 
         Returns list of bytes frames, or None on shutdown.
         """
-        is_rank0 = self.gpu_id == 0
-        sa = self.server_args
-
-        if is_rank0:
-            # Rank 0: receive from DiffusionServer
+        if self.gpu_id == 0:
             raw_frames = self._pool_work_pull.recv_multipart()
-            # Convert zmq.Frame to bytes for pickling
             frames = [bytes(f) for f in raw_frames]
         else:
             frames = None
 
-        # Broadcast to all ranks if multi-GPU
-        if sa.sp_degree != 1:
-            frames = broadcast_pyobj(
-                frames,
-                self.worker.sp_group.rank,
-                self.worker.sp_cpu_group,
-                src=self.worker.sp_group.ranks[0],
-            )
-
-        if sa.enable_cfg_parallel:
-            frames = broadcast_pyobj(
-                frames,
-                self.worker.cfg_group.rank,
-                self.worker.cfg_cpu_group,
-                src=self.worker.cfg_group.ranks[0],
-            )
-
-        if sa.tp_size > 1:
-            frames = broadcast_pyobj(
-                frames,
-                self.worker.tp_group.rank,
-                self.worker.tp_cpu_group,
-                src=self.worker.tp_group.ranks[0],
-            )
-
-        return frames
+        return self._broadcast_to_all_ranks(frames)
 
     def _disagg_prefetch_event_loop(self, role_name: str) -> None:
-        """Event loop for P2P receiver roles with recv prefetch thread.
+        """Event loop for P2P receiver roles with recv prefetch thread (rank 0).
 
         Phase 8b: The recv thread reads from ZMQ and does H2D prep.
         This loop reads from _compute_ready_queue:
-          - "p2p_compute": H2D already done, just wait_event + compute
+          - "p2p_compute": H2D already done, wait_event + free slot
+              → broadcast scalar_fields to non-rank-0 → compute
           - "p2p_control": alloc/push messages, handle on main thread
+              → broadcast "skip" so non-rank-0 doesn't hang
+          - queue timeout: broadcast "skip"
+          - shutdown: broadcast None
         """
+        is_multi_rank = (
+            self.server_args.sp_degree != 1
+            or self.server_args.tp_size > 1
+            or self.server_args.enable_cfg_parallel
+        )
+
         while self._running:
             try:
                 try:
                     msg_type, data = self._compute_ready_queue.get(timeout=1.0)
                 except queue.Empty:
+                    if is_multi_rank:
+                        self._broadcast_to_all_ranks(("skip",))
                     continue
 
                 if msg_type == "p2p_compute":
                     # H2D already done by recv thread
-                    req, load_event, request_id, rn, prealloc_slot_id = data
+                    req, load_event, request_id, rn, prealloc_slot_id, scalar_fields = (
+                        data
+                    )
                     # Wait for H2D to complete on compute stream
                     if load_event is not None:
                         torch.cuda.current_stream().wait_event(load_event)
@@ -771,6 +784,9 @@ class Scheduler:
                             )
                     else:
                         self._transfer_manager.free_receive_slot(request_id)
+                    # Broadcast scalar fields to non-rank-0
+                    if is_multi_rank:
+                        self._broadcast_to_all_ranks(("compute", scalar_fields))
                     # Run compute
                     if self._disagg_role == RoleType.DENOISER:
                         self._p2p_denoiser_compute(req, request_id, rn)
@@ -778,7 +794,9 @@ class Scheduler:
                         self._p2p_decoder_compute(req, request_id, rn)
 
                 elif msg_type == "p2p_control":
-                    # alloc, push messages — handle on main thread
+                    # alloc, push messages — handle on main thread (rank 0 only)
+                    if is_multi_rank:
+                        self._broadcast_to_all_ranks(("skip",))
                     self._handle_p2p_message(data)
 
                 self._consecutive_error_count = 0
@@ -787,6 +805,56 @@ class Scheduler:
                 self._consecutive_error_count += 1
                 logger.error(
                     "Pool %s rank %d prefetch loop: error (attempt %d/%d): %s",
+                    role_name,
+                    self.gpu_id,
+                    self._consecutive_error_count,
+                    self._max_consecutive_errors,
+                    e,
+                    exc_info=True,
+                )
+                if self._consecutive_error_count >= self._max_consecutive_errors:
+                    raise RuntimeError(
+                        f"Pool {role_name} rank {self.gpu_id} terminated after "
+                        f"{self._max_consecutive_errors} consecutive errors: {e}"
+                    ) from e
+
+        # Shutdown: notify non-rank-0 to exit
+        if is_multi_rank:
+            self._broadcast_to_all_ranks(None)
+        self._cleanup_disagg()
+
+    def _disagg_prefetch_non_rank0_loop(self) -> None:
+        """Event loop for non-rank-0 receivers in multi-rank prefetch mode.
+
+        Blocks on broadcast from rank 0:
+          - ("compute", scalar_fields): build minimal Req → execute_forward
+          - ("skip",): continue (rank 0 handled a control msg or timed out)
+          - None: shutdown, exit loop
+        """
+        role_name = self._disagg_role.value.upper()
+        logger.info(
+            "Pool %s rank %d: entering non-rank-0 prefetch loop",
+            role_name,
+            self.gpu_id,
+        )
+
+        while True:
+            try:
+                msg = self._broadcast_to_all_ranks(None)
+
+                if msg is None:
+                    # Shutdown signal
+                    break
+
+                if isinstance(msg, tuple) and len(msg) >= 2 and msg[0] == "compute":
+                    scalar_fields = msg[1]
+                    self._compute_non_rank0(scalar_fields)
+                # else: ("skip",) — continue
+
+            except Exception as e:
+                self._consecutive_error_count += 1
+                logger.error(
+                    "Pool %s rank %d non-rank-0 loop: error (attempt %d/%d): %s",
                     role_name,
                     self.gpu_id,
                     self._consecutive_error_count,
@@ -816,8 +884,10 @@ class Scheduler:
         - Encoder receives pickled Req, runs compute, stages output for P2P.
         - Denoiser/decoder only receive P2P control messages.
 
-        Phase 8b: When recv prefetch thread is active (single-rank P2P receiver),
-        the main loop reads from _compute_ready_queue instead of ZMQ directly.
+        Phase 8b: Receiver prefetch paths:
+        - Rank 0: _disagg_prefetch_event_loop (reads from compute_ready_queue)
+        - Non-rank-0 in multi-rank: _disagg_prefetch_non_rank0_loop (broadcast)
+        - Encoder (any rank): existing _disagg_recv_work while loop below
         """
         role_name = self._disagg_role.value.upper()
         is_rank0 = self.gpu_id == 0
@@ -835,10 +905,18 @@ class Scheduler:
             use_prefetch,
         )
 
-        # Phase 8b: prefetch event loop — recv thread handles ZMQ + H2D,
-        # main thread only does compute + P2P control messages
+        # Rank 0 receiver with prefetch queue → prefetch event loop
         if use_prefetch:
             self._disagg_prefetch_event_loop(role_name)
+            return
+
+        # Non-rank-0 receiver in multi-rank → broadcast-based loop
+        if (
+            not is_rank0
+            and is_multi_rank
+            and self._disagg_role in (RoleType.DENOISER, RoleType.DECODER)
+        ):
+            self._disagg_prefetch_non_rank0_loop()
             return
 
         while self._running:
@@ -958,16 +1036,21 @@ class Scheduler:
         # else: p2p_alloc, p2p_push — skip (rank-0-only operations)
 
     def _handle_p2p_ready_non_rank0(self, msg: dict) -> None:
-        """Non-rank-0 handling of p2p_ready: participate in compute only.
+        """Non-rank-0 handling of p2p_ready: participate in compute only."""
+        scalar_fields = msg.get("scalar_fields", {})
+        self._compute_non_rank0(scalar_fields)
+
+    def _compute_non_rank0(self, scalar_fields: dict) -> None:
+        """Non-rank-0 compute: build minimal Req and enter execute_forward.
 
         Rank 0 loads tensors from the transfer buffer and runs compute.
         The pipeline's forward() internally uses NCCL to broadcast/scatter
         tensors to all SP/TP ranks. Non-rank-0 needs to enter execute_forward
         with a minimal Req so the NCCL collectives match.
-        """
-        request_id = msg.get("request_id", "")
-        scalar_fields = msg.get("scalar_fields", {})
 
+        Used by both the old non-prefetch path (_handle_p2p_ready_non_rank0)
+        and the new prefetch non-rank-0 loop (_disagg_prefetch_non_rank0_loop).
+        """
         # Build a minimal Req with scalar fields only.
         # Tensor fields will be received via NCCL inside execute_forward.
         req = self._build_disagg_req(scalar_fields, {})
@@ -1101,15 +1184,6 @@ class Scheduler:
             stream=self._transfer_stream,
         )
 
-        # Free receive slot after H2D is launched (data copied to GPU)
-        if prealloc_slot_id is not None:
-            # Pre-allocated slot: just remove from pending receives, don't free buffer
-            # (DS recycles the slot via _recycle_prealloc_slot)
-            with self._transfer_manager._lock:
-                self._transfer_manager._pending_receives.pop(request_id, None)
-        else:
-            self._transfer_manager.free_receive_slot(request_id)
-
         # 2. Build Req from scalar fields + tensors (CPU work, overlapped)
         req = self._build_disagg_req(scalar_fields, tensors)
 
@@ -1124,6 +1198,14 @@ class Scheduler:
         # 4. Wait for H2D before compute (GPU must see the data)
         if load_event is not None:
             torch.cuda.current_stream().wait_event(load_event)
+
+        # 5. Free receive slot after H2D completes (data is on GPU)
+        if prealloc_slot_id is not None:
+            # Pre-allocated slot: just remove from pending receives, don't free buffer
+            with self._transfer_manager._lock:
+                self._transfer_manager._pending_receives.pop(request_id, None)
+        else:
+            self._transfer_manager.free_receive_slot(request_id)
 
         # 5. Run compute
         if self._disagg_role == RoleType.DENOISER:
