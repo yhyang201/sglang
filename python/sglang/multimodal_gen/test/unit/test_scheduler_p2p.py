@@ -214,7 +214,7 @@ class TestSchedulerP2PReady(unittest.TestCase):
 
 
 class TestSchedulerP2PEncoderStaging(unittest.TestCase):
-    """Test encoder P2P staging (_pool_mode_encoder_p2p_stage)."""
+    """Test encoder P2P staging (_disagg_encoder_p2p_stage)."""
 
     def setUp(self):
         MockTransferEngine.reset()
@@ -243,7 +243,7 @@ class TestSchedulerP2PEncoderStaging(unittest.TestCase):
             "guidance_scale": 7.5,
         }
 
-        self.scheduler._pool_mode_encoder_p2p_stage(
+        self.scheduler._disagg_encoder_p2p_stage(
             "req-enc-1", tensor_fields, scalar_fields
         )
 
@@ -265,7 +265,7 @@ class TestSchedulerP2PEncoderStaging(unittest.TestCase):
     def test_encoder_p2p_stage_data_in_buffer(self):
         """Verify staged data is actually in the buffer."""
         tensor = torch.randn(1, 4, 8, 8)
-        self.scheduler._pool_mode_encoder_p2p_stage(
+        self.scheduler._disagg_encoder_p2p_stage(
             "req-enc-2", {"latents": tensor}, {"request_id": "req-enc-2"}
         )
 
@@ -388,7 +388,7 @@ class TestSchedulerP2PEndToEnd(unittest.TestCase):
 
 
 class TestSchedulerP2PInit(unittest.TestCase):
-    """Test _init_p2p_transfer_manager."""
+    """Test _init_disagg_transfer_manager."""
 
     def setUp(self):
         MockTransferEngine.reset()
@@ -397,7 +397,7 @@ class TestSchedulerP2PInit(unittest.TestCase):
         MockTransferEngine.reset()
 
     def test_init_creates_transfer_manager(self):
-        """Verify _init_p2p_transfer_manager creates a working manager."""
+        """Verify _init_disagg_transfer_manager creates a working manager."""
         scheduler = object.__new__(Scheduler)
         scheduler._transfer_manager = None
         scheduler._pool_result_push = MagicMock()
@@ -413,13 +413,13 @@ class TestSchedulerP2PInit(unittest.TestCase):
         scheduler._disagg_role = MagicMock()
         scheduler._disagg_role.value = "encoder"
 
-        scheduler._init_p2p_transfer_manager()
+        scheduler._init_disagg_transfer_manager()
 
         self.assertIsNotNone(scheduler._transfer_manager)
         self.assertEqual(scheduler._transfer_manager.pool_size, 1 * 1024 * 1024)
 
     def test_init_sends_register_message(self):
-        """Verify _init_p2p_transfer_manager sends p2p_register to DS."""
+        """Verify _init_disagg_transfer_manager sends p2p_register to DS."""
         scheduler = object.__new__(Scheduler)
         scheduler._transfer_manager = None
         scheduler._pool_result_push = MagicMock()
@@ -432,7 +432,7 @@ class TestSchedulerP2PInit(unittest.TestCase):
         scheduler._disagg_role = MagicMock()
         scheduler._disagg_role.value = "denoising"
 
-        scheduler._init_p2p_transfer_manager()
+        scheduler._init_disagg_transfer_manager()
 
         # Should have sent register message
         scheduler._pool_result_push.send_multipart.assert_called_once()
@@ -469,12 +469,12 @@ class TestMultiRankGating(unittest.TestCase):
     def test_init_sockets_skipped_non_rank0(self):
         """Non-rank-0 should not create ZMQ sockets."""
         scheduler = self._make_scheduler(gpu_id=1)
-        scheduler._pool_mode = True
+        scheduler._disagg_mode = True
         scheduler.server_args.disagg_pool_work_port = 5000
         scheduler.server_args.disagg_pool_result_port = 5001
         scheduler.server_args.disagg_ds_host = "127.0.0.1"
 
-        scheduler._init_pool_mode_sockets()
+        scheduler._init_disagg_sockets()
 
         # Sockets should remain None
         self.assertIsNone(scheduler._pool_work_pull)
@@ -484,7 +484,7 @@ class TestMultiRankGating(unittest.TestCase):
         """Non-rank-0 should not create TransferManager."""
         scheduler = self._make_scheduler(gpu_id=2)
 
-        scheduler._init_p2p_transfer_manager()
+        scheduler._init_disagg_transfer_manager()
 
         self.assertIsNone(scheduler._transfer_manager)
 
@@ -514,7 +514,7 @@ class TestMultiRankGating(unittest.TestCase):
         extract_scalar = MagicMock(return_value={"request_id": "test-1"})
         send_fn = MagicMock()
 
-        scheduler._pool_mode_encoder_step(
+        scheduler._disagg_encoder_step(
             send_fn,
             extract_tensor,
             extract_scalar,

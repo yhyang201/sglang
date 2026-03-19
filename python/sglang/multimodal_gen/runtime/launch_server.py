@@ -318,7 +318,7 @@ def launch_pool_disagg_server(
 
             role_overrides = {
                 "disagg_role": role_type,
-                "disagg_pool_mode": True,
+                "disagg_mode": True,
                 "pool_work_endpoint": work_eps[inst_idx],
                 "pool_result_endpoint": result_ep,
                 "num_gpus": num_role_gpus,
@@ -590,7 +590,7 @@ def launch_disagg_role(server_args: ServerArgs):
     role_par = server_args.get_role_parallelism(role_type)
     role_overrides = {
         "disagg_role": role_type,
-        "disagg_pool_mode": True,
+        "disagg_mode": True,
         "pool_work_endpoint": work_endpoint,
         "pool_result_endpoint": result_endpoint,
         "warmup": role_type == RoleType.ENCODER,

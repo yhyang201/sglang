@@ -218,7 +218,7 @@ class ServerArgs:
     disagg_role: RoleType = RoleType.MONOLITHIC
     disagg_timeout: int = 600  # seconds, timeout for pending disagg requests
     disagg_dispatch_policy: str = "round_robin"  # "round_robin" or "max_free_slots"
-    disagg_pool_mode: bool = False  # True when running as a pool mode instance
+    disagg_mode: bool = False  # True when running as a disaggregated instance
     disagg_transfer_pool_size: int = (
         256 * 1024 * 1024
     )  # P2P transfer buffer size (bytes)

@@ -160,11 +160,11 @@ class Scheduler:
 
         # Per-role observability metrics
         self._disagg_metrics = None
-        self._pool_mode = getattr(server_args, "disagg_pool_mode", False)
-        # Pool mode sockets (set by _init_pool_mode_sockets)
+        self._disagg_mode = getattr(server_args, "disagg_mode", False)
+        # Disagg sockets (set by _init_disagg_sockets)
         self._pool_work_pull = None
         self._pool_result_push = None
-        # P2P transfer manager (set by _init_p2p_transfer_manager)
+        # P2P transfer manager (set by _init_disagg_transfer_manager)
         self._transfer_manager = None
 
         # Async transfer infrastructure (Phase 1 + Phase 8)
@@ -188,8 +188,8 @@ class Scheduler:
             device = torch.device(f"cuda:{local_rank}")
             self._transfer_stream = torch.cuda.Stream(device=device)
 
-            self._init_pool_mode_sockets()
-            self._init_p2p_transfer_manager()
+            self._init_disagg_sockets()
+            self._init_disagg_transfer_manager()
 
     def get_disagg_metrics(self) -> dict | None:
         """Return disagg role metrics snapshot, or None if not in disagg mode."""
@@ -409,38 +409,11 @@ class Scheduler:
 
         return recv_reqs
 
-    def _migrate_req_tensors(self, req: Req) -> None:
-        """Move all GPU tensor attributes of a Req to this worker's device.
-
-        After broadcast or ZMQ recv, tensors may be on a different GPU
-        (e.g., rank 0's device). This moves them to the local device.
-        Handles both direct tensor attributes and lists of tensors.
-        """
-        target = torch.device(f"cuda:{self.worker.local_rank}")
-        for attr_name in dir(req):
-            if attr_name.startswith("_"):
-                continue
-            try:
-                val = getattr(req, attr_name)
-            except Exception:
-                continue
-            if isinstance(val, torch.Tensor) and val.is_cuda and val.device != target:
-                setattr(req, attr_name, val.to(target))
-            elif isinstance(val, list) and val and isinstance(val[0], torch.Tensor):
-                setattr(
-                    req,
-                    attr_name,
-                    [
-                        t.to(target) if t.is_cuda and t.device != target else t
-                        for t in val
-                    ],
-                )
-
-    def _init_pool_mode_sockets(self):
-        """Initialize ZMQ sockets for pool mode (DiffusionServer-mediated).
+    def _init_disagg_sockets(self):
+        """Initialize ZMQ sockets for disaggregated mode (DiffusionServer-mediated).
 
         Only rank 0 creates ZMQ sockets. Non-rank-0 processes participate
-        via NCCL broadcast from rank 0 (see _pool_mode_recv_work).
+        via NCCL broadcast from rank 0 (see _disagg_recv_work).
         """
         if self.gpu_id != 0:
             logger.info(
@@ -490,7 +463,7 @@ class Scheduler:
             sa.pool_result_endpoint,
         )
 
-    def _init_p2p_transfer_manager(self):
+    def _init_disagg_transfer_manager(self):
         """Initialize TransferManager for P2P mode (rank 0 only).
 
         Creates a TransferTensorBuffer (pinned memory pool) and a
@@ -745,7 +718,7 @@ class Scheduler:
 
         return (req, h2d_event, request_id, role_name)
 
-    def _pool_mode_recv_work(self) -> list[bytes] | None:
+    def _disagg_recv_work(self) -> list[bytes] | None:
         """Receive work frames in pool mode, with multi-rank broadcast.
 
         Rank 0: recv from ZMQ PULL socket, broadcast to other ranks.
@@ -791,7 +764,7 @@ class Scheduler:
 
         return frames
 
-    def _pool_mode_prefetch_event_loop(self, role_name: str) -> None:
+    def _disagg_prefetch_event_loop(self, role_name: str) -> None:
         """Event loop for P2P receiver roles with recv prefetch thread.
 
         Phase 8b: The recv thread reads from ZMQ and does H2D prep.
@@ -841,9 +814,9 @@ class Scheduler:
                         f"{self._max_consecutive_errors} consecutive errors: {e}"
                     ) from e
 
-        self._cleanup_pool_mode()
+        self._cleanup_disagg()
 
-    def _pool_mode_event_loop(self) -> None:
+    def _disagg_event_loop(self) -> None:
         """Event loop for all roles in pool mode (DiffusionServer-mediated).
 
         Multi-rank support (Phase 7c):
@@ -879,13 +852,13 @@ class Scheduler:
         # Phase 8b: prefetch event loop — recv thread handles ZMQ + H2D,
         # main thread only does compute + P2P control messages
         if use_prefetch:
-            self._pool_mode_prefetch_event_loop(role_name)
+            self._disagg_prefetch_event_loop(role_name)
             return
 
         while self._running:
             try:
                 # All ranks receive work (rank 0 via ZMQ, others via broadcast)
-                frames = self._pool_mode_recv_work()
+                frames = self._disagg_recv_work()
 
                 # P2P dispatch: check on ALL ranks (frames are broadcast)
                 if self._is_p2p_frames(frames):
@@ -896,7 +869,7 @@ class Scheduler:
                         # Non-rank-0: only participate in p2p_ready compute
                         self._handle_p2p_non_rank0(frames)
                 elif self._disagg_role == RoleType.ENCODER:
-                    self._pool_mode_encoder_step(
+                    self._disagg_encoder_step(
                         send_tensors,
                         _extract_tensor_fields,
                         _extract_scalar_fields,
@@ -924,9 +897,9 @@ class Scheduler:
                         f"{self._max_consecutive_errors} consecutive errors: {e}"
                     ) from e
 
-        self._cleanup_pool_mode()
+        self._cleanup_disagg()
 
-    def _cleanup_pool_mode(self):
+    def _cleanup_disagg(self):
         """Clean up all pool mode resources (sockets, threads, transfer manager)."""
         # Phase 8: shutdown RDMA push thread
         if self._rdma_push_queue is not None:
@@ -1331,7 +1304,7 @@ class Scheduler:
 
         logger.debug("P2P DECODER: processed %s in %.2f s", request_id, duration_s)
 
-    def _pool_mode_encoder_step(
+    def _disagg_encoder_step(
         self,
         send_tensors_fn,
         extract_tensor,
@@ -1378,9 +1351,7 @@ class Scheduler:
         if self._pool_result_push is not None:
             if self._transfer_manager is not None:
                 # P2P mode: stage tensors to TransferBuffer, send p2p_staged
-                self._pool_mode_encoder_p2p_stage(
-                    request_id, tensor_fields, scalar_fields
-                )
+                self._disagg_encoder_p2p_stage(request_id, tensor_fields, scalar_fields)
             else:
                 # Fallback: send error (P2P transfer manager not initialized)
                 send_tensors_fn(
@@ -1394,7 +1365,7 @@ class Scheduler:
 
         logger.debug("Pool ENCODER: processed %s", request_id)
 
-    def _pool_mode_encoder_p2p_stage(
+    def _disagg_encoder_p2p_stage(
         self, request_id: str, tensor_fields: dict, scalar_fields: dict
     ) -> None:
         """Stage encoder output and send p2p_staged to DS.
@@ -1447,7 +1418,7 @@ class Scheduler:
         """
         # Pool mode: all roles use the pool event loop
         if self._disagg_role != RoleType.MONOLITHIC:
-            self._pool_mode_event_loop()
+            self._disagg_event_loop()
             return
 
         logger.debug(
