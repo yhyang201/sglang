@@ -270,13 +270,13 @@ class DiffusionTransferManager:
         )
 
         # Record CUDA event instead of blocking synchronize
-        h2d_event = None
+        load_event = None
         if stream is not None:
-            h2d_event = torch.cuda.Event()
-            h2d_event.record(stream)
+            load_event = torch.cuda.Event()
+            load_event.record(stream)
         elif torch.cuda.is_available():
-            h2d_event = torch.cuda.Event()
-            h2d_event.record(torch.cuda.current_stream())
+            load_event = torch.cuda.Event()
+            load_event.record(torch.cuda.current_stream())
 
         logger.debug(
             "TransferManager: loaded_async %d tensor fields for %s to %s",
@@ -284,7 +284,7 @@ class DiffusionTransferManager:
             request_id,
             device,
         )
-        return tensors, h2d_event
+        return tensors, load_event
 
     def push_to_peer(
         self,

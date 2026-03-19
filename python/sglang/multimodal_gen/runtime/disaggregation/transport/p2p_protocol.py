@@ -161,7 +161,6 @@ class P2PRegisterMsg:
 
     msg_type: str = P2PMsgType.REGISTER
     role: str = ""  # "encoder", "denoiser", "decoder"
-    instance_idx: int = 0
     session_id: str = ""
     pool_ptr: int = 0
     pool_size: int = 0

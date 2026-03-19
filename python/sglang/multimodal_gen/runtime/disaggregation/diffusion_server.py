@@ -686,7 +686,6 @@ class DiffusionServer:
                 "DiffusionServer P2P: unknown role in register: %s", msg.get("role")
             )
             return
-        idx = msg.get("instance_idx", 0)
         info = {
             "session_id": msg.get("session_id", ""),
             "pool_ptr": msg.get("pool_ptr", 0),
@@ -694,17 +693,20 @@ class DiffusionServer:
         }
         # Phase 7: store pre-allocated slots as a free list per instance
         prealloc = msg.get("preallocated_slots", [])
-        if prealloc:
-            info["free_preallocated_slots"] = list(prealloc)
-        else:
-            info["free_preallocated_slots"] = []
+        info["free_preallocated_slots"] = list(prealloc) if prealloc else []
 
+        # Assign instance index by registration order (server-managed, not self-reported)
         if role == RoleType.ENCODER:
+            idx = len(self._encoder_peers)
             self._encoder_peers[idx] = info
         elif role == RoleType.DENOISER:
+            idx = len(self._denoiser_peers)
             self._denoiser_peers[idx] = info
         elif role == RoleType.DECODER:
+            idx = len(self._decoder_peers)
             self._decoder_peers[idx] = info
+        else:
+            idx = 0
         logger.info(
             "DiffusionServer P2P: registered %s[%d] session=%s pool_ptr=%#x prealloc=%d",
             role,
@@ -777,7 +779,8 @@ class DiffusionServer:
         # Phase 7c: Try to use a pre-allocated slot (skip ALLOC→ALLOCATED roundtrip)
         peer_info = self._denoiser_peers.get(denoiser_idx, {})
         free_slots = peer_info.get("free_preallocated_slots", [])
-        if free_slots:
+        # Only use prealloc slot if it's large enough for the data
+        if free_slots and free_slots[0].get("size", 0) >= p2p.data_size:
             slot_info = free_slots.pop(0)
             # Store receiver info directly
             p2p.receiver_session_id = peer_info.get("session_id", "")
@@ -1055,7 +1058,8 @@ class DiffusionServer:
         # Phase 7c: Try to use a pre-allocated slot
         peer_info = self._decoder_peers.get(decoder_idx, {})
         free_slots = peer_info.get("free_preallocated_slots", [])
-        if free_slots:
+        # Only use prealloc slot if it's large enough for the data
+        if free_slots and free_slots[0].get("size", 0) >= p2p.data_size:
             slot_info = free_slots.pop(0)
             p2p.receiver_session_id = peer_info.get("session_id", "")
             p2p.receiver_pool_ptr = peer_info.get("pool_ptr", 0)

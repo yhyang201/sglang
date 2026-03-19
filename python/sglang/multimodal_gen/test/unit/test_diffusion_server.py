@@ -142,7 +142,6 @@ class TestDiffusionServerP2PProtocol(unittest.TestCase):
         # Register an encoder
         reg_msg = P2PRegisterMsg(
             role="encoder",
-            instance_idx=0,
             session_id="enc-session-0",
             pool_ptr=0x7F000000,
             pool_size=16 * 1024 * 1024,

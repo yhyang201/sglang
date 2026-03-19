@@ -515,7 +515,6 @@ class Scheduler:
         # Register with DiffusionServer
         register_msg = P2PRegisterMsg(
             role=self._disagg_role.value,
-            instance_idx=0,  # Set by launcher; single instance per process
             session_id=self._transfer_manager.session_id,
             pool_ptr=self._transfer_manager.pool_data_ptr,
             pool_size=self._transfer_manager.pool_size,
@@ -652,7 +651,7 @@ class Scheduler:
         Called from the recv prefetch thread. Does H2D on _transfer_stream
         and builds the Req, so the main thread can start compute immediately.
 
-        Returns (req, h2d_event, request_id, role_name).
+        Returns (req, load_event, request_id, role_name, prealloc_slot_id).
         """
         request_id = msg["request_id"]
         manifest = msg.get("manifest", {})
@@ -673,22 +672,19 @@ class Scheduler:
 
         # H2D on transfer_stream (non-blocking GPU copy)
         local_device = f"cuda:{self.worker.local_rank}"
-        tensors, h2d_event = self._transfer_manager.load_tensors_async(
+        tensors, load_event = self._transfer_manager.load_tensors_async(
             request_id,
             manifest,
             device=local_device,
             stream=self._transfer_stream,
         )
 
-        # Free receive slot
-        if prealloc_slot_id is not None:
-            with self._transfer_manager._lock:
-                self._transfer_manager._pending_receives.pop(request_id, None)
-        else:
-            self._transfer_manager.free_receive_slot(request_id)
+        # NOTE: Do NOT free the receive slot here. The async H2D copy is still
+        # in progress. The slot must remain valid until the main thread waits
+        # on load_event. Freeing is done in _disagg_prefetch_event_loop.
 
         # Build Req (CPU work, overlapped with H2D)
-        req = self._build_req_from_p2p(scalar_fields, tensors)
+        req = self._build_disagg_req(scalar_fields, tensors)
 
         # Init scheduler timesteps (CPU work, overlapped with H2D)
         if self._disagg_role == RoleType.DENOISER:
@@ -698,7 +694,7 @@ class Scheduler:
                 device = torch.device(local_device)
                 scheduler_mod.set_timesteps(num_steps, device=device)
 
-        return (req, h2d_event, request_id, role_name)
+        return (req, load_event, request_id, role_name, prealloc_slot_id)
 
     def _disagg_recv_work(self) -> list[bytes] | None:
         """Receive work frames in pool mode, with multi-rank broadcast.
@@ -763,10 +759,18 @@ class Scheduler:
 
                 if msg_type == "p2p_compute":
                     # H2D already done by recv thread
-                    req, h2d_event, request_id, rn = data
+                    req, load_event, request_id, rn, prealloc_slot_id = data
                     # Wait for H2D to complete on compute stream
-                    if h2d_event is not None:
-                        torch.cuda.current_stream().wait_event(h2d_event)
+                    if load_event is not None:
+                        torch.cuda.current_stream().wait_event(load_event)
+                    # Now safe to free the receive slot
+                    if prealloc_slot_id is not None:
+                        with self._transfer_manager._lock:
+                            self._transfer_manager._pending_receives.pop(
+                                request_id, None
+                            )
+                    else:
+                        self._transfer_manager.free_receive_slot(request_id)
                     # Run compute
                     if self._disagg_role == RoleType.DENOISER:
                         self._p2p_denoiser_compute(req, request_id, rn)
@@ -966,7 +970,7 @@ class Scheduler:
 
         # Build a minimal Req with scalar fields only.
         # Tensor fields will be received via NCCL inside execute_forward.
-        req = self._build_req_from_p2p(scalar_fields, {})
+        req = self._build_disagg_req(scalar_fields, {})
 
         if self._disagg_role == RoleType.DENOISER:
             # Initialize scheduler timesteps (same as rank 0)
@@ -1090,7 +1094,7 @@ class Scheduler:
 
         # 1. Start H2D on transfer_stream (non-blocking)
         local_device = f"cuda:{self.worker.local_rank}"
-        tensors, h2d_event = self._transfer_manager.load_tensors_async(
+        tensors, load_event = self._transfer_manager.load_tensors_async(
             request_id,
             manifest,
             device=local_device,
@@ -1107,7 +1111,7 @@ class Scheduler:
             self._transfer_manager.free_receive_slot(request_id)
 
         # 2. Build Req from scalar fields + tensors (CPU work, overlapped)
-        req = self._build_req_from_p2p(scalar_fields, tensors)
+        req = self._build_disagg_req(scalar_fields, tensors)
 
         # 3. Init scheduler timesteps if denoiser (CPU work, overlapped)
         if self._disagg_role == RoleType.DENOISER:
@@ -1118,8 +1122,8 @@ class Scheduler:
                 scheduler_mod.set_timesteps(num_steps, device=device)
 
         # 4. Wait for H2D before compute (GPU must see the data)
-        if h2d_event is not None:
-            torch.cuda.current_stream().wait_event(h2d_event)
+        if load_event is not None:
+            torch.cuda.current_stream().wait_event(load_event)
 
         # 5. Run compute
         if self._disagg_role == RoleType.DENOISER:
@@ -1127,7 +1131,7 @@ class Scheduler:
         elif self._disagg_role == RoleType.DECODER:
             self._p2p_decoder_compute(req, request_id, role_name)
 
-    def _build_req_from_p2p(self, scalar_fields: dict, tensors: dict) -> "Req":
+    def _build_disagg_req(self, scalar_fields: dict, tensors: dict) -> "Req":
         """Reconstruct a Req from P2P scalar fields and loaded GPU tensors.
 
         Initializes all dataclass field defaults first, then overlays

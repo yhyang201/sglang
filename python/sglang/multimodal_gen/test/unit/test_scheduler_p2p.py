@@ -194,8 +194,8 @@ class TestSchedulerP2PReady(unittest.TestCase):
     def tearDown(self):
         MockTransferEngine.reset()
 
-    def test_build_req_from_p2p(self):
-        """Test that _build_req_from_p2p correctly reconstructs a Req."""
+    def test_build_disagg_req(self):
+        """Test that _build_disagg_req correctly reconstructs a Req."""
         scalar_fields = {
             "request_id": "req-ready-1",
             "prompt": "test prompt",
@@ -205,7 +205,7 @@ class TestSchedulerP2PReady(unittest.TestCase):
             "prompt_embeds": torch.randn(1, 16, 64),
         }
 
-        req = self.scheduler._build_req_from_p2p(scalar_fields, tensors)
+        req = self.scheduler._build_disagg_req(scalar_fields, tensors)
 
         self.assertEqual(req.request_id, "req-ready-1")
         self.assertEqual(req.prompt, "test prompt")
