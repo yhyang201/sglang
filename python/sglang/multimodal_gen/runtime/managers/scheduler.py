@@ -18,17 +18,6 @@ import zmq
 from sglang.multimodal_gen.configs.pipeline_configs.base import ModelTaskType
 from sglang.multimodal_gen.configs.sample.sampling_params import SamplingParams
 from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
-from sglang.multimodal_gen.runtime.disaggregation.transport.p2p_protocol import (
-    P2P_MAGIC,
-    P2PAllocatedMsg,
-    P2PDoneMsg,
-    P2PMsgType,
-    P2PPushedMsg,
-    P2PRegisterMsg,
-    decode_p2p_msg,
-    encode_p2p_msg,
-    is_p2p_message,
-)
 from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_buffer import (
     TransferTensorBuffer,
 )
@@ -48,6 +37,17 @@ from sglang.multimodal_gen.runtime.disaggregation.transport.role_connector impor
 )
 from sglang.multimodal_gen.runtime.disaggregation.transport.tensor_codec import (
     send_tensors,
+)
+from sglang.multimodal_gen.runtime.disaggregation.transport.transfer_protocol import (
+    TRANSFER_MAGIC,
+    TransferAllocatedMsg,
+    TransferDoneMsg,
+    TransferMsgType,
+    TransferPushedMsg,
+    TransferRegisterMsg,
+    decode_transfer_msg,
+    encode_transfer_msg,
+    is_transfer_message,
 )
 from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
     _parse_size,
@@ -173,7 +173,7 @@ class Scheduler:
         # Disagg sockets (set by _init_disagg_sockets)
         self._pool_work_pull = None
         self._pool_result_push = None
-        # P2P transfer manager (set by _init_disagg_transfer_manager)
+        # Transfer manager (set by _init_disagg_transfer_manager)
         self._transfer_manager = None
 
         # Async transfer infrastructure (Phase 1 + Phase 8)
@@ -455,11 +455,11 @@ class Scheduler:
         )
 
     def _init_disagg_transfer_manager(self):
-        """Initialize TransferManager for P2P mode (rank 0 only).
+        """Initialize TransferManager for transfer mode (rank 0 only).
 
         Creates a TransferTensorBuffer (pinned memory pool) and a
         BaseTransferEngine, then wraps them in a DiffusionTransferManager.
-        Also sends a p2p_register message to DiffusionServer.
+        Also sends a transfer_register message to DiffusionServer.
         """
         if self.gpu_id != 0:
             return
@@ -507,22 +507,22 @@ class Scheduler:
                     )
             if preallocated_slot_info:
                 logger.info(
-                    "P2P %s: pre-allocated %d receive slots",
+                    "Transfer %s: pre-allocated %d receive slots",
                     self._disagg_role.value.upper(),
                     len(preallocated_slot_info),
                 )
 
         # Register with DiffusionServer
-        register_msg = P2PRegisterMsg(
+        register_msg = TransferRegisterMsg(
             role=self._disagg_role.value,
             session_id=self._transfer_manager.session_id,
             pool_ptr=self._transfer_manager.pool_data_ptr,
             pool_size=self._transfer_manager.pool_size,
             preallocated_slots=preallocated_slot_info,
         )
-        self._pool_result_push.send_multipart(encode_p2p_msg(register_msg))
+        self._pool_result_push.send_multipart(encode_transfer_msg(register_msg))
         logger.info(
-            "P2P %s: registered with DS (session=%s, pool=%d bytes, prealloc=%d)",
+            "Transfer %s: registered with DS (session=%s, pool=%d bytes, prealloc=%d)",
             self._disagg_role.value.upper(),
             self._transfer_manager.session_id,
             pool_size,
@@ -545,7 +545,7 @@ class Scheduler:
             )
             self._rdma_push_thread.start()
             logger.info(
-                "P2P %s: RDMA push thread started",
+                "Transfer %s: RDMA push thread started",
                 self._disagg_role.value.upper(),
             )
 
@@ -561,7 +561,7 @@ class Scheduler:
             )
             self._recv_prefetch_thread.start()
             logger.info(
-                "P2P %s: recv prefetch thread started",
+                "Transfer %s: recv prefetch thread started",
                 self._disagg_role.value.upper(),
             )
 
@@ -591,16 +591,16 @@ class Scheduler:
                 if success:
                     self._transfer_manager.free_staged(request_id)
 
-                pushed_msg = P2PPushedMsg(request_id=request_id)
-                self._rdma_push_zmq.send_multipart(encode_p2p_msg(pushed_msg))
+                pushed_msg = TransferPushedMsg(request_id=request_id)
+                self._rdma_push_zmq.send_multipart(encode_transfer_msg(pushed_msg))
 
                 if not success:
                     logger.error(
-                        "P2P %s: RDMA push failed for %s", role_name, request_id
+                        "Transfer %s: RDMA push failed for %s", role_name, request_id
                     )
             except Exception:
                 logger.exception(
-                    "P2P %s: RDMA push thread error for %s", role_name, request_id
+                    "Transfer %s: RDMA push thread error for %s", role_name, request_id
                 )
 
     # ------------------------------------------------------------------
@@ -608,13 +608,13 @@ class Scheduler:
     # ------------------------------------------------------------------
 
     def _recv_prefetch_loop(self):
-        """Background thread: recv P2P messages and prefetch H2D.
+        """Background thread: recv transfer messages and prefetch H2D.
 
-        For p2p_ready: does H2D + Req construction in this thread, then
+        For transfer_ready: does H2D + Req construction in this thread, then
         enqueues the ready-to-compute item. This allows H2D of request N+1
         to overlap with compute of request N on the main thread.
 
-        For p2p_alloc/push: passes them through to the main thread for handling.
+        For transfer_alloc/push: passes them through to the main thread for handling.
         """
         role_name = self._disagg_role.value.upper()
         while self._running:
@@ -622,26 +622,26 @@ class Scheduler:
                 raw_frames = self._pool_work_pull.recv_multipart()
                 frames = [bytes(f) for f in raw_frames]
 
-                msg = decode_p2p_msg(frames)
+                msg = decode_transfer_msg(frames)
                 msg_type = msg.get("msg_type", "")
 
-                if msg_type == P2PMsgType.READY:
+                if msg_type == TransferMsgType.READY:
                     # Prefetch: H2D + Req build in this thread
-                    item = self._prefetch_p2p_ready(msg)
-                    self._compute_ready_queue.put(("p2p_compute", item))
+                    item = self._prefetch_transfer_ready(msg)
+                    self._compute_ready_queue.put(("transfer_compute", item))
                 else:
                     # alloc, push: pass to main thread
-                    self._compute_ready_queue.put(("p2p_control", frames))
+                    self._compute_ready_queue.put(("transfer_control", frames))
 
             except zmq.ZMQError as e:
                 if not self._running:
                     break
-                logger.error("P2P %s recv prefetch: ZMQ error: %s", role_name, e)
+                logger.error("Transfer %s recv prefetch: ZMQ error: %s", role_name, e)
             except Exception:
-                logger.exception("P2P %s recv prefetch: error", role_name)
+                logger.exception("Transfer %s recv prefetch: error", role_name)
 
-    def _prefetch_p2p_ready(self, msg: dict) -> tuple:
-        """Prefetch H2D and build Req for a p2p_ready message.
+    def _prefetch_transfer_ready(self, msg: dict) -> tuple:
+        """Prefetch H2D and build Req for a transfer_ready message.
 
         Called from the recv prefetch thread. Does H2D on _transfer_stream
         and builds the Req, so the main thread can start compute immediately.
@@ -742,13 +742,13 @@ class Scheduler:
         return self._broadcast_to_all_ranks(frames)
 
     def _disagg_prefetch_event_loop(self, role_name: str) -> None:
-        """Event loop for P2P receiver roles with recv prefetch thread (rank 0).
+        """Event loop for transfer receiver roles with recv prefetch thread (rank 0).
 
         Phase 8b: The recv thread reads from ZMQ and does H2D prep.
         This loop reads from _compute_ready_queue:
-          - "p2p_compute": H2D already done, wait_event + free slot
+          - "transfer_compute": H2D already done, wait_event + free slot
               → broadcast scalar_fields to non-rank-0 → compute
-          - "p2p_control": alloc/push messages, handle on main thread
+          - "transfer_control": alloc/push messages, handle on main thread
               → broadcast "skip" so non-rank-0 doesn't hang
           - queue timeout: broadcast "skip"
           - shutdown: broadcast None
@@ -768,7 +768,7 @@ class Scheduler:
                         self._broadcast_to_all_ranks(("skip",))
                     continue
 
-                if msg_type == "p2p_compute":
+                if msg_type == "transfer_compute":
                     # H2D already done by recv thread
                     req, load_event, request_id, rn, prealloc_slot_id, scalar_fields = (
                         data
@@ -789,15 +789,15 @@ class Scheduler:
                         self._broadcast_to_all_ranks(("compute", scalar_fields))
                     # Run compute
                     if self._disagg_role == RoleType.DENOISER:
-                        self._p2p_denoiser_compute(req, request_id, rn)
+                        self._disagg_denoiser_compute(req, request_id, rn)
                     elif self._disagg_role == RoleType.DECODER:
-                        self._p2p_decoder_compute(req, request_id, rn)
+                        self._disagg_decoder_compute(req, request_id, rn)
 
-                elif msg_type == "p2p_control":
+                elif msg_type == "transfer_control":
                     # alloc, push messages — handle on main thread (rank 0 only)
                     if is_multi_rank:
                         self._broadcast_to_all_ranks(("skip",))
-                    self._handle_p2p_message(data)
+                    self._handle_transfer_msg(data)
 
                 self._consecutive_error_count = 0
 
@@ -823,7 +823,7 @@ class Scheduler:
             self._broadcast_to_all_ranks(None)
         self._cleanup_disagg()
 
-    def _disagg_prefetch_non_rank0_loop(self) -> None:
+    def _disagg_non_rank0_event_loop(self) -> None:
         """Event loop for non-rank-0 receivers in multi-rank prefetch mode.
 
         Blocks on broadcast from rank 0:
@@ -848,7 +848,7 @@ class Scheduler:
 
                 if isinstance(msg, tuple) and len(msg) >= 2 and msg[0] == "compute":
                     scalar_fields = msg[1]
-                    self._compute_non_rank0(scalar_fields)
+                    self._disagg_compute_non_rank0(scalar_fields)
                 # else: ("skip",) — continue
 
             except Exception as e:
@@ -878,15 +878,15 @@ class Scheduler:
         - All ranks process work (execute_forward with SP/TP sharding)
         - Only rank 0 sends results back to DiffusionServer
 
-        P2P mode (Phase 7b):
-        - P2P control messages (p2p_alloc, p2p_push) are rank-0-only.
-        - p2p_ready is broadcast to all ranks for compute.
-        - Encoder receives pickled Req, runs compute, stages output for P2P.
-        - Denoiser/decoder only receive P2P control messages.
+        Transfer mode (Phase 7b):
+        - Transfer control messages (transfer_alloc, transfer_push) are rank-0-only.
+        - transfer_ready is broadcast to all ranks for compute.
+        - Encoder receives pickled Req, runs compute, stages output for transfer.
+        - Denoiser/decoder only receive transfer control messages.
 
         Phase 8b: Receiver prefetch paths:
         - Rank 0: _disagg_prefetch_event_loop (reads from compute_ready_queue)
-        - Non-rank-0 in multi-rank: _disagg_prefetch_non_rank0_loop (broadcast)
+        - Non-rank-0 in multi-rank: _disagg_non_rank0_event_loop (broadcast)
         - Encoder (any rank): existing _disagg_recv_work while loop below
         """
         role_name = self._disagg_role.value.upper()
@@ -916,7 +916,7 @@ class Scheduler:
             and is_multi_rank
             and self._disagg_role in (RoleType.DENOISER, RoleType.DECODER)
         ):
-            self._disagg_prefetch_non_rank0_loop()
+            self._disagg_non_rank0_event_loop()
             return
 
         while self._running:
@@ -924,14 +924,14 @@ class Scheduler:
                 # All ranks receive work (rank 0 via ZMQ, others via broadcast)
                 frames = self._disagg_recv_work()
 
-                # P2P dispatch: check on ALL ranks (frames are broadcast)
-                if self._is_p2p_frames(frames):
+                # Transfer dispatch: check on ALL ranks (frames are broadcast)
+                if self._is_transfer_frames(frames):
                     if is_rank0:
-                        # Rank 0: handle all P2P messages
-                        self._handle_p2p_message(frames)
+                        # Rank 0: handle all transfer messages
+                        self._handle_transfer_msg(frames)
                     else:
-                        # Non-rank-0: only participate in p2p_ready compute
-                        self._handle_p2p_non_rank0(frames)
+                        # Non-rank-0: only participate in transfer_ready compute
+                        self._handle_transfer_non_rank0(frames)
                 elif self._disagg_role == RoleType.ENCODER:
                     self._disagg_encoder_step(
                         send_tensors,
@@ -983,64 +983,60 @@ class Scheduler:
             self._pool_result_push.close()
 
     # ------------------------------------------------------------------
-    # P2P message handling (Phase 7b)
+    # Transfer message handling (Phase 7b)
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _is_p2p_frames(frames: list) -> bool:
-        """Check if ZMQ multipart frames carry a P2P control message."""
-        return is_p2p_message(frames)
+    def _is_transfer_frames(frames: list) -> bool:
+        """Check if ZMQ multipart frames carry a transfer control message."""
+        return is_transfer_message(frames)
 
-    def _handle_p2p_message(self, frames: list) -> None:
-        """Dispatch a P2P control message to the appropriate handler (rank 0)."""
-        msg = decode_p2p_msg(frames)
+    def _handle_transfer_msg(self, frames: list) -> None:
+        """Dispatch a transfer control message to the appropriate handler (rank 0)."""
+        msg = decode_transfer_msg(frames)
         msg_type = msg.get("msg_type", "")
         request_id = msg.get("request_id", "")
 
         logger.debug(
-            "P2P %s: received %s for %s",
+            "Transfer %s: received %s for %s",
             self._disagg_role.value.upper(),
             msg_type,
             request_id,
         )
 
-        if msg_type == P2PMsgType.ALLOC:
-            self._handle_p2p_alloc(msg)
-        elif msg_type == P2PMsgType.PUSH:
-            self._handle_p2p_push_cmd(msg)
-        elif msg_type == P2PMsgType.READY:
-            self._handle_p2p_ready(msg)
+        if msg_type == TransferMsgType.ALLOC:
+            self._handle_transfer_alloc(msg)
+        elif msg_type == TransferMsgType.PUSH:
+            self._handle_transfer_push(msg)
+        elif msg_type == TransferMsgType.READY:
+            self._handle_transfer_ready(msg)
         else:
             logger.warning(
-                "P2P %s: unknown message type %s",
+                "Transfer %s: unknown message type %s",
                 self._disagg_role.value.upper(),
                 msg_type,
             )
 
-    def _handle_p2p_non_rank0(self, frames: list) -> None:
-        """Handle P2P messages on non-rank-0 workers.
+    def _handle_transfer_non_rank0(self, frames: list) -> None:
+        """Handle transfer messages on non-rank-0 workers.
 
-        Only p2p_ready requires non-rank-0 participation (for compute).
-        p2p_alloc and p2p_push are rank-0-only operations — skip them.
+        Only transfer_ready requires non-rank-0 participation (for compute).
+        transfer_alloc and transfer_push are rank-0-only operations — skip them.
         """
-        msg = decode_p2p_msg(frames)
+        msg = decode_transfer_msg(frames)
         msg_type = msg.get("msg_type", "")
 
-        if msg_type == P2PMsgType.READY:
+        if msg_type == TransferMsgType.READY:
             # Participate in compute — but non-rank-0 has no TransferManager.
             # Rank 0 loads tensors and broadcasts; non-rank-0 gets them
             # via the execute_forward's internal NCCL sync.
             # For now, non-rank-0 reconstructs the Req from scalar fields
             # (no tensor data — pipeline broadcasts internally).
-            self._handle_p2p_ready_non_rank0(msg)
-        # else: p2p_alloc, p2p_push — skip (rank-0-only operations)
+            scalar_fields = msg.get("scalar_fields", {})
+            self._disagg_compute_non_rank0(scalar_fields)
+        # else: transfer_alloc, transfer_push — skip (rank-0-only operations)
 
-    def _handle_p2p_ready_non_rank0(self, msg: dict) -> None:
-        """Non-rank-0 handling of p2p_ready: participate in compute only."""
-        scalar_fields = msg.get("scalar_fields", {})
-        self._compute_non_rank0(scalar_fields)
-
-    def _compute_non_rank0(self, scalar_fields: dict) -> None:
+    def _disagg_compute_non_rank0(self, scalar_fields: dict) -> None:
         """Non-rank-0 compute: build minimal Req and enter execute_forward.
 
         Rank 0 loads tensors from the transfer buffer and runs compute.
@@ -1048,8 +1044,8 @@ class Scheduler:
         tensors to all SP/TP ranks. Non-rank-0 needs to enter execute_forward
         with a minimal Req so the NCCL collectives match.
 
-        Used by both the old non-prefetch path (_handle_p2p_ready_non_rank0)
-        and the new prefetch non-rank-0 loop (_disagg_prefetch_non_rank0_loop).
+        Used by both the old non-prefetch path (_handle_transfer_non_rank0)
+        and the new prefetch non-rank-0 loop (_disagg_non_rank0_event_loop).
         """
         # Build a minimal Req with scalar fields only.
         # Tensor fields will be received via NCCL inside execute_forward.
@@ -1070,40 +1066,40 @@ class Scheduler:
             req.return_file_paths_only = False
             self.worker.execute_forward([req])
 
-    def _handle_p2p_alloc(self, msg: dict) -> None:
-        """Handle p2p_alloc: allocate a receive slot and reply with p2p_allocated."""
+    def _handle_transfer_alloc(self, msg: dict) -> None:
+        """Handle transfer_alloc: allocate a receive slot and reply with transfer_allocated."""
         request_id = msg["request_id"]
         data_size = msg.get("data_size", 0)
 
         pending = self._transfer_manager.allocate_receive_slot(request_id, data_size)
         if pending is None:
             logger.error(
-                "P2P %s: failed to allocate receive slot for %s (%d bytes)",
+                "Transfer %s: failed to allocate receive slot for %s (%d bytes)",
                 self._disagg_role.value.upper(),
                 request_id,
                 data_size,
             )
             return
 
-        allocated_msg = P2PAllocatedMsg(
+        allocated_msg = TransferAllocatedMsg(
             request_id=request_id,
             session_id=self._transfer_manager.session_id,
             pool_ptr=self._transfer_manager.pool_data_ptr,
             slot_offset=pending.slot.offset,
             slot_size=pending.slot.size,
         )
-        self._pool_result_push.send_multipart(encode_p2p_msg(allocated_msg))
+        self._pool_result_push.send_multipart(encode_transfer_msg(allocated_msg))
 
         logger.debug(
-            "P2P %s: allocated receive slot for %s (offset=%d, size=%d)",
+            "Transfer %s: allocated receive slot for %s (offset=%d, size=%d)",
             self._disagg_role.value.upper(),
             request_id,
             pending.slot.offset,
             pending.slot.size,
         )
 
-    def _handle_p2p_push_cmd(self, msg: dict) -> None:
-        """Handle p2p_push: RDMA push staged data to peer, reply with p2p_pushed.
+    def _handle_transfer_push(self, msg: dict) -> None:
+        """Handle transfer_push: RDMA push staged data to peer, reply with transfer_pushed.
 
         Phase 8a: If RDMA push thread is active, enqueue non-blocking.
         Otherwise fall back to blocking push (e.g., during shutdown).
@@ -1136,18 +1132,18 @@ class Scheduler:
         if success:
             self._transfer_manager.free_staged(request_id)
 
-        pushed_msg = P2PPushedMsg(request_id=request_id)
-        self._pool_result_push.send_multipart(encode_p2p_msg(pushed_msg))
+        pushed_msg = TransferPushedMsg(request_id=request_id)
+        self._pool_result_push.send_multipart(encode_transfer_msg(pushed_msg))
 
         if not success:
             logger.error(
-                "P2P %s: RDMA push failed for %s",
+                "Transfer %s: RDMA push failed for %s",
                 self._disagg_role.value.upper(),
                 request_id,
             )
 
-    def _handle_p2p_ready(self, msg: dict) -> None:
-        """Handle p2p_ready: load tensors from buffer, run compute, send result.
+    def _handle_transfer_ready(self, msg: dict) -> None:
+        """Handle transfer_ready: load tensors from buffer, run compute, send result.
 
         Phase 3c: Overlap H2D with Req construction and scheduler init.
         After the RDMA data arrives:
@@ -1209,15 +1205,15 @@ class Scheduler:
 
         # 5. Run compute
         if self._disagg_role == RoleType.DENOISER:
-            self._p2p_denoiser_compute(req, request_id, role_name)
+            self._disagg_denoiser_compute(req, request_id, role_name)
         elif self._disagg_role == RoleType.DECODER:
-            self._p2p_decoder_compute(req, request_id, role_name)
+            self._disagg_decoder_compute(req, request_id, role_name)
 
     def _build_disagg_req(self, scalar_fields: dict, tensors: dict) -> "Req":
-        """Reconstruct a Req from P2P scalar fields and loaded GPU tensors.
+        """Reconstruct a Req from transfer scalar fields and loaded GPU tensors.
 
         Initializes all dataclass field defaults first, then overlays
-        scalar and tensor fields from the P2P message.
+        scalar and tensor fields from the transfer message.
         """
         req = object.__new__(Req)
         # Initialize all dataclass fields with their defaults
@@ -1228,12 +1224,12 @@ class Scheduler:
                 object.__setattr__(req, f.name, f.default_factory())
         # Ensure sampling_params is not None so __getattr__ delegation works
         object.__setattr__(req, "sampling_params", SamplingParams())
-        # Overlay scalar fields from the P2P message
+        # Overlay scalar fields from the transfer message
         req.__dict__.update(scalar_fields)
         # Set tensor fields
         for key, value in tensors.items():
             setattr(req, key, value)
-        # Recreate torch.Generator from seed (not serializable over P2P)
+        # Recreate torch.Generator from seed (not serializable over transfer)
         seed = scalar_fields.get("seed")
         if seed is not None:
             gen = torch.Generator(device="cpu")
@@ -1241,12 +1237,12 @@ class Scheduler:
             req.generator = gen
         return req
 
-    def _p2p_denoiser_compute(
+    def _disagg_denoiser_compute(
         self, req: "Req", request_id: str, role_name: str
     ) -> None:
-        """Run denoiser compute in P2P mode, then stage output for decoder.
+        """Run denoiser compute in transfer mode, then stage output for decoder.
 
-        Note: Scheduler timestep init is done in _handle_p2p_ready (Phase 3c)
+        Note: Scheduler timestep init is done in _handle_transfer_ready (Phase 3c)
         to overlap with H2D transfer.
         """
         # Run denoising
@@ -1256,8 +1252,8 @@ class Scheduler:
 
         if not isinstance(result, Req):
             error_msg = getattr(result, "error", "denoiser error")
-            done_msg = P2PDoneMsg(request_id=request_id, error=str(error_msg))
-            self._pool_result_push.send_multipart(encode_p2p_msg(done_msg))
+            done_msg = TransferDoneMsg(request_id=request_id, error=str(error_msg))
+            self._pool_result_push.send_multipart(encode_transfer_msg(done_msg))
             if self._disagg_metrics:
                 self._disagg_metrics.record_request_failed(request_id)
             return
@@ -1279,18 +1275,18 @@ class Scheduler:
         )
 
         if staged is None:
-            done_msg = P2PDoneMsg(
+            done_msg = TransferDoneMsg(
                 request_id=request_id,
                 error="Failed to stage denoiser output for decoder",
             )
-            self._pool_result_push.send_multipart(encode_p2p_msg(done_msg))
+            self._pool_result_push.send_multipart(encode_transfer_msg(done_msg))
             if self._disagg_metrics:
                 self._disagg_metrics.record_request_failed(request_id)
             return
 
         # 2. Build done_data dict while D2H runs (CPU work, overlapped)
         done_data = {
-            "msg_type": "p2p_done",
+            "msg_type": "transfer_done",
             "request_id": request_id,
             "staged_for_decoder": True,
             "session_id": self._transfer_manager.session_id,
@@ -1306,20 +1302,22 @@ class Scheduler:
         if d2h_event is not None:
             d2h_event.synchronize()
 
-        # 4. Send p2p_done with staged info
-        self._pool_result_push.send_multipart([P2P_MAGIC, msg_bytes])
+        # 4. Send transfer_done with staged info
+        self._pool_result_push.send_multipart([TRANSFER_MAGIC, msg_bytes])
 
         if self._disagg_metrics:
             self._disagg_metrics.record_request_complete(request_id)
 
         logger.debug(
-            "P2P DENOISER: processed %s in %.2f s, staged for decoder",
+            "Transfer DENOISER: processed %s in %.2f s, staged for decoder",
             request_id,
             duration_s,
         )
 
-    def _p2p_decoder_compute(self, req: "Req", request_id: str, role_name: str) -> None:
-        """Run decoder compute in P2P mode, send result to DS.
+    def _disagg_decoder_compute(
+        self, req: "Req", request_id: str, role_name: str
+    ) -> None:
+        """Run decoder compute in transfer mode, send result to DS.
 
         Decoder result is sent as raw ZMQ multipart frames (same format as
         relay mode) so DiffusionServer handles it via _handle_decoder_result_frames
@@ -1347,7 +1345,7 @@ class Scheduler:
         output_batch = self.worker.execute_forward([req])
         duration_s = time.monotonic() - start_time
 
-        # Send result as raw ZMQ frames (no P2P_MAGIC prefix).
+        # Send result as raw ZMQ frames (no TRANSFER_MAGIC prefix).
         # DiffusionServer will route it through _handle_decoder_result_frames,
         # the same path as relay mode.
         tensor_fields = {}
@@ -1370,7 +1368,7 @@ class Scheduler:
             else:
                 self._disagg_metrics.record_request_complete(request_id)
 
-        logger.debug("P2P DECODER: processed %s in %.2f s", request_id, duration_s)
+        logger.debug("Transfer DECODER: processed %s in %.2f s", request_id, duration_s)
 
     def _disagg_encoder_step(
         self,
@@ -1418,10 +1416,12 @@ class Scheduler:
 
         if self._pool_result_push is not None:
             if self._transfer_manager is not None:
-                # P2P mode: stage tensors to TransferBuffer, send p2p_staged
-                self._disagg_encoder_p2p_stage(request_id, tensor_fields, scalar_fields)
+                # Transfer mode: stage tensors to TransferBuffer, send transfer_staged
+                self._disagg_encoder_transfer_stage(
+                    request_id, tensor_fields, scalar_fields
+                )
             else:
-                # Fallback: send error (P2P transfer manager not initialized)
+                # Fallback: send error (transfer manager not initialized)
                 send_tensors_fn(
                     self._pool_result_push,
                     {},
@@ -1433,10 +1433,10 @@ class Scheduler:
 
         logger.debug("Pool ENCODER: processed %s", request_id)
 
-    def _disagg_encoder_p2p_stage(
+    def _disagg_encoder_transfer_stage(
         self, request_id: str, tensor_fields: dict, scalar_fields: dict
     ) -> None:
-        """Stage encoder output and send p2p_staged to DS.
+        """Stage encoder output and send transfer_staged to DS.
 
         Phase 3a: Overlap D2H with metadata JSON serialization.
         """
@@ -1453,15 +1453,15 @@ class Scheduler:
             send_tensors(
                 self._pool_result_push,
                 {},
-                {"request_id": request_id, "_disagg_error": "P2P staging failed"},
+                {"request_id": request_id, "_disagg_error": "Transfer staging failed"},
             )
             if self._disagg_metrics:
                 self._disagg_metrics.record_request_failed(request_id)
             return
 
-        # 2. Build P2P metadata dict while D2H runs (CPU work, overlapped)
+        # 2. Build transfer metadata dict while D2H runs (CPU work, overlapped)
         staged_data = {
-            "msg_type": "p2p_staged",
+            "msg_type": "transfer_staged",
             "request_id": request_id,
             "data_size": staged.slot.size if staged.slot else 0,
             "manifest": staged.manifest,
@@ -1476,8 +1476,8 @@ class Scheduler:
         if d2h_event is not None:
             d2h_event.synchronize()
 
-        # 4. Send P2P staged message
-        self._pool_result_push.send_multipart([P2P_MAGIC, msg_bytes])
+        # 4. Send transfer staged message
+        self._pool_result_push.send_multipart([TRANSFER_MAGIC, msg_bytes])
 
     def event_loop(self) -> None:
         """

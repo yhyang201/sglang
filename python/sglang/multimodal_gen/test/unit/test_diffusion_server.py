@@ -9,13 +9,13 @@ import zmq
 from sglang.multimodal_gen.runtime.disaggregation.diffusion_server import (
     DiffusionServer,
 )
-from sglang.multimodal_gen.runtime.disaggregation.transport.p2p_protocol import (
-    P2PAllocatedMsg,
-    P2PPushedMsg,
-    P2PRegisterMsg,
-    P2PStagedMsg,
-    decode_p2p_msg,
-    encode_p2p_msg,
+from sglang.multimodal_gen.runtime.disaggregation.transport.transfer_protocol import (
+    TransferAllocatedMsg,
+    TransferPushedMsg,
+    TransferRegisterMsg,
+    TransferStagedMsg,
+    decode_transfer_msg,
+    encode_transfer_msg,
 )
 
 
@@ -91,10 +91,10 @@ class TestDiffusionServerInit(unittest.TestCase):
         self.assertEqual(server._decoder_free_slots, [6])
 
 
-class TestDiffusionServerP2PInit(unittest.TestCase):
-    """Test DiffusionServer P2P mode initialization."""
+class TestDiffusionServerTransferInit(unittest.TestCase):
+    """Test DiffusionServer transfer mode initialization."""
 
-    def test_p2p_mode_init(self):
+    def test_transfer_mode_init(self):
         server = DiffusionServer(
             frontend_endpoint="tcp://127.0.0.1:19950",
             encoder_work_endpoints=["tcp://127.0.0.1:19951"],
@@ -104,11 +104,11 @@ class TestDiffusionServerP2PInit(unittest.TestCase):
             denoiser_result_endpoint="tcp://127.0.0.1:19955",
             decoder_result_endpoint="tcp://127.0.0.1:19956",
         )
-        self.assertTrue(server._p2p_mode)
-        self.assertEqual(len(server._p2p_state), 0)
+        self.assertTrue(server._transfer_mode)
+        self.assertEqual(len(server._transfer_state), 0)
         self.assertEqual(len(server._encoder_peers), 0)
 
-    def test_p2p_stats(self):
+    def test_transfer_stats(self):
         server = DiffusionServer(
             frontend_endpoint="tcp://127.0.0.1:19960",
             encoder_work_endpoints=["tcp://127.0.0.1:19961"],
@@ -119,15 +119,15 @@ class TestDiffusionServerP2PInit(unittest.TestCase):
             decoder_result_endpoint="tcp://127.0.0.1:19966",
         )
         stats = server.get_stats()
-        self.assertTrue(stats["p2p_mode"])
-        self.assertEqual(stats["p2p_active_transfers"], 0)
+        self.assertTrue(stats["transfer_mode"])
+        self.assertEqual(stats["transfer_active_transfers"], 0)
         self.assertEqual(stats["encoder_peers"], 0)
 
 
-class TestDiffusionServerP2PProtocol(unittest.TestCase):
-    """Test P2P protocol message handling in DiffusionServer."""
+class TestDiffusionServerTransferProtocol(unittest.TestCase):
+    """Test transfer protocol message handling in DiffusionServer."""
 
-    def test_p2p_register(self):
+    def test_transfer_register(self):
         """Test instance registration with DS."""
         server = DiffusionServer(
             frontend_endpoint="tcp://127.0.0.1:19970",
@@ -140,20 +140,20 @@ class TestDiffusionServerP2PProtocol(unittest.TestCase):
         )
 
         # Register an encoder
-        reg_msg = P2PRegisterMsg(
+        reg_msg = TransferRegisterMsg(
             role="encoder",
             session_id="enc-session-0",
             pool_ptr=0x7F000000,
             pool_size=16 * 1024 * 1024,
         )
-        frames = encode_p2p_msg(reg_msg)
-        server._handle_p2p_result(frames, "encoder")
+        frames = encode_transfer_msg(reg_msg)
+        server._handle_transfer_result(frames, "encoder")
 
         self.assertIn(0, server._encoder_peers)
         self.assertEqual(server._encoder_peers[0]["session_id"], "enc-session-0")
         self.assertEqual(server._encoder_peers[0]["pool_ptr"], 0x7F000000)
 
-    def test_p2p_staged_and_alloc(self):
+    def test_transfer_staged_and_alloc(self):
         """Test encoder staged → DS selects denoiser → sends alloc."""
         ctx = zmq.Context()
         # We need live sockets to capture the alloc message DS sends to denoiser
@@ -180,8 +180,8 @@ class TestDiffusionServerP2PProtocol(unittest.TestCase):
                 "r1", RequestState.ENCODER_RUNNING, encoder_instance=0
             )
 
-            # Simulate encoder sending p2p_staged
-            staged_msg = P2PStagedMsg(
+            # Simulate encoder sending transfer_staged
+            staged_msg = TransferStagedMsg(
                 request_id="r1",
                 data_size=4096,
                 manifest={"latents": [{"offset": 0, "shape": [4], "dtype": "float32"}]},
@@ -189,26 +189,26 @@ class TestDiffusionServerP2PProtocol(unittest.TestCase):
                 pool_ptr=0x1000,
                 slot_offset=0,
             )
-            frames = encode_p2p_msg(staged_msg)
-            server._handle_p2p_result(frames, "encoder")
+            frames = encode_transfer_msg(staged_msg)
+            server._handle_transfer_result(frames, "encoder")
 
-            # DS should have sent p2p_alloc to denoiser
+            # DS should have sent transfer_alloc to denoiser
             alloc_frames = denoiser_work_pull.recv_multipart(flags=0)
-            alloc_msg = decode_p2p_msg(alloc_frames)
-            self.assertEqual(alloc_msg["msg_type"], "p2p_alloc")
+            alloc_msg = decode_transfer_msg(alloc_frames)
+            self.assertEqual(alloc_msg["msg_type"], "transfer_alloc")
             self.assertEqual(alloc_msg["request_id"], "r1")
             self.assertEqual(alloc_msg["data_size"], 4096)
 
-            # Verify P2P state
-            self.assertIn("r1", server._p2p_state)
-            self.assertEqual(server._p2p_state["r1"].sender_session_id, "enc-0")
+            # Verify transfer state
+            self.assertIn("r1", server._transfer_state)
+            self.assertEqual(server._transfer_state["r1"].sender_session_id, "enc-0")
         finally:
             server.stop()
             denoiser_work_pull.close()
             ctx.destroy(linger=0)
 
-    def test_p2p_full_e2e_handshake(self):
-        """Test full P2P handshake: staged → alloc → allocated → push → pushed → ready."""
+    def test_transfer_full_e2e_handshake(self):
+        """Test full transfer handshake: staged → alloc → allocated → push → pushed → ready."""
         ctx = zmq.Context()
         enc_work_ep = "tcp://127.0.0.1:19990"
         den_work_ep = "tcp://127.0.0.1:19991"
@@ -238,7 +238,7 @@ class TestDiffusionServerP2PProtocol(unittest.TestCase):
             )
 
             # Step 1: Encoder staged
-            staged = P2PStagedMsg(
+            staged = TransferStagedMsg(
                 request_id="r1",
                 data_size=2048,
                 manifest={"t": [{"offset": 0, "shape": [512], "dtype": "float32"}]},
@@ -246,39 +246,39 @@ class TestDiffusionServerP2PProtocol(unittest.TestCase):
                 pool_ptr=0x1000,
                 slot_offset=0,
             )
-            server._handle_p2p_result(encode_p2p_msg(staged), "encoder")
+            server._handle_transfer_result(encode_transfer_msg(staged), "encoder")
 
             # Step 2: Denoiser receives alloc
             alloc_frames = den_work_pull.recv_multipart()
-            alloc = decode_p2p_msg(alloc_frames)
-            self.assertEqual(alloc["msg_type"], "p2p_alloc")
+            alloc = decode_transfer_msg(alloc_frames)
+            self.assertEqual(alloc["msg_type"], "transfer_alloc")
 
             # Step 3: Denoiser sends allocated
-            allocated = P2PAllocatedMsg(
+            allocated = TransferAllocatedMsg(
                 request_id="r1",
                 session_id="den-sess",
                 pool_ptr=0x2000,
                 slot_offset=0,
                 slot_size=2048,
             )
-            server._handle_p2p_result(encode_p2p_msg(allocated), "denoiser")
+            server._handle_transfer_result(encode_transfer_msg(allocated), "denoiser")
 
             # Step 4: Encoder receives push command
             push_frames = enc_work_pull.recv_multipart()
-            push = decode_p2p_msg(push_frames)
-            self.assertEqual(push["msg_type"], "p2p_push")
+            push = decode_transfer_msg(push_frames)
+            self.assertEqual(push["msg_type"], "transfer_push")
             self.assertEqual(push["dest_session_id"], "den-sess")
             self.assertEqual(push["dest_addr"], 0x2000)  # pool_ptr + slot_offset
             self.assertEqual(push["transfer_size"], 2048)
 
             # Step 5: Encoder sends pushed (RDMA done)
-            pushed = P2PPushedMsg(request_id="r1")
-            server._handle_p2p_result(encode_p2p_msg(pushed), "encoder")
+            pushed = TransferPushedMsg(request_id="r1")
+            server._handle_transfer_result(encode_transfer_msg(pushed), "encoder")
 
             # Step 6: Denoiser receives ready
             ready_frames = den_work_pull.recv_multipart()
-            ready = decode_p2p_msg(ready_frames)
-            self.assertEqual(ready["msg_type"], "p2p_ready")
+            ready = decode_transfer_msg(ready_frames)
+            self.assertEqual(ready["msg_type"], "transfer_ready")
             self.assertEqual(ready["request_id"], "r1")
             self.assertIn("t", ready["manifest"])
         finally:

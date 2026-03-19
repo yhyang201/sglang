@@ -1,19 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for DiffusionTransferManager P2P transfer logic."""
+"""Unit tests for DiffusionTransferManager transfer logic."""
 
 import unittest
 
 import torch
 
-from sglang.multimodal_gen.runtime.disaggregation.transport.p2p_protocol import (
-    P2PAllocMsg,
-    P2PPushedMsg,
-    P2PPushMsg,
-    P2PStagedMsg,
-    decode_p2p_msg,
-    encode_p2p_msg,
-    is_p2p_message,
-)
 from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_buffer import (
     TransferTensorBuffer,
 )
@@ -24,6 +15,15 @@ from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_manage
     DiffusionTransferManager,
     PendingReceive,
     StagedTransfer,
+)
+from sglang.multimodal_gen.runtime.disaggregation.transport.transfer_protocol import (
+    TransferAllocMsg,
+    TransferPushedMsg,
+    TransferPushMsg,
+    TransferStagedMsg,
+    decode_transfer_msg,
+    encode_transfer_msg,
+    is_transfer_message,
 )
 
 
@@ -152,8 +152,8 @@ class TestReceive(unittest.TestCase):
         self.assertIsNone(mgr.get_receive_slot_addr("r1"))
 
 
-class TestP2PTransfer(unittest.TestCase):
-    """Test end-to-end P2P transfer between two managers."""
+class TestTransfer(unittest.TestCase):
+    """Test end-to-end transfer between two managers."""
 
     def setUp(self):
         MockTransferEngine.reset()
@@ -195,7 +195,7 @@ class TestP2PTransfer(unittest.TestCase):
         receiver.free_receive_slot("r1")
 
     def test_transfer_multiple_tensors(self):
-        """Test P2P transfer with multiple tensor fields."""
+        """Test transfer with multiple tensor fields."""
         sender = _make_manager(session_id="s")
         receiver = _make_manager(session_id="r")
 
@@ -250,11 +250,11 @@ class TestP2PTransfer(unittest.TestCase):
             receiver.free_receive_slot(rid)
 
 
-class TestP2PProtocol(unittest.TestCase):
-    """Test P2P protocol message encoding/decoding."""
+class TestTransferProtocol(unittest.TestCase):
+    """Test transfer protocol message encoding/decoding."""
 
     def test_encode_decode_staged(self):
-        msg = P2PStagedMsg(
+        msg = TransferStagedMsg(
             request_id="r1",
             data_size=1024,
             manifest={"latents": [{"offset": 0, "shape": [4], "dtype": "float32"}]},
@@ -262,44 +262,44 @@ class TestP2PProtocol(unittest.TestCase):
             pool_ptr=0x1000,
             slot_offset=0,
         )
-        frames = encode_p2p_msg(msg)
+        frames = encode_transfer_msg(msg)
         self.assertEqual(len(frames), 2)
 
-        decoded = decode_p2p_msg(frames)
-        self.assertEqual(decoded["msg_type"], "p2p_staged")
+        decoded = decode_transfer_msg(frames)
+        self.assertEqual(decoded["msg_type"], "transfer_staged")
         self.assertEqual(decoded["request_id"], "r1")
         self.assertEqual(decoded["data_size"], 1024)
 
     def test_encode_decode_alloc(self):
-        msg = P2PAllocMsg(request_id="r1", data_size=2048, source_role="encoder")
-        frames = encode_p2p_msg(msg)
-        decoded = decode_p2p_msg(frames)
-        self.assertEqual(decoded["msg_type"], "p2p_alloc")
+        msg = TransferAllocMsg(request_id="r1", data_size=2048, source_role="encoder")
+        frames = encode_transfer_msg(msg)
+        decoded = decode_transfer_msg(frames)
+        self.assertEqual(decoded["msg_type"], "transfer_alloc")
         self.assertEqual(decoded["source_role"], "encoder")
 
     def test_encode_decode_push(self):
-        msg = P2PPushMsg(
+        msg = TransferPushMsg(
             request_id="r1",
             dest_session_id="sess-2",
             dest_addr=0x2000,
             transfer_size=4096,
         )
-        frames = encode_p2p_msg(msg)
-        decoded = decode_p2p_msg(frames)
+        frames = encode_transfer_msg(msg)
+        decoded = decode_transfer_msg(frames)
         self.assertEqual(decoded["dest_session_id"], "sess-2")
         self.assertEqual(decoded["dest_addr"], 0x2000)
 
-    def test_is_p2p_message(self):
-        p2p_frames = encode_p2p_msg(P2PPushedMsg(request_id="r1"))
-        self.assertTrue(is_p2p_message(p2p_frames))
+    def test_is_transfer_message(self):
+        transfer_frames = encode_transfer_msg(TransferPushedMsg(request_id="r1"))
+        self.assertTrue(is_transfer_message(transfer_frames))
 
-        # Non-P2P message (e.g., tensor multipart starting with JSON)
-        non_p2p = [b'{"tensor_descriptors": []}', b"data"]
-        self.assertFalse(is_p2p_message(non_p2p))
+        # Non-transfer message (e.g., tensor multipart starting with JSON)
+        non_transfer = [b'{"tensor_descriptors": []}', b"data"]
+        self.assertFalse(is_transfer_message(non_transfer))
 
     def test_decode_invalid_raises(self):
         with self.assertRaises(ValueError):
-            decode_p2p_msg([b"not-p2p", b"{}"])
+            decode_transfer_msg([b"not-transfer", b"{}"])
 
 
 class TestCapacity(unittest.TestCase):

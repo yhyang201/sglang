@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for Scheduler P2P integration (Phase 7b).
+"""Unit tests for Scheduler transfer integration (Phase 7b).
 
-Tests the P2P message handling in the scheduler's pool mode event loop:
-- P2P frame detection
-- p2p_alloc handling (allocate receive slot)
-- p2p_push handling (RDMA push to peer)
-- p2p_ready handling (load tensors, run compute)
-- Encoder P2P staging
-- Full encoder→denoiser P2P flow
+Tests the transfer message handling in the scheduler's pool mode event loop:
+- Transfer frame detection
+- transfer_alloc handling (allocate receive slot)
+- transfer_push handling (RDMA push to peer)
+- transfer_ready handling (load tensors, run compute)
+- Encoder transfer staging
+- Full encoder→denoiser transfer flow
 """
 
 import json
@@ -16,13 +16,6 @@ from unittest.mock import MagicMock
 
 import torch
 
-from sglang.multimodal_gen.runtime.disaggregation.transport.p2p_protocol import (
-    P2P_MAGIC,
-    P2PAllocMsg,
-    P2PMsgType,
-    P2PPushMsg,
-    encode_p2p_msg,
-)
 from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_buffer import (
     TransferTensorBuffer,
 )
@@ -32,29 +25,36 @@ from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_engine
 from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_manager import (
     DiffusionTransferManager,
 )
+from sglang.multimodal_gen.runtime.disaggregation.transport.transfer_protocol import (
+    TRANSFER_MAGIC,
+    TransferAllocMsg,
+    TransferMsgType,
+    TransferPushMsg,
+    encode_transfer_msg,
+)
 from sglang.multimodal_gen.runtime.managers.scheduler import Scheduler
 
 
-class TestSchedulerP2PFrameDetection(unittest.TestCase):
-    """Test the static _is_p2p_frames method."""
+class TestSchedulerTransferFrameDetection(unittest.TestCase):
+    """Test the static _is_transfer_frames method."""
 
-    def test_p2p_frames_detected(self):
-        frames = encode_p2p_msg(P2PAllocMsg(request_id="r1", data_size=1024))
-        self.assertTrue(Scheduler._is_p2p_frames(frames))
+    def test_transfer_frames_detected(self):
+        frames = encode_transfer_msg(TransferAllocMsg(request_id="r1", data_size=1024))
+        self.assertTrue(Scheduler._is_transfer_frames(frames))
 
-    def test_non_p2p_frames_not_detected(self):
+    def test_non_transfer_frames_not_detected(self):
         frames = [b"some_data", b"more_data"]
-        self.assertFalse(Scheduler._is_p2p_frames(frames))
+        self.assertFalse(Scheduler._is_transfer_frames(frames))
 
     def test_empty_frames_not_detected(self):
-        self.assertFalse(Scheduler._is_p2p_frames([]))
+        self.assertFalse(Scheduler._is_transfer_frames([]))
 
     def test_single_frame_not_detected(self):
-        self.assertFalse(Scheduler._is_p2p_frames([b"data"]))
+        self.assertFalse(Scheduler._is_transfer_frames([b"data"]))
 
 
-class TestSchedulerP2PAlloc(unittest.TestCase):
-    """Test _handle_p2p_alloc."""
+class TestSchedulerTransferAlloc(unittest.TestCase):
+    """Test _handle_transfer_alloc."""
 
     def setUp(self):
         MockTransferEngine.reset()
@@ -77,39 +77,39 @@ class TestSchedulerP2PAlloc(unittest.TestCase):
 
     def test_alloc_sends_allocated_response(self):
         msg = {
-            "msg_type": P2PMsgType.ALLOC,
+            "msg_type": TransferMsgType.ALLOC,
             "request_id": "req-001",
             "data_size": 4096,
             "source_role": "encoder",
         }
-        self.scheduler._handle_p2p_alloc(msg)
+        self.scheduler._handle_transfer_alloc(msg)
 
-        # Verify p2p_allocated was sent
+        # Verify transfer_allocated was sent
         self.scheduler._pool_result_push.send_multipart.assert_called_once()
         sent_frames = self.scheduler._pool_result_push.send_multipart.call_args[0][0]
-        self.assertEqual(sent_frames[0], P2P_MAGIC)
+        self.assertEqual(sent_frames[0], TRANSFER_MAGIC)
 
         reply = json.loads(sent_frames[1])
-        self.assertEqual(reply["msg_type"], P2PMsgType.ALLOCATED)
+        self.assertEqual(reply["msg_type"], TransferMsgType.ALLOCATED)
         self.assertEqual(reply["request_id"], "req-001")
         self.assertEqual(reply["session_id"], self.engine.session_id)
         self.assertGreater(reply["slot_size"], 0)
 
     def test_alloc_creates_receive_slot(self):
         msg = {
-            "msg_type": P2PMsgType.ALLOC,
+            "msg_type": TransferMsgType.ALLOC,
             "request_id": "req-002",
             "data_size": 8192,
         }
-        self.scheduler._handle_p2p_alloc(msg)
+        self.scheduler._handle_transfer_alloc(msg)
 
         # Verify slot was allocated in transfer manager
         addr = self.tm.get_receive_slot_addr("req-002")
         self.assertIsNotNone(addr)
 
 
-class TestSchedulerP2PPush(unittest.TestCase):
-    """Test _handle_p2p_push_cmd."""
+class TestSchedulerTransferPush(unittest.TestCase):
+    """Test _handle_transfer_push."""
 
     def setUp(self):
         MockTransferEngine.reset()
@@ -141,20 +141,20 @@ class TestSchedulerP2PPush(unittest.TestCase):
         dest_pending = dest_tm.allocate_receive_slot("req-push-1", staged.slot.size)
 
         msg = {
-            "msg_type": P2PMsgType.PUSH,
+            "msg_type": TransferMsgType.PUSH,
             "request_id": "req-push-1",
             "dest_session_id": dest_engine.session_id,
             "dest_addr": dest_tm.pool_data_ptr + dest_pending.slot.offset,
             "transfer_size": staged.slot.size,
         }
 
-        self.scheduler._handle_p2p_push_cmd(msg)
+        self.scheduler._handle_transfer_push(msg)
 
-        # Verify p2p_pushed was sent
+        # Verify transfer_pushed was sent
         self.scheduler._pool_result_push.send_multipart.assert_called_once()
         sent_frames = self.scheduler._pool_result_push.send_multipart.call_args[0][0]
         reply = json.loads(sent_frames[1])
-        self.assertEqual(reply["msg_type"], P2PMsgType.PUSHED)
+        self.assertEqual(reply["msg_type"], TransferMsgType.PUSHED)
         self.assertEqual(reply["request_id"], "req-push-1")
 
     def test_push_frees_staged_slot(self):
@@ -163,21 +163,21 @@ class TestSchedulerP2PPush(unittest.TestCase):
         self.assertIsNotNone(staged)
 
         msg = {
-            "msg_type": P2PMsgType.PUSH,
+            "msg_type": TransferMsgType.PUSH,
             "request_id": "req-push-2",
             "dest_session_id": "mock-dest",
             "dest_addr": self.buffer.pool_data_ptr,
             "transfer_size": staged.slot.size,
         }
-        self.scheduler._handle_p2p_push_cmd(msg)
+        self.scheduler._handle_transfer_push(msg)
 
         # Staged slot should be freed
         info = self.tm.get_staged_info("req-push-2")
         self.assertIsNone(info)
 
 
-class TestSchedulerP2PReady(unittest.TestCase):
-    """Test _handle_p2p_ready with mock compute."""
+class TestSchedulerTransferReady(unittest.TestCase):
+    """Test _handle_transfer_ready with mock compute."""
 
     def setUp(self):
         MockTransferEngine.reset()
@@ -213,8 +213,8 @@ class TestSchedulerP2PReady(unittest.TestCase):
         self.assertTrue(torch.equal(req.prompt_embeds, tensors["prompt_embeds"]))
 
 
-class TestSchedulerP2PEncoderStaging(unittest.TestCase):
-    """Test encoder P2P staging (_disagg_encoder_p2p_stage)."""
+class TestSchedulerTransferEncoderStaging(unittest.TestCase):
+    """Test encoder transfer staging (_disagg_encoder_transfer_stage)."""
 
     def setUp(self):
         MockTransferEngine.reset()
@@ -233,7 +233,7 @@ class TestSchedulerP2PEncoderStaging(unittest.TestCase):
     def tearDown(self):
         MockTransferEngine.reset()
 
-    def test_encoder_p2p_stage_sends_staged_msg(self):
+    def test_encoder_transfer_stage_sends_staged_msg(self):
         tensor_fields = {
             "prompt_embeds": torch.randn(1, 8, 32),
             "latents": torch.randn(1, 4, 16, 16),
@@ -243,17 +243,17 @@ class TestSchedulerP2PEncoderStaging(unittest.TestCase):
             "guidance_scale": 7.5,
         }
 
-        self.scheduler._disagg_encoder_p2p_stage(
+        self.scheduler._disagg_encoder_transfer_stage(
             "req-enc-1", tensor_fields, scalar_fields
         )
 
-        # Verify p2p_staged was sent
+        # Verify transfer_staged was sent
         self.scheduler._pool_result_push.send_multipart.assert_called_once()
         sent_frames = self.scheduler._pool_result_push.send_multipart.call_args[0][0]
-        self.assertEqual(sent_frames[0], P2P_MAGIC)
+        self.assertEqual(sent_frames[0], TRANSFER_MAGIC)
 
         staged_msg = json.loads(sent_frames[1])
-        self.assertEqual(staged_msg["msg_type"], "p2p_staged")
+        self.assertEqual(staged_msg["msg_type"], "transfer_staged")
         self.assertEqual(staged_msg["request_id"], "req-enc-1")
         self.assertEqual(staged_msg["session_id"], self.engine.session_id)
         self.assertGreater(staged_msg["data_size"], 0)
@@ -262,10 +262,10 @@ class TestSchedulerP2PEncoderStaging(unittest.TestCase):
         self.assertEqual(staged_msg["scalar_fields"]["request_id"], "req-enc-1")
         self.assertEqual(staged_msg["scalar_fields"]["guidance_scale"], 7.5)
 
-    def test_encoder_p2p_stage_data_in_buffer(self):
+    def test_encoder_transfer_stage_data_in_buffer(self):
         """Verify staged data is actually in the buffer."""
         tensor = torch.randn(1, 4, 8, 8)
-        self.scheduler._disagg_encoder_p2p_stage(
+        self.scheduler._disagg_encoder_transfer_stage(
             "req-enc-2", {"latents": tensor}, {"request_id": "req-enc-2"}
         )
 
@@ -275,8 +275,8 @@ class TestSchedulerP2PEncoderStaging(unittest.TestCase):
         self.assertIn("latents", info.manifest)
 
 
-class TestSchedulerP2PMessageDispatch(unittest.TestCase):
-    """Test _handle_p2p_message dispatch."""
+class TestSchedulerTransferMessageDispatch(unittest.TestCase):
+    """Test _handle_transfer_msg dispatch."""
 
     def setUp(self):
         MockTransferEngine.reset()
@@ -297,42 +297,42 @@ class TestSchedulerP2PMessageDispatch(unittest.TestCase):
         MockTransferEngine.reset()
 
     def test_dispatch_alloc_message(self):
-        """Verify p2p_alloc is routed to _handle_p2p_alloc."""
-        alloc_msg = P2PAllocMsg(request_id="req-d1", data_size=2048)
-        frames = encode_p2p_msg(alloc_msg)
+        """Verify transfer_alloc is routed to _handle_transfer_alloc."""
+        alloc_msg = TransferAllocMsg(request_id="req-d1", data_size=2048)
+        frames = encode_transfer_msg(alloc_msg)
 
-        self.scheduler._handle_p2p_message(frames)
+        self.scheduler._handle_transfer_msg(frames)
 
-        # Should have sent p2p_allocated
+        # Should have sent transfer_allocated
         self.scheduler._pool_result_push.send_multipart.assert_called_once()
         sent = json.loads(
             self.scheduler._pool_result_push.send_multipart.call_args[0][0][1]
         )
-        self.assertEqual(sent["msg_type"], P2PMsgType.ALLOCATED)
+        self.assertEqual(sent["msg_type"], TransferMsgType.ALLOCATED)
 
     def test_dispatch_push_message(self):
-        """Verify p2p_push is routed to _handle_p2p_push_cmd."""
+        """Verify transfer_push is routed to _handle_transfer_push."""
         # Stage data first
         tensor = torch.randn(2, 2)
         staged = self.tm.stage_tensors("req-d2", {"t": tensor})
 
-        push_msg = P2PPushMsg(
+        push_msg = TransferPushMsg(
             request_id="req-d2",
             dest_session_id="mock",
             dest_addr=self.buffer.pool_data_ptr,
             transfer_size=staged.slot.size,
         )
-        frames = encode_p2p_msg(push_msg)
-        self.scheduler._handle_p2p_message(frames)
+        frames = encode_transfer_msg(push_msg)
+        self.scheduler._handle_transfer_msg(frames)
 
         sent = json.loads(
             self.scheduler._pool_result_push.send_multipart.call_args[0][0][1]
         )
-        self.assertEqual(sent["msg_type"], P2PMsgType.PUSHED)
+        self.assertEqual(sent["msg_type"], TransferMsgType.PUSHED)
 
 
-class TestSchedulerP2PEndToEnd(unittest.TestCase):
-    """Test a full P2P transfer cycle: encoder stages → denoiser receives."""
+class TestSchedulerTransferEndToEnd(unittest.TestCase):
+    """Test a full transfer cycle: encoder stages → denoiser receives."""
 
     def setUp(self):
         MockTransferEngine.reset()
@@ -340,7 +340,7 @@ class TestSchedulerP2PEndToEnd(unittest.TestCase):
     def tearDown(self):
         MockTransferEngine.reset()
 
-    def test_encoder_to_denoiser_p2p_data_transfer(self):
+    def test_encoder_to_denoiser_transfer_data(self):
         """Simulate the encoder staging data, then a denoiser allocating
         and receiving it via RDMA (mock), verifying data integrity."""
 
@@ -387,7 +387,7 @@ class TestSchedulerP2PEndToEnd(unittest.TestCase):
         den_tm.free_receive_slot("e2e-req-1")
 
 
-class TestSchedulerP2PInit(unittest.TestCase):
+class TestSchedulerTransferInit(unittest.TestCase):
     """Test _init_disagg_transfer_manager."""
 
     def setUp(self):
@@ -419,7 +419,7 @@ class TestSchedulerP2PInit(unittest.TestCase):
         self.assertEqual(scheduler._transfer_manager.pool_size, 1 * 1024 * 1024)
 
     def test_init_sends_register_message(self):
-        """Verify _init_disagg_transfer_manager sends p2p_register to DS."""
+        """Verify _init_disagg_transfer_manager sends transfer_register to DS."""
         scheduler = object.__new__(Scheduler)
         scheduler._transfer_manager = None
         scheduler._pool_result_push = MagicMock()
@@ -437,10 +437,10 @@ class TestSchedulerP2PInit(unittest.TestCase):
         # Should have sent register message
         scheduler._pool_result_push.send_multipart.assert_called_once()
         sent_frames = scheduler._pool_result_push.send_multipart.call_args[0][0]
-        self.assertEqual(sent_frames[0], P2P_MAGIC)
+        self.assertEqual(sent_frames[0], TRANSFER_MAGIC)
 
         reg = json.loads(sent_frames[1])
-        self.assertEqual(reg["msg_type"], P2PMsgType.REGISTER)
+        self.assertEqual(reg["msg_type"], TransferMsgType.REGISTER)
         self.assertEqual(reg["role"], "denoising")
         self.assertGreater(reg["pool_size"], 0)
 
@@ -455,7 +455,7 @@ class TestMultiRankGating(unittest.TestCase):
         scheduler._disagg_role = MagicMock()
         scheduler._disagg_role.value = role
         scheduler._disagg_metrics = None
-        # _p2p_mode removed; P2P is always on
+        # Transfer is always on
         scheduler._transfer_manager = None
         scheduler._pool_result_push = MagicMock() if gpu_id == 0 else None
         scheduler._pool_work_pull = MagicMock() if gpu_id == 0 else None
@@ -526,16 +526,18 @@ class TestMultiRankGating(unittest.TestCase):
         # send_fn should NOT be called (push is None)
         send_fn.assert_not_called()
 
-    def test_handle_p2p_non_rank0_skips_alloc(self):
-        """Non-rank-0 should skip p2p_alloc messages (no-op)."""
+    def test_handle_transfer_non_rank0_skips_alloc(self):
+        """Non-rank-0 should skip transfer_alloc messages (no-op)."""
         scheduler = self._make_scheduler(gpu_id=1, role="denoising")
 
-        alloc_frames = encode_p2p_msg(P2PAllocMsg(request_id="r1", data_size=1024))
+        alloc_frames = encode_transfer_msg(
+            TransferAllocMsg(request_id="r1", data_size=1024)
+        )
         # Should not raise
-        scheduler._handle_p2p_non_rank0(alloc_frames)
+        scheduler._handle_transfer_non_rank0(alloc_frames)
 
-    def test_handle_p2p_non_rank0_ready_calls_execute(self):
-        """Non-rank-0 should call execute_forward on p2p_ready."""
+    def test_handle_transfer_non_rank0_ready_calls_execute(self):
+        """Non-rank-0 should call execute_forward on transfer_ready."""
         from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 
         scheduler = self._make_scheduler(gpu_id=1, role="denoising")
@@ -543,7 +545,7 @@ class TestMultiRankGating(unittest.TestCase):
         scheduler.worker.pipeline.get_module.return_value = MagicMock()
 
         ready_msg = {
-            "msg_type": P2PMsgType.READY,
+            "msg_type": TransferMsgType.READY,
             "request_id": "r1",
             "scalar_fields": {
                 "request_id": "r1",
@@ -552,11 +554,11 @@ class TestMultiRankGating(unittest.TestCase):
             },
         }
         ready_frames = [
-            P2P_MAGIC,
+            TRANSFER_MAGIC,
             json.dumps(ready_msg, separators=(",", ":")).encode("utf-8"),
         ]
 
-        scheduler._handle_p2p_ready_non_rank0(ready_msg)
+        scheduler._handle_transfer_non_rank0(ready_frames)
 
         scheduler.worker.execute_forward.assert_called_once()
 

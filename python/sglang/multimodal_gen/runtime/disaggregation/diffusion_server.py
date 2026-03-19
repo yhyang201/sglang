@@ -7,18 +7,18 @@ dispatch. It manages independent pools of N encoders, M denoisers, and
 K decoders, dispatching at every role transition only when the target
 instance has free buffer slots.
 
-Tensor transport is P2P via RDMA/TransferEngine. DiffusionServer routes
-only metadata and P2P control messages. The only exception is the decoder
+Tensor transport is via RDMA/TransferEngine. DiffusionServer routes
+only metadata and transfer control messages. The only exception is the decoder
 result path: decoders send final output as regular ZMQ frames.
 
-P2P message flow (encoder → denoiser):
-  1. Encoder → DS: p2p_staged (data in local TransferBuffer)
-  2. DS → Denoiser: p2p_alloc (allocate receive buffer)
-  3. Denoiser → DS: p2p_allocated (slot ready)
-  4. DS → Encoder: p2p_push (RDMA push to denoiser's buffer)
-  5. Encoder → DS: p2p_pushed (transfer complete)
-  6. DS → Denoiser: p2p_ready (data arrived, process it)
-  7. Denoiser → DS: p2p_done (compute finished)
+Transfer message flow (encoder → denoiser):
+  1. Encoder → DS: transfer_staged (data in local TransferBuffer)
+  2. DS → Denoiser: transfer_alloc (allocate receive buffer)
+  3. Denoiser → DS: transfer_allocated (slot ready)
+  4. DS → Encoder: transfer_push (RDMA push to denoiser's buffer)
+  5. Encoder → DS: transfer_pushed (transfer complete)
+  6. DS → Denoiser: transfer_ready (data arrived, process it)
+  7. Denoiser → DS: transfer_done (compute finished)
 
 Admission control (RFC §3):
   - FreeBufferSlots: per-instance counter tracking available buffer capacity
@@ -49,17 +49,17 @@ from sglang.multimodal_gen.runtime.disaggregation.request_state import (
     RequestTracker,
 )
 from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
-from sglang.multimodal_gen.runtime.disaggregation.transport.p2p_protocol import (
-    P2PAllocMsg,
-    P2PMsgType,
-    P2PPushMsg,
-    P2PReadyMsg,
-    decode_p2p_msg,
-    encode_p2p_msg,
-    is_p2p_message,
-)
 from sglang.multimodal_gen.runtime.disaggregation.transport.tensor_codec import (
     unpack_tensors,
+)
+from sglang.multimodal_gen.runtime.disaggregation.transport.transfer_protocol import (
+    TransferAllocMsg,
+    TransferMsgType,
+    TransferPushMsg,
+    TransferReadyMsg,
+    decode_transfer_msg,
+    encode_transfer_msg,
+    is_transfer_message,
 )
 from sglang.multimodal_gen.runtime.utils.common import get_zmq_socket
 
@@ -76,8 +76,8 @@ class _EncoderTTAEntry:
 
 
 @dataclass
-class _P2PRequestState:
-    """Per-request P2P transfer state tracked by DiffusionServer."""
+class _TransferRequestState:
+    """Per-request transfer state tracked by DiffusionServer."""
 
     # Sender (encoder/denoiser) info
     sender_session_id: str = ""
@@ -108,10 +108,10 @@ class _P2PRequestState:
 
 @dataclass
 class _RoleTTAEntry:
-    """TTA queue entry for denoiser/decoder dispatch (P2P mode)."""
+    """TTA queue entry for denoiser/decoder dispatch (transfer mode)."""
 
     request_id: str
-    p2p_state: _P2PRequestState | None = None  # P2P transfer state
+    transfer_state: _TransferRequestState | None = None  # transfer state
 
 
 class DiffusionServer:
@@ -198,11 +198,11 @@ class DiffusionServer:
         self._denoiser_tta: deque[_RoleTTAEntry] = deque()
         self._decoder_tta: deque[_RoleTTAEntry] = deque()
 
-        # --- P2P mode (RFC §4) ---
-        self._p2p_mode = p2p_mode
+        # --- Transfer mode (RFC §4) ---
+        self._transfer_mode = p2p_mode
 
-        # Per-request P2P transfer state
-        self._p2p_state: dict[str, _P2PRequestState] = {}
+        # Per-request transfer state
+        self._transfer_state: dict[str, _TransferRequestState] = {}
 
         # Per-instance registration: instance_idx -> {session_id, pool_ptr, pool_size}
         self._encoder_peers: dict[int, dict] = {}
@@ -333,9 +333,9 @@ class DiffusionServer:
     # --- Event handlers ---
 
     def _handle_role_result(self, result_pull: zmq.Socket, role: RoleType) -> None:
-        """Dispatch result message to P2P handler or decoder result handler.
+        """Dispatch result message to transfer handler or decoder result handler.
 
-        Encoder and denoiser results are always P2P control messages.
+        Encoder and denoiser results are always transfer control messages.
         Decoder results come as regular ZMQ frames (the final output).
         """
 
@@ -344,16 +344,16 @@ class DiffusionServer:
         except zmq.Again:
             return
 
-        if is_p2p_message(frames):
-            self._handle_p2p_result(frames, role)
+        if is_transfer_message(frames):
+            self._handle_transfer_result(frames, role)
             return
 
-        # Only decoder sends non-P2P frames (final output back to client)
+        # Only decoder sends non-transfer frames (final output back to client)
         if role == RoleType.DECODER:
             self._handle_decoder_result_frames(frames)
         else:
             logger.warning(
-                "DiffusionServer: unexpected non-P2P frames from %s", role.value
+                "DiffusionServer: unexpected non-transfer frames from %s", role.value
             )
 
     def _handle_client_request(self, frontend: zmq.Socket) -> None:
@@ -484,9 +484,9 @@ class DiffusionServer:
             )
 
         logger.debug("DiffusionServer: returned result for %s", request_id)
-        # Clean up P2P state if applicable (P2P decoder results also come
+        # Clean up transfer state if applicable (transfer decoder results also come
         # through this path after the optimization to send raw frames)
-        self._p2p_state.pop(request_id, None)
+        self._transfer_state.pop(request_id, None)
         self._tracker.remove(request_id)
 
     # --- Dispatch helpers ---
@@ -544,7 +544,9 @@ class DiffusionServer:
             if idx is None:
                 break
             entry = self._denoiser_tta.popleft()
-            self._p2p_dispatch_to_denoiser(entry.request_id, entry.p2p_state, idx)
+            self._transfer_dispatch_to_denoiser(
+                entry.request_id, entry.transfer_state, idx
+            )
 
     def _drain_decoder_tta(self) -> None:
         """Try to dispatch queued decoder requests when slots become available."""
@@ -555,7 +557,9 @@ class DiffusionServer:
             if idx is None:
                 break
             entry = self._decoder_tta.popleft()
-            self._p2p_dispatch_to_decoder(entry.request_id, entry.p2p_state, idx)
+            self._transfer_dispatch_to_decoder(
+                entry.request_id, entry.transfer_state, idx
+            )
 
     # --- Helpers ---
 
@@ -648,33 +652,33 @@ class DiffusionServer:
         ):
             self._decoder_free_slots[record.decoder_instance] += 1
 
-    # --- P2P message handlers ---
+    # --- Transfer message handlers ---
 
-    def _handle_p2p_result(self, frames: list, role: RoleType) -> None:
-        """Handle a P2P control message from a role instance."""
+    def _handle_transfer_result(self, frames: list, role: RoleType) -> None:
+        """Handle a transfer control message from a role instance."""
 
         try:
-            msg = decode_p2p_msg(frames)
+            msg = decode_transfer_msg(frames)
         except (ValueError, Exception) as e:
-            logger.error("DiffusionServer: failed to decode P2P message: %s", e)
+            logger.error("DiffusionServer: failed to decode transfer message: %s", e)
             return
 
         msg_type = msg.get("msg_type")
 
-        if msg_type == P2PMsgType.REGISTER:
-            self._handle_p2p_register(msg)
-        elif msg_type == P2PMsgType.STAGED:
-            self._handle_p2p_staged(msg)
-        elif msg_type == P2PMsgType.ALLOCATED:
-            self._handle_p2p_allocated(msg)
-        elif msg_type == P2PMsgType.PUSHED:
-            self._handle_p2p_pushed(msg)
-        elif msg_type == P2PMsgType.DONE:
-            self._handle_p2p_done(msg, role)
+        if msg_type == TransferMsgType.REGISTER:
+            self._handle_transfer_register(msg)
+        elif msg_type == TransferMsgType.STAGED:
+            self._handle_transfer_staged(msg)
+        elif msg_type == TransferMsgType.ALLOCATED:
+            self._handle_transfer_allocated(msg)
+        elif msg_type == TransferMsgType.PUSHED:
+            self._handle_transfer_pushed(msg)
+        elif msg_type == TransferMsgType.DONE:
+            self._handle_transfer_done(msg, role)
         else:
-            logger.warning("DiffusionServer: unknown P2P msg_type=%s", msg_type)
+            logger.warning("DiffusionServer: unknown transfer msg_type=%s", msg_type)
 
-    def _handle_p2p_register(self, msg: dict) -> None:
+    def _handle_transfer_register(self, msg: dict) -> None:
         """Instance registers its TransferEngine session + buffer info.
 
         Phase 7a: Also stores pre-allocated receive slots from receivers.
@@ -683,7 +687,8 @@ class DiffusionServer:
             role = RoleType.from_string(msg.get("role", ""))
         except ValueError:
             logger.warning(
-                "DiffusionServer P2P: unknown role in register: %s", msg.get("role")
+                "DiffusionServer transfer: unknown role in register: %s",
+                msg.get("role"),
             )
             return
         info = {
@@ -708,7 +713,7 @@ class DiffusionServer:
         else:
             idx = 0
         logger.info(
-            "DiffusionServer P2P: registered %s[%d] session=%s pool_ptr=%#x prealloc=%d",
+            "DiffusionServer transfer: registered %s[%d] session=%s pool_ptr=%#x prealloc=%d",
             role,
             idx,
             info["session_id"],
@@ -716,20 +721,20 @@ class DiffusionServer:
             len(prealloc),
         )
 
-    def _handle_p2p_staged(self, msg: dict) -> None:
-        """Handle P2P_STAGED: upstream role finished, data staged in local TransferBuffer.
+    def _handle_transfer_staged(self, msg: dict) -> None:
+        """Handle TRANSFER_STAGED: upstream role finished, data staged in local TransferBuffer.
 
-        Currently only encoder sends STAGED; denoiser uses P2P_DONE with
-        staged_for_decoder=True instead (see _handle_p2p_done).
+        Currently only encoder sends STAGED; denoiser uses TRANSFER_DONE with
+        staged_for_decoder=True instead (see _handle_transfer_done).
         """
 
         request_id = msg["request_id"]
 
-        # Store P2P state
+        # Store transfer state
         record = self._tracker.get(request_id)
         encoder_idx = record.encoder_instance if record else 0
 
-        p2p = _P2PRequestState(
+        p2p = _TransferRequestState(
             sender_session_id=msg.get("session_id", ""),
             sender_pool_ptr=msg.get("pool_ptr", 0),
             sender_slot_offset=msg.get("slot_offset", 0),
@@ -738,27 +743,29 @@ class DiffusionServer:
             scalar_fields=msg.get("scalar_fields", {}),
             sender_instance=encoder_idx,
         )
-        self._p2p_state[request_id] = p2p
+        self._transfer_state[request_id] = p2p
 
         # Note: encoder slot is NOT freed here — the encoder's TransferBuffer
-        # still holds the data. Slot is freed in _handle_p2p_pushed after the
+        # still holds the data. Slot is freed in _handle_transfer_pushed after
         # RDMA transfer completes and the encoder releases its local buffer.
         try:
             self._tracker.transition(request_id, RequestState.ENCODER_DONE)
         except ValueError:
             pass
 
-        # Enqueue for P2P denoiser, then drain both
+        # Enqueue for denoiser transfer, then drain both
         try:
             self._tracker.transition(request_id, RequestState.DENOISING_WAITING)
         except ValueError:
             pass
-        self._denoiser_tta.append(_RoleTTAEntry(request_id=request_id, p2p_state=p2p))
+        self._denoiser_tta.append(
+            _RoleTTAEntry(request_id=request_id, transfer_state=p2p)
+        )
 
-    def _p2p_dispatch_to_denoiser(
-        self, request_id: str, p2p: _P2PRequestState, denoiser_idx: int
+    def _transfer_dispatch_to_denoiser(
+        self, request_id: str, p2p: _TransferRequestState, denoiser_idx: int
     ) -> None:
-        """Dispatch P2P transfer to denoiser.
+        """Dispatch transfer to denoiser.
 
         Phase 7c: If the denoiser has pre-allocated slots, skip ALLOC roundtrip
         and send PUSH directly to the encoder.
@@ -790,16 +797,18 @@ class DiffusionServer:
 
             # Send PUSH directly to encoder (skip ALLOC roundtrip)
             dest_addr = slot_info["addr"]
-            push_msg = P2PPushMsg(
+            push_msg = TransferPushMsg(
                 request_id=request_id,
                 dest_session_id=p2p.receiver_session_id,
                 dest_addr=dest_addr,
                 transfer_size=p2p.data_size,
             )
             sender_idx = p2p.sender_instance
-            self._encoder_pushes[sender_idx].send_multipart(encode_p2p_msg(push_msg))
+            self._encoder_pushes[sender_idx].send_multipart(
+                encode_transfer_msg(push_msg)
+            )
             logger.debug(
-                "DiffusionServer P2P: fast-path push to denoiser[%d] for %s "
+                "DiffusionServer transfer: fast-path push to denoiser[%d] for %s "
                 "(prealloc slot %s, %d bytes)",
                 denoiser_idx,
                 request_id,
@@ -808,28 +817,30 @@ class DiffusionServer:
             )
         else:
             # Fallback: original ALLOC roundtrip
-            alloc_msg = P2PAllocMsg(
+            alloc_msg = TransferAllocMsg(
                 request_id=request_id,
                 data_size=p2p.data_size,
                 source_role="encoder",
             )
             self._denoiser_pushes[denoiser_idx].send_multipart(
-                encode_p2p_msg(alloc_msg)
+                encode_transfer_msg(alloc_msg)
             )
             logger.debug(
-                "DiffusionServer P2P: sent alloc to denoiser[%d] for %s (%d bytes)",
+                "DiffusionServer transfer: sent alloc to denoiser[%d] for %s (%d bytes)",
                 denoiser_idx,
                 request_id,
                 p2p.data_size,
             )
 
-    def _handle_p2p_allocated(self, msg: dict) -> None:
-        """Receiver allocated a slot. Send p2p_push to sender."""
+    def _handle_transfer_allocated(self, msg: dict) -> None:
+        """Receiver allocated a slot. Send transfer_push to sender."""
 
         request_id = msg["request_id"]
-        p2p = self._p2p_state.get(request_id)
+        p2p = self._transfer_state.get(request_id)
         if p2p is None:
-            logger.warning("DiffusionServer P2P: no state for allocated %s", request_id)
+            logger.warning(
+                "DiffusionServer transfer: no state for allocated %s", request_id
+            )
             return
 
         p2p.receiver_session_id = msg.get("session_id", "")
@@ -840,7 +851,7 @@ class DiffusionServer:
         dest_addr = p2p.receiver_pool_ptr + p2p.receiver_slot_offset
 
         # Tell sender to push via RDMA
-        push_msg = P2PPushMsg(
+        push_msg = TransferPushMsg(
             request_id=request_id,
             dest_session_id=p2p.receiver_session_id,
             dest_addr=dest_addr,
@@ -855,31 +866,37 @@ class DiffusionServer:
             RequestState.DECODER_WAITING,
         ):
             # Denoiser→Decoder transfer: sender is denoiser
-            self._denoiser_pushes[sender_idx].send_multipart(encode_p2p_msg(push_msg))
+            self._denoiser_pushes[sender_idx].send_multipart(
+                encode_transfer_msg(push_msg)
+            )
             logger.debug(
-                "DiffusionServer P2P: sent push command to denoiser[%d] for %s",
+                "DiffusionServer transfer: sent push command to denoiser[%d] for %s",
                 sender_idx,
                 request_id,
             )
         else:
             # Encoder→Denoiser transfer: sender is encoder
-            self._encoder_pushes[sender_idx].send_multipart(encode_p2p_msg(push_msg))
+            self._encoder_pushes[sender_idx].send_multipart(
+                encode_transfer_msg(push_msg)
+            )
             logger.debug(
-                "DiffusionServer P2P: sent push command to encoder[%d] for %s",
+                "DiffusionServer transfer: sent push command to encoder[%d] for %s",
                 sender_idx,
                 request_id,
             )
 
-    def _handle_p2p_pushed(self, msg: dict) -> None:
+    def _handle_transfer_pushed(self, msg: dict) -> None:
         """Sender completed RDMA push. Free sender slot and tell receiver data is ready.
 
         Handles both encoder→denoiser and denoiser→decoder transfers.
         """
 
         request_id = msg["request_id"]
-        p2p = self._p2p_state.get(request_id)
+        p2p = self._transfer_state.get(request_id)
         if p2p is None:
-            logger.warning("DiffusionServer P2P: no state for pushed %s", request_id)
+            logger.warning(
+                "DiffusionServer transfer: no state for pushed %s", request_id
+            )
             return
 
         # Free sender slot — RDMA transfer is done, sender's local buffer is released.
@@ -903,7 +920,7 @@ class DiffusionServer:
         scalar_fields = dict(p2p.scalar_fields) if p2p.scalar_fields else {}
         if p2p.prealloc_slot_id is not None:
             scalar_fields["_prealloc_slot_id"] = p2p.prealloc_slot_id
-        ready_msg = P2PReadyMsg(
+        ready_msg = TransferReadyMsg(
             request_id=request_id,
             manifest=p2p.manifest,
             slot_offset=p2p.receiver_slot_offset,
@@ -918,20 +935,24 @@ class DiffusionServer:
             RequestState.DENOISING_WAITING,
         ):
             self._denoiser_pushes[receiver_idx].send_multipart(
-                encode_p2p_msg(ready_msg)
+                encode_transfer_msg(ready_msg)
             )
         elif record and record.state in (
             RequestState.DECODER_RUNNING,
             RequestState.DECODER_WAITING,
         ):
-            self._decoder_pushes[receiver_idx].send_multipart(encode_p2p_msg(ready_msg))
+            self._decoder_pushes[receiver_idx].send_multipart(
+                encode_transfer_msg(ready_msg)
+            )
 
         logger.debug(
-            "DiffusionServer P2P: notified receiver for %s (data ready)",
+            "DiffusionServer transfer: notified receiver for %s (data ready)",
             request_id,
         )
 
-    def _recycle_prealloc_slot(self, p2p: _P2PRequestState, role: RoleType) -> None:
+    def _recycle_prealloc_slot(
+        self, p2p: _TransferRequestState, role: RoleType
+    ) -> None:
         """Phase 7e: Recycle a pre-allocated slot back to the receiver's free list."""
         if p2p is None or p2p.prealloc_slot_id is None:
             return
@@ -954,11 +975,11 @@ class DiffusionServer:
         )
         p2p.prealloc_slot_id = None  # Mark as recycled
 
-    def _handle_p2p_done(self, msg: dict, role: RoleType) -> None:
-        """Role instance finished compute in P2P mode."""
+    def _handle_transfer_done(self, msg: dict, role: RoleType) -> None:
+        """Role instance finished compute in transfer mode."""
         request_id = msg.get("request_id", "")
         error = msg.get("error")
-        p2p = self._p2p_state.get(request_id)
+        p2p = self._transfer_state.get(request_id)
 
         if role == RoleType.DENOISER:
             record = self._tracker.get(request_id)
@@ -982,9 +1003,9 @@ class DiffusionServer:
             # The denoiser's done message includes new staged info for decoder
             if p2p is not None and msg.get("staged_for_decoder"):
                 # Denoiser slot stays occupied until RDMA push completes
-                # (freed in _handle_p2p_pushed)
+                # (freed in _handle_transfer_pushed)
 
-                # Update P2P state with denoiser→decoder transfer info
+                # Update transfer state with denoiser→decoder transfer info
                 p2p.sender_session_id = msg.get("session_id", "")
                 p2p.sender_pool_ptr = msg.get("pool_ptr", 0)
                 p2p.sender_slot_offset = msg.get("slot_offset", 0)
@@ -993,13 +1014,13 @@ class DiffusionServer:
                 p2p.scalar_fields = msg.get("scalar_fields", {})
                 p2p.sender_instance = record.denoiser_instance if record else 0
 
-                # Enqueue for P2P decoder
+                # Enqueue for decoder transfer
                 try:
                     self._tracker.transition(request_id, RequestState.DECODER_WAITING)
                 except ValueError:
                     pass
                 self._decoder_tta.append(
-                    _RoleTTAEntry(request_id=request_id, p2p_state=p2p)
+                    _RoleTTAEntry(request_id=request_id, transfer_state=p2p)
                 )
             else:
                 # No pending transfer — free denoiser slot immediately
@@ -1028,17 +1049,17 @@ class DiffusionServer:
                 # Forward result to HTTP client
                 result_frames = msg.get("result_frames")
                 if result_frames:
-                    self._p2p_return_to_client(request_id, result_frames)
+                    self._transfer_return_to_client(request_id, result_frames)
                 else:
-                    self._p2p_return_to_client_from_msg(request_id, msg)
+                    self._transfer_return_to_client_from_msg(request_id, msg)
 
-            # Cleanup P2P state
-            self._p2p_state.pop(request_id, None)
+            # Cleanup transfer state
+            self._transfer_state.pop(request_id, None)
 
-    def _p2p_dispatch_to_decoder(
-        self, request_id: str, p2p: _P2PRequestState, decoder_idx: int
+    def _transfer_dispatch_to_decoder(
+        self, request_id: str, p2p: _TransferRequestState, decoder_idx: int
     ) -> None:
-        """Dispatch P2P transfer to decoder.
+        """Dispatch transfer to decoder.
 
         Phase 7c: Same pre-allocated slot fast-path as denoiser dispatch.
         """
@@ -1067,33 +1088,37 @@ class DiffusionServer:
             p2p.prealloc_slot_id = slot_info.get("slot_id")
 
             dest_addr = slot_info["addr"]
-            push_msg = P2PPushMsg(
+            push_msg = TransferPushMsg(
                 request_id=request_id,
                 dest_session_id=p2p.receiver_session_id,
                 dest_addr=dest_addr,
                 transfer_size=p2p.data_size,
             )
             sender_idx = p2p.sender_instance
-            self._denoiser_pushes[sender_idx].send_multipart(encode_p2p_msg(push_msg))
+            self._denoiser_pushes[sender_idx].send_multipart(
+                encode_transfer_msg(push_msg)
+            )
             logger.debug(
-                "DiffusionServer P2P: fast-path push to decoder[%d] for %s "
+                "DiffusionServer transfer: fast-path push to decoder[%d] for %s "
                 "(prealloc slot %s)",
                 decoder_idx,
                 request_id,
                 slot_info.get("slot_id"),
             )
         else:
-            alloc_msg = P2PAllocMsg(
+            alloc_msg = TransferAllocMsg(
                 request_id=request_id,
                 data_size=p2p.data_size,
                 source_role="denoiser",
             )
-            self._decoder_pushes[decoder_idx].send_multipart(encode_p2p_msg(alloc_msg))
+            self._decoder_pushes[decoder_idx].send_multipart(
+                encode_transfer_msg(alloc_msg)
+            )
 
-    def _p2p_return_to_client(self, request_id: str, result_frames: list) -> None:
-        """Return P2P result to HTTP client.
+    def _transfer_return_to_client(self, request_id: str, result_frames: list) -> None:
+        """Return transfer result to HTTP client.
 
-        Decodes hex-encoded frames from the P2P decoder, unpacks them into
+        Decodes hex-encoded frames from the transfer decoder, unpacks them into
         an OutputBatch, and sends the pickled result to the frontend.
         """
         from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import (
@@ -1132,15 +1157,15 @@ class DiffusionServer:
             )
         except Exception as e:
             logger.error(
-                "DiffusionServer P2P: failed to send result for %s: %s",
+                "DiffusionServer transfer: failed to send result for %s: %s",
                 request_id,
                 e,
             )
 
         self._tracker.remove(request_id)
 
-    def _p2p_return_to_client_from_msg(self, request_id: str, msg: dict) -> None:
-        """Return P2P result to HTTP client from message fields."""
+    def _transfer_return_to_client_from_msg(self, request_id: str, msg: dict) -> None:
+        """Return transfer result to HTTP client from message fields."""
         from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import (
             OutputBatch,
         )
@@ -1160,7 +1185,7 @@ class DiffusionServer:
             )
         except zmq.ZMQError as e:
             logger.error(
-                "DiffusionServer P2P: failed to send result for %s: %s",
+                "DiffusionServer transfer: failed to send result for %s: %s",
                 request_id,
                 e,
             )
@@ -1172,7 +1197,7 @@ class DiffusionServer:
             pending_count = len(self._pending)
         return {
             "role": "diffusion_server",
-            "p2p_mode": self._p2p_mode,
+            "transfer_mode": self._transfer_mode,
             "num_encoders": self._num_encoders,
             "num_denoisers": self._num_denoisers,
             "num_decoders": self._num_decoders,
@@ -1184,7 +1209,7 @@ class DiffusionServer:
             "encoder_tta_depth": len(self._encoder_tta),
             "denoiser_tta_depth": len(self._denoiser_tta),
             "decoder_tta_depth": len(self._decoder_tta),
-            "p2p_active_transfers": len(self._p2p_state),
+            "transfer_active_transfers": len(self._transfer_state),
             "encoder_peers": len(self._encoder_peers),
             "denoiser_peers": len(self._denoiser_peers),
             "decoder_peers": len(self._decoder_peers),
