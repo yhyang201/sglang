@@ -9,7 +9,7 @@ import zmq
 from sglang.multimodal_gen.runtime.disaggregation.diffusion_server import (
     DiffusionServer,
 )
-from sglang.multimodal_gen.runtime.disaggregation.transport.transfer_protocol import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.protocol import (
     TransferAllocatedMsg,
     TransferPushedMsg,
     TransferRegisterMsg,

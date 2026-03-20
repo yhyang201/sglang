@@ -16,16 +16,16 @@ from unittest.mock import MagicMock
 
 import torch
 
-from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_buffer import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.buffer import (
     TransferTensorBuffer,
 )
-from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_engine import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.engine import (
     MockTransferEngine,
 )
-from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_manager import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.manager import (
     DiffusionTransferManager,
 )
-from sglang.multimodal_gen.runtime.disaggregation.transport.transfer_protocol import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.protocol import (
     TRANSFER_MAGIC,
     TransferAllocMsg,
     TransferMsgType,

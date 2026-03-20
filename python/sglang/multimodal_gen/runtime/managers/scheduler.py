@@ -18,22 +18,22 @@ import zmq
 from sglang.multimodal_gen.configs.pipeline_configs.base import ModelTaskType
 from sglang.multimodal_gen.configs.sample.sampling_params import SamplingParams
 from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
-from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_buffer import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.buffer import (
     TransferTensorBuffer,
 )
-from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_engine import (
-    create_transfer_engine,
-)
-from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_manager import (
-    DiffusionTransferManager,
-)
-from sglang.multimodal_gen.runtime.disaggregation.transport.role_connector import (
-    extract_transfer_fields,
-)
-from sglang.multimodal_gen.runtime.disaggregation.transport.tensor_codec import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.codec import (
     send_tensors,
 )
-from sglang.multimodal_gen.runtime.disaggregation.transport.transfer_protocol import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.connector import (
+    extract_transfer_fields,
+)
+from sglang.multimodal_gen.runtime.disaggregation.transport.engine import (
+    create_transfer_engine,
+)
+from sglang.multimodal_gen.runtime.disaggregation.transport.manager import (
+    DiffusionTransferManager,
+)
+from sglang.multimodal_gen.runtime.disaggregation.transport.protocol import (
     TRANSFER_MAGIC,
     TransferAllocatedMsg,
     TransferDoneMsg,

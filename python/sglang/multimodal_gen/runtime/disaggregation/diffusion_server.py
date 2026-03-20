@@ -19,10 +19,10 @@ from sglang.multimodal_gen.runtime.disaggregation.request_state import (
     RequestTracker,
 )
 from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
-from sglang.multimodal_gen.runtime.disaggregation.transport.tensor_codec import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.codec import (
     unpack_tensors,
 )
-from sglang.multimodal_gen.runtime.disaggregation.transport.transfer_protocol import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.protocol import (
     TransferAllocMsg,
     TransferMsgType,
     TransferPushMsg,

@@ -5,7 +5,7 @@ import unittest
 
 import torch
 
-from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_buffer import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.buffer import (
     TransferTensorBuffer,
 )
 
@@ -284,7 +284,7 @@ class TestTransferEngineGPUDirect(unittest.TestCase):
     """Test supports_gpu_direct property on engine classes."""
 
     def test_mock_engine_no_gpu_direct(self):
-        from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_engine import (
+        from sglang.multimodal_gen.runtime.disaggregation.transport.engine import (
             MockTransferEngine,
         )
 

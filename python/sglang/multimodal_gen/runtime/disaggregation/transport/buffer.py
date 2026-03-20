@@ -8,10 +8,10 @@ from dataclasses import dataclass, field
 
 import torch
 
-from sglang.multimodal_gen.runtime.disaggregation.transport.rdma.transfer_allocator import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.allocator import (
     BuddyAllocator,
 )
-from sglang.multimodal_gen.runtime.disaggregation.transport.tensor_codec import (
+from sglang.multimodal_gen.runtime.disaggregation.transport.codec import (
     str_to_dtype,
 )
 
