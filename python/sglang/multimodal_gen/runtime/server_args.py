@@ -462,7 +462,17 @@ class ServerArgs:
             )
 
     def _adjust_network_ports(self):
-        self.port = self.settle_port(self.port)
+        from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
+
+        # Disagg role instances (encoder/denoiser/decoder) don't serve HTTP,
+        # so skip settling the HTTP port to avoid unnecessary port collisions.
+        needs_http = self.disagg_role in (
+            RoleType.MONOLITHIC,
+            RoleType.SERVER,
+        )
+        if needs_http:
+            self.port = self.settle_port(self.port)
+
         initial_scheduler_port = self.scheduler_port + (
             random.randint(0, 100) if self.scheduler_port == 5555 else 0
         )

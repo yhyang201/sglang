@@ -900,20 +900,25 @@ class DiffusionServer:
             return
 
         # Free sender slot — RDMA transfer is done, sender's local buffer is released.
+        # Use the record's current state to determine which role was the sender,
+        # because sender_idx alone is ambiguous when encoder and denoiser share
+        # the same instance index (e.g., both are instance 0).
         record = self._tracker.get(request_id)
-        sender_idx = p2p.sender_instance
-        if (
-            record
-            and record.encoder_instance is not None
-            and sender_idx == record.encoder_instance
+        if record and record.state in (
+            RequestState.DENOISING_RUNNING,
+            RequestState.DENOISING_WAITING,
+            RequestState.DENOISING_DONE,
         ):
-            self._encoder_free_slots[sender_idx] += 1
-        elif (
-            record
-            and record.denoiser_instance is not None
-            and sender_idx == record.denoiser_instance
+            # Encoder→Denoiser push completed: free encoder slot
+            if record.encoder_instance is not None:
+                self._encoder_free_slots[record.encoder_instance] += 1
+        elif record and record.state in (
+            RequestState.DECODER_RUNNING,
+            RequestState.DECODER_WAITING,
         ):
-            self._denoiser_free_slots[sender_idx] += 1
+            # Denoiser→Decoder push completed: free denoiser slot
+            if record.denoiser_instance is not None:
+                self._denoiser_free_slots[record.denoiser_instance] += 1
 
         # Tell receiver that data has arrived
         # Phase 7: include prealloc_slot_id so receiver can use pre-allocated slot
