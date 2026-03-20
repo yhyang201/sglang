@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-Role definitions for diffusion pipeline disaggregation.
-
-Each diffusion pipeline can be decomposed into three roles:
-- ENCODER: Text/image encoding, latent preparation, timestep preparation
-- DENOISER: Iterative denoising loop (the compute-heavy part)
-- DECODER: VAE decode from latent space to pixel space
-"""
+"""Role definitions for diffusion pipeline disaggregation."""
 
 from enum import Enum
 
@@ -14,13 +7,11 @@ _ROLE_ALIASES = {"denoising": "denoiser"}
 
 
 class RoleType(str, Enum):
-    """Role type for disaggregated diffusion pipelines."""
-
-    MONOLITHIC = "monolithic"  # Default: load everything, run all stages
-    ENCODER = "encoder"  # Text/image encoding + latent/timestep prep
-    DENOISER = "denoiser"  # Denoising loop only
-    DECODER = "decoder"  # VAE decode only
-    SERVER = "server"  # DiffusionServer head node (no GPU, routes requests)
+    MONOLITHIC = "monolithic"
+    ENCODER = "encoder"
+    DENOISER = "denoiser"
+    DECODER = "decoder"
+    SERVER = "server"  # Head node (no GPU, routes requests)
 
     @classmethod
     def from_string(cls, value: str) -> "RoleType":
@@ -38,12 +29,7 @@ class RoleType(str, Enum):
 
 
 def get_module_role(module_name: str) -> "RoleType | None":
-    """Classify a module name to its primary role.
-
-    Returns None for shared/lightweight modules (e.g., scheduler) that should
-    always be loaded regardless of role.
-    """
-    # Encoder-specific modules (text encoders, tokenizers, image encoders)
+    """Classify a module name to its primary role. Returns None for shared modules."""
     encoder_prefixes = (
         "text_encoder",
         "tokenizer",
@@ -57,34 +43,23 @@ def get_module_role(module_name: str) -> "RoleType | None":
     ):
         return RoleType.ENCODER
 
-    # Denoising-specific modules (transformer / DiT)
     denoising_prefixes = ("transformer",)
     if any(
         module_name == p or module_name.startswith(p + "_") for p in denoising_prefixes
     ):
         return RoleType.DENOISER
 
-    # Decoder-specific modules (VAE, vocoder)
     decoder_prefixes = ("vae", "audio_vae", "video_vae", "vocoder")
     if any(
         module_name == p or module_name.startswith(p + "_") for p in decoder_prefixes
     ):
         return RoleType.DECODER
 
-    # Shared modules (scheduler, etc.) - always loaded
     return None
 
 
 def filter_modules_for_role(module_names: list[str], role: "RoleType") -> list[str]:
-    """Filter module names to only those needed by the given role.
-
-    For MONOLITHIC role, returns all modules unchanged.
-
-    Module loading rules per role:
-    - ENCODER: encoder modules + decoder modules (VAE needed for ImageVAEEncoding) + shared
-    - DENOISER: denoising modules + shared (no VAE, no text encoders)
-    - DECODER: decoder modules + shared
-    """
+    """Filter module names to only those needed by the given role."""
     if role in (RoleType.MONOLITHIC, RoleType.SERVER):
         return module_names
 
@@ -93,10 +68,8 @@ def filter_modules_for_role(module_names: list[str], role: "RoleType") -> list[s
         module_role = get_module_role(name)
 
         if module_role is None:
-            # Shared module (scheduler, etc.) - always include
             filtered.append(name)
         elif module_role == role:
-            # Module belongs to this role
             filtered.append(name)
         elif role == RoleType.ENCODER and module_role == RoleType.DECODER:
             # Encoder also needs VAE for ImageVAEEncoding stages

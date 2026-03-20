@@ -1,18 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-Zero-copy tensor codec for ZMQ multipart messages.
+"""Zero-copy tensor codec for ZMQ multipart messages.
 
-Protocol:
-  Frame 0:   JSON metadata (tensor descriptors + scalar fields)
-  Frame 1-N: Raw tensor data buffers (one frame per tensor)
-
-Sender uses TensorWrapper.__buffer__() for zero-copy with copy=False.
-Receiver uses torch.frombuffer() + reshape + clone to reconstruct tensors.
-
-Used by:
-  - P2P decoder result path (scheduler → DiffusionServer)
-  - DiffusionServer decoder result handler
-  - TransferBuffer (str_to_dtype)
+Frame 0: JSON metadata (tensor descriptors + scalar fields)
+Frame 1-N: Raw tensor data buffers (one per tensor)
 """
 
 import ctypes
@@ -25,7 +15,6 @@ import zmq
 
 logger = logging.getLogger(__name__)
 
-# torch.dtype <-> string mapping
 _DTYPE_TO_STR = {
     torch.float16: "float16",
     torch.float32: "float32",
@@ -56,10 +45,7 @@ def str_to_dtype(s: str) -> torch.dtype:
 
 
 class TensorWrapper:
-    """Expose a CPU-contiguous tensor's data buffer for zero-copy ZMQ send.
-
-    Adapted from sglang/srt/disaggregation/encode_server.py.
-    """
+    """Expose a CPU-contiguous tensor's data buffer for zero-copy ZMQ send."""
 
     def __init__(self, tensor: torch.Tensor):
         if tensor.is_cuda:
@@ -72,15 +58,12 @@ class TensorWrapper:
         data_ptr = self.tensor.data_ptr()
         total_bytes = self.tensor.numel() * self.tensor.element_size()
         c_obj = (ctypes.c_char * total_bytes).from_address(data_ptr)
-        # prevent GC while ZMQ holds the buffer
-        c_obj._keep_alive_ref = self
+        c_obj._keep_alive_ref = self  # prevent GC while ZMQ holds the buffer
         return memoryview(c_obj)
 
 
 @dataclass
 class TensorDescriptor:
-    """Metadata for a single tensor within a multipart message."""
-
     field_name: str
     shape: list[int]
     dtype: str
@@ -108,16 +91,7 @@ def pack_tensors(
     tensor_fields: dict[str, torch.Tensor | list[torch.Tensor] | None],
     scalar_fields: dict | None = None,
 ) -> tuple[bytes, list[TensorWrapper]]:
-    """Pack tensor fields and scalar fields into metadata + buffer list.
-
-    Args:
-        tensor_fields: Mapping of field_name -> Tensor or list[Tensor] or None.
-            None values are skipped.
-        scalar_fields: Arbitrary JSON-serializable scalar data.
-
-    Returns:
-        (metadata_bytes, list_of_TensorWrapper) ready for send_multipart.
-    """
+    """Pack tensor fields into metadata + buffer list for send_multipart."""
     descriptors = []
     buffers = []
 
@@ -170,18 +144,7 @@ def send_tensors(
     scalar_fields: dict | None = None,
     flags: int = 0,
 ) -> None:
-    """Send tensors over ZMQ using multipart with zero-copy.
-
-    Frame layout:
-      [0]    JSON metadata
-      [1..N] raw tensor buffers
-
-    Args:
-        socket: ZMQ socket (PUSH, DEALER, etc.)
-        tensor_fields: field_name -> Tensor | list[Tensor] | None
-        scalar_fields: JSON-serializable scalar data
-        flags: additional ZMQ flags (e.g., zmq.NOBLOCK)
-    """
+    """Send tensors over ZMQ using multipart with zero-copy."""
     metadata_bytes, buffers = pack_tensors(tensor_fields, scalar_fields)
     parts: list = [metadata_bytes]
     parts.extend(buffers)
@@ -193,7 +156,7 @@ def pack_tensors_async(
     scalar_fields: dict | None = None,
     stream: torch.cuda.Stream | None = None,
 ) -> tuple[bytes, list["TensorWrapper"], torch.cuda.Event | None]:
-    """Pack tensors for ZMQ send with async D2H on the given stream.
+    """Pack tensors with async D2H on the given stream.
 
     Returns (metadata_bytes, wrappers, d2h_event).
     Caller must wait on d2h_event before sending wrappers.
@@ -201,7 +164,6 @@ def pack_tensors_async(
     descriptors = []
     buffers = []
 
-    # Do D2H copies on the transfer stream
     ctx = torch.cuda.stream(stream) if stream is not None else None
     if ctx is not None:
         ctx.__enter__()
@@ -247,7 +209,6 @@ def pack_tensors_async(
     if ctx is not None:
         ctx.__exit__(None, None, None)
 
-    # Build JSON metadata (CPU work, can start immediately / overlapped)
     metadata = {
         "tensor_descriptors": [d.to_dict() for d in descriptors],
         "scalar_fields": scalar_fields or {},
@@ -261,15 +222,7 @@ def unpack_tensors(
     parts: list,
     device: str | torch.device = "cpu",
 ) -> tuple[dict[str, torch.Tensor | list[torch.Tensor]], dict]:
-    """Unpack multipart message frames into tensor fields and scalar fields.
-
-    Args:
-        parts: list of ZMQ frames (Frame 0 = metadata, Frame 1..N = buffers)
-        device: target device for reconstructed tensors
-
-    Returns:
-        (tensor_fields, scalar_fields)
-    """
+    """Unpack multipart message frames into tensor fields and scalar fields."""
     metadata_frame = parts[0]
     metadata_bytes = (
         bytes(metadata_frame.buffer)
@@ -288,16 +241,13 @@ def unpack_tensors(
             f"Expected {len(descriptors)} tensor frames, got {len(parts) - 1}"
         )
 
-    # Reconstruct tensors, grouping list fields
     tensor_fields: dict[str, torch.Tensor | list[torch.Tensor]] = {}
-    # Track max list index for pre-allocating lists
     list_sizes: dict[str, int] = {}
     for desc in descriptors:
         if desc.list_index >= 0:
             current_max = list_sizes.get(desc.field_name, 0)
             list_sizes[desc.field_name] = max(current_max, desc.list_index + 1)
 
-    # Pre-allocate lists
     for field_name, size in list_sizes.items():
         tensor_fields[field_name] = [None] * size
 
@@ -305,7 +255,7 @@ def unpack_tensors(
         frame = parts[i + 1]
         buf = frame.buffer if hasattr(frame, "buffer") else bytes(frame)
         dtype = str_to_dtype(desc.dtype)
-        # clone() to own the memory (not depend on ZMQ buffer lifetime)
+        # clone() to own the memory (decouple from ZMQ buffer lifetime)
         tensor = torch.frombuffer(buf, dtype=dtype).reshape(desc.shape).clone()
         if device != "cpu" and device != torch.device("cpu"):
             tensor = tensor.to(device)

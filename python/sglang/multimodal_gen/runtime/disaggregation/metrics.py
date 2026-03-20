@@ -1,16 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-Observability metrics for disaggregated diffusion pipelines.
-
-Tracks per-role throughput, latency, queue depth, and error rates.
-Thread-safe for use from scheduler event loops.
-
-Usage:
-    metrics = DisaggMetrics(role="encoder")
-    metrics.record_request_start("req-001")
-    metrics.record_request_complete("req-001")
-    stats = metrics.snapshot()
-"""
+"""Observability metrics for disaggregated diffusion pipelines."""
 
 import threading
 import time
@@ -19,36 +8,22 @@ from dataclasses import dataclass
 
 @dataclass
 class _RequestTiming:
-    """Internal timing state for a single in-flight request."""
-
     start_time: float
     stage_start: float = 0.0
 
 
 @dataclass
 class RoleStats:
-    """Point-in-time snapshot of a role's metrics.
-
-    Returned by DisaggMetrics.snapshot() and serialized to JSON
-    for the /stats HTTP endpoint.
-    """
-
     role: str
     requests_completed: int = 0
     requests_failed: int = 0
     requests_in_flight: int = 0
     requests_timed_out: int = 0
     queue_depth: int = 0
-
-    # Latency (seconds) — last / avg / max
     last_latency_s: float = 0.0
     avg_latency_s: float = 0.0
     max_latency_s: float = 0.0
-
-    # Throughput
-    throughput_rps: float = 0.0  # requests per second (rolling window)
-
-    # Uptime
+    throughput_rps: float = 0.0
     uptime_s: float = 0.0
 
     def to_dict(self) -> dict:
@@ -68,35 +43,26 @@ class RoleStats:
 
 
 class DisaggMetrics:
-    """Thread-safe metrics collector for a single disagg role.
-
-    Each role (encoder/denoiser/decoder) maintains its own instance.
-    The encoder aggregates all roles' stats for the /stats endpoint.
-    """
+    """Thread-safe metrics collector for a single disagg role."""
 
     def __init__(self, role: str):
         self._role = role
         self._lock = threading.Lock()
         self._start_time = time.monotonic()
 
-        # Counters
         self._completed = 0
         self._failed = 0
         self._timed_out = 0
 
-        # In-flight tracking
         self._in_flight: dict[str, _RequestTiming] = {}
 
-        # Latency tracking
         self._last_latency = 0.0
         self._max_latency = 0.0
         self._total_latency = 0.0
 
-        # Throughput: rolling window of completion timestamps
         self._completion_times: list[float] = []
-        self._throughput_window_s = 60.0  # 1-minute rolling window
+        self._throughput_window_s = 60.0
 
-        # Queue depth (updated externally)
         self._queue_depth = 0
 
     @property
@@ -104,12 +70,10 @@ class DisaggMetrics:
         return self._role
 
     def record_request_start(self, request_id: str) -> None:
-        """Record that a request has started processing."""
         with self._lock:
             self._in_flight[request_id] = _RequestTiming(start_time=time.monotonic())
 
     def record_request_complete(self, request_id: str) -> None:
-        """Record successful completion of a request."""
         now = time.monotonic()
         with self._lock:
             timing = self._in_flight.pop(request_id, None)
@@ -124,24 +88,20 @@ class DisaggMetrics:
             self._prune_completion_times(now)
 
     def record_request_failed(self, request_id: str) -> None:
-        """Record that a request failed."""
         with self._lock:
             self._in_flight.pop(request_id, None)
             self._failed += 1
 
     def record_request_timeout(self, request_id: str) -> None:
-        """Record that a request timed out."""
         with self._lock:
             self._in_flight.pop(request_id, None)
             self._timed_out += 1
 
     def update_queue_depth(self, depth: int) -> None:
-        """Update the current queue depth."""
         with self._lock:
             self._queue_depth = depth
 
     def snapshot(self) -> RoleStats:
-        """Return a point-in-time snapshot of all metrics."""
         now = time.monotonic()
         with self._lock:
             self._prune_completion_times(now)
@@ -168,7 +128,6 @@ class DisaggMetrics:
             )
 
     def _prune_completion_times(self, now: float) -> None:
-        """Remove completion timestamps outside the rolling window."""
         cutoff = now - self._throughput_window_s
         while self._completion_times and self._completion_times[0] < cutoff:
             self._completion_times.pop(0)

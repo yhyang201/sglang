@@ -1,17 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-Transfer engine abstraction for P2P tensor transfer between role instances.
-
-Provides a unified interface over MooncakeTransferEngine (RDMA) with a
-mock fallback for unit testing. Each role instance creates one engine,
-registers its TransferBuffer's pinned memory pool, and uses it to push
-data directly to remote instances.
-
-Usage:
-    engine = create_transfer_engine(hostname="10.0.0.1", gpu_id=0)
-    engine.register_buffer(pool_ptr, pool_size)
-    engine.transfer_sync(dest_session_id, src_addr, dst_addr, length)
-"""
+"""Transfer engine abstraction for tensor transfer between role instances."""
 
 import logging
 import threading
@@ -19,7 +7,6 @@ from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
 
-# Sentinel for detecting whether mooncake is available
 _MOONCAKE_AVAILABLE = None
 
 
@@ -38,34 +25,27 @@ def _check_mooncake() -> bool:
 
 
 class BaseTransferEngine(ABC):
-    """Abstract transfer engine for P2P data movement."""
+    """Abstract transfer engine for data movement between roles."""
 
     @property
     def supports_gpu_direct(self) -> bool:
-        """Whether this engine supports GPUDirect RDMA (GPU memory addresses)."""
         return False
 
     @property
     @abstractmethod
-    def session_id(self) -> str:
-        """Unique session identifier for this engine instance."""
+    def session_id(self) -> str: ...
 
     @abstractmethod
-    def register_buffer(self, ptr: int, length: int) -> None:
-        """Register a memory region for RDMA access."""
+    def register_buffer(self, ptr: int, length: int) -> None: ...
 
     @abstractmethod
-    def deregister_buffer(self, ptr: int) -> None:
-        """Deregister a previously registered memory region."""
+    def deregister_buffer(self, ptr: int) -> None: ...
 
     @abstractmethod
     def transfer_sync(
         self, dst_session_id: str, src_addr: int, dst_addr: int, length: int
     ) -> int:
-        """Synchronously transfer data from local src_addr to remote dst_addr.
-
-        Returns 0 on success, negative on failure.
-        """
+        """Returns 0 on success, negative on failure."""
 
     @abstractmethod
     def batch_transfer_sync(
@@ -74,12 +54,11 @@ class BaseTransferEngine(ABC):
         src_addrs: list[int],
         dst_addrs: list[int],
         lengths: list[int],
-    ) -> int:
-        """Batch synchronous transfer. Returns 0 on success."""
+    ) -> int: ...
 
 
 class MooncakeDiffusionEngine(BaseTransferEngine):
-    """Production transfer engine backed by MooncakeTransferEngine (RDMA/RPC)."""
+    """Production engine backed by MooncakeTransferEngine (RDMA)."""
 
     @property
     def supports_gpu_direct(self) -> bool:
@@ -133,14 +112,9 @@ class MooncakeDiffusionEngine(BaseTransferEngine):
 
 
 class MockTransferEngine(BaseTransferEngine):
-    """In-process mock engine for unit testing P2P transfer logic.
+    """In-process mock for unit testing. Simulates RDMA via ctypes memmove."""
 
-    Simulates RDMA by copying data between registered memory regions
-    within the same process (using ctypes memmove). Multiple instances
-    share a class-level registry so they can "see" each other's buffers.
-    """
-
-    # Class-level registry: session_id -> {ptr -> (ctypes_buffer, length)}
+    # Shared registry so mock instances can "see" each other's buffers
     _registry: dict[str, dict[int, tuple[object, int]]] = {}
     _lock = threading.Lock()
     _counter = 0
@@ -168,7 +142,6 @@ class MockTransferEngine(BaseTransferEngine):
     def transfer_sync(
         self, dst_session_id: str, src_addr: int, dst_addr: int, length: int
     ) -> int:
-        """Simulate RDMA by direct memory copy (ctypes memmove)."""
         import ctypes
 
         try:
@@ -205,11 +178,7 @@ def create_transfer_engine(
     ib_device: str | None = None,
     force_mock: bool = False,
 ) -> BaseTransferEngine:
-    """Factory: create the best available transfer engine.
-
-    Uses MooncakeTransferEngine if available, falls back to MockTransferEngine.
-    Set force_mock=True for testing.
-    """
+    """Factory: returns MooncakeDiffusionEngine if available, else MockTransferEngine."""
     if not force_mock and _check_mooncake():
         return MooncakeDiffusionEngine(
             hostname=hostname, gpu_id=gpu_id, ib_device=ib_device

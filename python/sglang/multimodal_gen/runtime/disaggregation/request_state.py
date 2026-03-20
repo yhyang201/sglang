@@ -1,17 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-Request state machine for disaggregated diffusion pipelines.
-
-Tracks the lifecycle of each request as it flows through
-Encoder -> Denoiser -> Decoder roles in a multi-instance deployment.
-
-Usage:
-    tracker = RequestTracker()
-    tracker.submit("req-001")
-    tracker.transition("req-001", RequestState.ENCODER_RUNNING)
-    ...
-    tracker.transition("req-001", RequestState.DONE)
-"""
+"""Request state machine for disaggregated diffusion pipelines."""
 
 import enum
 import logging
@@ -25,30 +13,24 @@ logger = logging.getLogger(__name__)
 class RequestState(enum.Enum):
     """Lifecycle states for a disagg pipeline request.
 
-    *_WAITING states: request is in the TryToAdd (TTA) queue, awaiting a
-    free buffer slot on some instance.
-    *_RUNNING states: request has been dispatched to a specific instance.
+    *_WAITING: request queued, awaiting a free buffer slot.
+    *_RUNNING: request dispatched to a specific instance.
     """
 
     PENDING = "pending"
-    # Encoder
     ENCODER_WAITING = "encoder_waiting"
     ENCODER_RUNNING = "encoder_running"
     ENCODER_DONE = "encoder_done"
-    # Denoiser
     DENOISING_WAITING = "denoising_waiting"
     DENOISING_RUNNING = "denoising_running"
     DENOISING_DONE = "denoising_done"
-    # Decoder
     DECODER_WAITING = "decoder_waiting"
     DECODER_RUNNING = "decoder_running"
-    # Terminal
     DONE = "done"
     FAILED = "failed"
     TIMED_OUT = "timed_out"
 
 
-# Valid state transitions
 _VALID_TRANSITIONS: dict[RequestState, set[RequestState]] = {
     RequestState.PENDING: {
         RequestState.ENCODER_WAITING,
@@ -89,13 +71,11 @@ _VALID_TRANSITIONS: dict[RequestState, set[RequestState]] = {
         RequestState.DONE,
         RequestState.FAILED,
     },
-    # Terminal states — can transition to TIMED_OUT from any non-terminal
     RequestState.DONE: set(),
     RequestState.FAILED: set(),
     RequestState.TIMED_OUT: set(),
 }
 
-# Non-terminal states that can time out
 _ACTIVE_STATES = {
     RequestState.PENDING,
     RequestState.ENCODER_WAITING,
@@ -111,8 +91,6 @@ _ACTIVE_STATES = {
 
 @dataclass
 class RequestRecord:
-    """Tracking record for a single request."""
-
     request_id: str
     state: RequestState = RequestState.PENDING
     submit_time: float = field(default_factory=time.monotonic)
@@ -134,19 +112,13 @@ class RequestRecord:
 
 
 class RequestTracker:
-    """Thread-safe tracker for request state machines.
-
-    Maintains the state of all in-flight requests and provides
-    query methods for dispatch policies (e.g., count by state,
-    find timed-out requests).
-    """
+    """Thread-safe tracker for request state machines."""
 
     def __init__(self):
         self._lock = threading.Lock()
         self._requests: dict[str, RequestRecord] = {}
 
     def submit(self, request_id: str) -> RequestRecord:
-        """Register a new request in PENDING state."""
         with self._lock:
             if request_id in self._requests:
                 raise ValueError(f"Duplicate request_id: {request_id}")
@@ -164,10 +136,6 @@ class RequestTracker:
         denoiser_instance: int | None = None,
         decoder_instance: int | None = None,
     ) -> RequestRecord:
-        """Transition a request to a new state.
-
-        Raises ValueError for invalid transitions or unknown request_id.
-        """
         with self._lock:
             record = self._requests.get(request_id)
             if record is None:
@@ -175,7 +143,6 @@ class RequestTracker:
 
             old_state = record.state
 
-            # Allow timeout from any active state
             if new_state == RequestState.TIMED_OUT:
                 if old_state not in _ACTIVE_STATES:
                     raise ValueError(
@@ -204,27 +171,22 @@ class RequestTracker:
             return record
 
     def get(self, request_id: str) -> RequestRecord | None:
-        """Get a request record by ID."""
         with self._lock:
             return self._requests.get(request_id)
 
     def remove(self, request_id: str) -> RequestRecord | None:
-        """Remove and return a request record (for completed/failed requests)."""
         with self._lock:
             return self._requests.pop(request_id, None)
 
     def count_by_state(self, state: RequestState) -> int:
-        """Count requests in a given state."""
         with self._lock:
             return sum(1 for r in self._requests.values() if r.state == state)
 
     def count_active(self) -> int:
-        """Count all non-terminal requests."""
         with self._lock:
             return sum(1 for r in self._requests.values() if not r.is_terminal())
 
     def find_timed_out(self, timeout_s: float) -> list[str]:
-        """Find active requests that have exceeded the timeout."""
         now = time.monotonic()
         with self._lock:
             return [
@@ -234,12 +196,6 @@ class RequestTracker:
             ]
 
     def count_at_instance(self, role: str, instance_id: int) -> int:
-        """Count active requests assigned to a specific role instance.
-
-        Args:
-            role: "encoder", "denoiser", or "decoder"
-            instance_id: The instance index
-        """
         attr = f"{role}_instance"
         with self._lock:
             return sum(
@@ -249,7 +205,6 @@ class RequestTracker:
             )
 
     def snapshot(self) -> dict:
-        """Return a summary snapshot for observability."""
         with self._lock:
             state_counts = {}
             for r in self._requests.values():

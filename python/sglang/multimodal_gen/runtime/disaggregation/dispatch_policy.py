@@ -1,18 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-Dispatch policies for multi-instance disaggregated diffusion pipelines.
-
-Selects which role instance should handle the next request based on
-load balancing criteria.
-
-Usage:
-    policy = MaxFreeSlotsFirst(num_instances=3, max_slots_per_instance=2)
-    instance_id = policy.select(tracker)
-
-    # Or simpler:
-    policy = RoundRobin(num_instances=3)
-    instance_id = policy.select()
-"""
+"""Dispatch policies for multi-instance disaggregated diffusion pipelines."""
 
 import abc
 import logging
@@ -22,8 +9,6 @@ logger = logging.getLogger(__name__)
 
 
 class DispatchPolicy(abc.ABC):
-    """Base class for dispatch policies."""
-
     def __init__(self, num_instances: int):
         if num_instances < 1:
             raise ValueError(f"num_instances must be >= 1, got {num_instances}")
@@ -34,46 +19,19 @@ class DispatchPolicy(abc.ABC):
         return self._num_instances
 
     @abc.abstractmethod
-    def select(self, active_counts: list[int] | None = None) -> int:
-        """Select the next instance to dispatch to.
-
-        Args:
-            active_counts: Optional list of active request counts per instance.
-                Length must equal num_instances. Used by load-aware policies.
-
-        Returns:
-            Instance index (0-based).
-        """
-        ...
+    def select(self, active_counts: list[int] | None = None) -> int: ...
 
     def select_with_capacity(self, free_slots: list[int]) -> int | None:
-        """Select an instance that has free capacity.
-
-        Args:
-            free_slots: FreeBufferSlots per instance. Length must equal num_instances.
-
-        Returns:
-            Instance index, or None if all instances are at capacity.
-        """
-        # Default: find any instance with free_slots > 0, prefer via select()
+        """Select an instance that has free capacity, or None if all full."""
         if not any(s > 0 for s in free_slots):
             return None
         return self.select(active_counts=None)
 
     def record_completion(self, instance_id: int) -> None:
-        """Notify the policy that an instance completed a request.
-
-        Override in subclasses that track per-instance state.
-        """
         pass
 
 
 class RoundRobin(DispatchPolicy):
-    """Simple round-robin dispatch across instances.
-
-    Thread-safe. Ignores load information.
-    """
-
     def __init__(self, num_instances: int):
         super().__init__(num_instances)
         self._lock = threading.Lock()
@@ -87,7 +45,6 @@ class RoundRobin(DispatchPolicy):
 
     def select_with_capacity(self, free_slots: list[int]) -> int | None:
         with self._lock:
-            # Try up to num_instances starting from _next
             for _ in range(self._num_instances):
                 idx = self._next
                 self._next = (self._next + 1) % self._num_instances
@@ -97,30 +54,21 @@ class RoundRobin(DispatchPolicy):
 
 
 class MaxFreeSlotsFirst(DispatchPolicy):
-    """Dispatch to the instance with the most free slots.
-
-    Requires active_counts or free_slots to be provided. Falls back to
-    round-robin if no load info is available.
-
-    Thread-safe.
-    """
+    """Dispatch to the instance with the most free slots."""
 
     def __init__(self, num_instances: int, max_slots_per_instance: int = 1):
         super().__init__(num_instances)
         self._max_slots = max_slots_per_instance
         self._lock = threading.Lock()
-        # Fallback counter for tie-breaking
         self._tiebreak = 0
 
     def select(self, active_counts: list[int] | None = None) -> int:
         with self._lock:
             if active_counts is None or len(active_counts) != self._num_instances:
-                # Fallback to round-robin if no load info
                 chosen = self._tiebreak % self._num_instances
                 self._tiebreak += 1
                 return chosen
 
-            # Find instance with most free slots
             best_id = 0
             best_free = self._max_slots - active_counts[0]
             for i in range(1, self._num_instances):
@@ -129,7 +77,6 @@ class MaxFreeSlotsFirst(DispatchPolicy):
                     best_free = free
                     best_id = i
                 elif free == best_free:
-                    # Tie-break: prefer the one after tiebreak counter
                     if i == (self._tiebreak % self._num_instances):
                         best_id = i
 
@@ -147,7 +94,6 @@ class MaxFreeSlotsFirst(DispatchPolicy):
             return best_id
 
     def select_with_capacity(self, free_slots: list[int]) -> int | None:
-        """Select instance with most free slots. Returns None if all full."""
         with self._lock:
             best_id = -1
             best_free = 0
@@ -207,13 +153,6 @@ class PoolDispatcher:
 
 
 def create_dispatch_policy(name: str, num_instances: int, **kwargs) -> DispatchPolicy:
-    """Factory function for dispatch policies.
-
-    Args:
-        name: Policy name — "round_robin" or "max_free_slots"
-        num_instances: Number of instances to dispatch across
-        **kwargs: Additional policy-specific arguments
-    """
     policies = {
         "round_robin": RoundRobin,
         "max_free_slots": MaxFreeSlotsFirst,
