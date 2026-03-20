@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""End-to-end tests for disaggregated diffusion server (relay & P2P modes).
+"""End-to-end tests for disaggregated diffusion server.
 
 Launches 4 CLI processes (encoder, denoiser, decoder, server head) via
-``sglang serve --disagg-role ...``, sends a video generation request via
+``sglang serve --disagg-role ...``, sends generation requests via
 the OpenAI-compatible API, and validates the output.
 
 Usage:
-    # Relay mode (default) — requires 2+ GPUs
-    python -m pytest python/sglang/multimodal_gen/test/server/test_disagg_server.py -v -s -k relay
+    # Run all disagg tests (requires 2+ GPUs)
+    python -m pytest python/sglang/multimodal_gen/test/server/test_disagg_server.py -v -s
 
-    # P2P mode — requires 2+ GPUs + Mooncake TransferEngine
-    python -m pytest python/sglang/multimodal_gen/test/server/test_disagg_server.py -v -s -k p2p
+    # Run only the video (Wan) test
+    python -m pytest ... -k wan
+
+    # Run only the image (Z-Image-Turbo) test
+    python -m pytest ... -k zimage
 
     # With custom GPU assignment
     DISAGG_ENCODER_GPU=0 DISAGG_DENOISER_GPU=1 DISAGG_DECODER_GPU=2 \
@@ -19,6 +22,7 @@ Usage:
 
 from __future__ import annotations
 
+import base64
 import os
 import shlex
 import subprocess
@@ -37,10 +41,22 @@ from sglang.multimodal_gen.test.test_utils import find_free_port
 
 logger = init_logger(__name__)
 
-# Model for testing — small enough for CI
-DEFAULT_MODEL = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
-
 HOST = "127.0.0.1"
+
+# ---------------------------------------------------------------------------
+# Model configs
+# ---------------------------------------------------------------------------
+
+# Video model (Wan T2V)
+WAN_MODEL = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+
+# Image model (Z-Image-Turbo)
+ZIMAGE_MODEL = "Tongyi-MAI/Z-Image-Turbo"
+
+
+# ---------------------------------------------------------------------------
+# Cluster launch helpers
+# ---------------------------------------------------------------------------
 
 
 def _start_process(command: list[str], log_path: Path, env: dict) -> subprocess.Popen:
@@ -102,11 +118,12 @@ def _wait_for_log_message(
     )
 
 
-def _launch_disagg_cluster(p2p_mode: bool = False):
+def _launch_disagg_cluster(model: str, extra_args: list[str] | None = None):
     """Launch a disaggregated diffusion cluster (4 CLI processes).
 
     Args:
-        p2p_mode: If True, pass ``--disagg-p2p-mode`` to enable RDMA/P2P transfer.
+        model: HuggingFace model path.
+        extra_args: Additional CLI args appended to each role instance command.
     """
     import torch
 
@@ -115,7 +132,6 @@ def _launch_disagg_cluster(p2p_mode: bool = False):
     if torch.cuda.device_count() < 2:
         pytest.skip("Requires 2+ GPUs for disaggregated mode")
 
-    model = os.environ.get("DISAGG_MODEL", DEFAULT_MODEL)
     encoder_gpu = int(os.environ.get("DISAGG_ENCODER_GPU", "0"))
     denoiser_gpu = int(os.environ.get("DISAGG_DENOISER_GPU", "1"))
     decoder_gpu = int(os.environ.get("DISAGG_DECODER_GPU", "0"))
@@ -128,8 +144,7 @@ def _launch_disagg_cluster(p2p_mode: bool = False):
     decoder_port = find_free_port(HOST)
 
     ds_addr = f"tcp://{HOST}:{server_scheduler_port}"
-    mode_label = "p2p" if p2p_mode else "relay"
-    log_dir = Path(tempfile.mkdtemp(prefix=f"sglang_disagg_{mode_label}_test_"))
+    log_dir = Path(tempfile.mkdtemp(prefix="sglang_disagg_test_"))
     env = os.environ.copy()
 
     wait_timeout = float(os.environ.get("SGLANG_TEST_WAIT_SECS", "600"))
@@ -146,8 +161,6 @@ def _launch_disagg_cluster(p2p_mode: bool = False):
 
     try:
         # 1-3. Launch role instances.
-        # Roles sharing a GPU are launched sequentially to avoid port/init
-        # contention; roles on different GPUs launch in declaration order.
         roles = [
             ("encoder", encoder_port, encoder_gpu),
             ("denoiser", denoiser_port, denoiser_gpu),
@@ -177,8 +190,8 @@ def _launch_disagg_cluster(p2p_mode: bool = False):
                 "--log-level",
                 "debug",
             ]
-            if p2p_mode:
-                cmd += ["--disagg-p2p-mode"]
+            if extra_args:
+                cmd += extra_args
             log_path = log_dir / f"{role_name}.log"
             proc = _start_process(cmd, log_path, env)
             processes.append((role_name, proc))
@@ -225,8 +238,6 @@ def _launch_disagg_cluster(p2p_mode: bool = False):
             "--log-level",
             "debug",
         ]
-        if p2p_mode:
-            server_cmd += ["--disagg-p2p-mode"]
         server_log = log_dir / "server.log"
         server_proc = _start_process(server_cmd, server_log, env)
         processes.append(("server", server_proc))
@@ -240,7 +251,7 @@ def _launch_disagg_cluster(p2p_mode: bool = False):
             wait_timeout,
             "server",
         )
-        logger.info("All components ready! (mode=%s)", mode_label)
+        logger.info("All components ready!")
 
         yield {"port": http_port, "model": model, "log_dir": log_dir}
 
@@ -254,15 +265,15 @@ def _launch_disagg_cluster(p2p_mode: bool = False):
 
 
 @pytest.fixture(scope="module")
-def disagg_server_relay():
-    """Disaggregated cluster using relay (ZMQ) transport."""
-    yield from _launch_disagg_cluster(p2p_mode=False)
+def disagg_wan_server():
+    """Disaggregated cluster for Wan T2V (video generation)."""
+    yield from _launch_disagg_cluster(WAN_MODEL)
 
 
 @pytest.fixture(scope="module")
-def disagg_server_p2p():
-    """Disaggregated cluster using P2P (RDMA/Mooncake) transport."""
-    yield from _launch_disagg_cluster(p2p_mode=True)
+def disagg_zimage_server():
+    """Disaggregated cluster for Z-Image-Turbo (image generation)."""
+    yield from _launch_disagg_cluster(ZIMAGE_MODEL)
 
 
 # ---------------------------------------------------------------------------
@@ -325,26 +336,60 @@ def _test_video_generation(server_info):
     )
 
 
+def _test_image_generation(server_info):
+    from openai import OpenAI
+
+    port = server_info["port"]
+    model = server_info["model"]
+
+    client = OpenAI(
+        base_url=f"http://{HOST}:{port}/v1",
+        api_key="unused",
+    )
+
+    prompt = "A beautiful sunset over a mountain lake"
+
+    response = client.images.generate(
+        model=model,
+        prompt=prompt,
+        n=1,
+        size="1024x1024",
+        response_format="b64_json",
+    )
+
+    assert len(response.data) > 0, "No images returned"
+    b64_data = response.data[0].b64_json
+    assert b64_data is not None, "No b64_json in response"
+
+    img_bytes = base64.b64decode(b64_data)
+    assert len(img_bytes) > 1000, f"Image too small ({len(img_bytes)} bytes)"
+
+    logger.info(
+        "Image generation completed: size=%d bytes",
+        len(img_bytes),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Test classes
 # ---------------------------------------------------------------------------
 
 
-class TestDisaggServerRelay:
-    """End-to-end tests for disaggregated diffusion server (relay mode)."""
+class TestDisaggWan:
+    """E2E tests for disaggregated Wan T2V (video generation)."""
 
-    def test_health_check(self, disagg_server_relay):
-        _test_health_check(disagg_server_relay)
+    def test_health_check(self, disagg_wan_server):
+        _test_health_check(disagg_wan_server)
 
-    def test_video_generation(self, disagg_server_relay):
-        _test_video_generation(disagg_server_relay)
+    def test_video_generation(self, disagg_wan_server):
+        _test_video_generation(disagg_wan_server)
 
 
-class TestDisaggServerP2P:
-    """End-to-end tests for disaggregated diffusion server (P2P mode)."""
+class TestDisaggZImage:
+    """E2E tests for disaggregated Z-Image-Turbo (image generation)."""
 
-    def test_health_check(self, disagg_server_p2p):
-        _test_health_check(disagg_server_p2p)
+    def test_health_check(self, disagg_zimage_server):
+        _test_health_check(disagg_zimage_server)
 
-    def test_video_generation(self, disagg_server_p2p):
-        _test_video_generation(disagg_server_p2p)
+    def test_image_generation(self, disagg_zimage_server):
+        _test_image_generation(disagg_zimage_server)

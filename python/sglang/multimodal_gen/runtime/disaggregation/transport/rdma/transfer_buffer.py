@@ -281,6 +281,12 @@ class TransferTensorBuffer:
         manifest: dict[str, list[dict]] = {}
         byte_offset = 0
 
+        # Ensure the copy stream sees all prior work on the current (compute)
+        # stream.  Without this, the non-default stream may start reading
+        # source tensors before their producing kernels have finished.
+        if stream is not None:
+            stream.wait_stream(torch.cuda.current_stream())
+
         for name, value in tensors.items():
             if value is None:
                 continue

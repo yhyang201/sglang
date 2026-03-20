@@ -682,7 +682,11 @@ class Scheduler:
             num_steps = getattr(req, "num_inference_steps", None)
             if scheduler_mod is not None and num_steps is not None:
                 device = torch.device(local_device)
-                scheduler_mod.set_timesteps(num_steps, device=device)
+                extra_kwargs = {}
+                mu = req.extra.get("mu") if hasattr(req, "extra") else None
+                if mu is not None:
+                    extra_kwargs["mu"] = mu
+                scheduler_mod.set_timesteps(num_steps, device=device, **extra_kwargs)
 
         return (req, load_event, request_id, role_name, prealloc_slot_id, scalar_fields)
 
@@ -1180,7 +1184,11 @@ class Scheduler:
             num_steps = getattr(req, "num_inference_steps", None)
             if scheduler_mod is not None and num_steps is not None:
                 device = torch.device(local_device)
-                scheduler_mod.set_timesteps(num_steps, device=device)
+                extra_kwargs = {}
+                mu = req.extra.get("mu") if hasattr(req, "extra") else None
+                if mu is not None:
+                    extra_kwargs["mu"] = mu
+                scheduler_mod.set_timesteps(num_steps, device=device, **extra_kwargs)
 
         # 4. Wait for H2D before compute (GPU must see the data)
         if load_event is not None:
@@ -1215,6 +1223,10 @@ class Scheduler:
                 object.__setattr__(req, f.name, f.default_factory())
         # Ensure sampling_params is not None so __getattr__ delegation works
         object.__setattr__(req, "sampling_params", SamplingParams())
+        # Restore _extra_* prefixed fields into req.extra dict
+        extra_keys = [k for k in scalar_fields if k.startswith("_extra_")]
+        for key in extra_keys:
+            req.extra[key[len("_extra_") :]] = scalar_fields.pop(key)
         # Overlay scalar fields from the transfer message
         req.__dict__.update(scalar_fields)
         # Set tensor fields

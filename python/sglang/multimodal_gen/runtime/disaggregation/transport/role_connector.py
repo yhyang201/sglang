@@ -10,6 +10,7 @@ covered without manual updates.
 """
 
 import dataclasses
+import json
 import logging
 
 import torch
@@ -27,7 +28,7 @@ _EXCLUDE_FIELDS = frozenset(
         "modules",  # pipeline-internal references
         "metrics",  # receiver creates its own
         "extra_step_kwargs",  # scheduler-internal state
-        "extra",  # pipeline-internal intermediate state
+        "extra",  # mixed bag; serializable items extracted separately
         # Raw image inputs (already consumed by encoder, not needed downstream)
         "condition_image",  # PIL.Image
         "vae_image",  # PIL.Image
@@ -102,6 +103,23 @@ def _is_default(value, field_info) -> bool:
     return False
 
 
+def _extract_extra_fields(extra: dict, scalar_fields: dict) -> None:
+    """Extract JSON-serializable entries from Req.extra into scalar_fields.
+
+    The `extra` dict may contain a mix of serializable values (e.g., mu=float)
+    and non-serializable objects (e.g., mesh, renderer). We try each entry
+    individually and skip failures.
+    """
+    for key, value in extra.items():
+        if key.startswith("_"):
+            continue  # skip private/internal keys
+        try:
+            json.dumps(value)  # test serializability
+            scalar_fields[f"_extra_{key}"] = value
+        except (TypeError, ValueError, OverflowError):
+            pass
+
+
 def extract_transfer_fields(req) -> tuple[dict, dict]:
     """Extract all transferable fields from a Req, split into tensors and scalars.
 
@@ -134,6 +152,11 @@ def extract_transfer_fields(req) -> tuple[dict, dict]:
             except (TypeError, ValueError):
                 # Skip non-serializable values silently
                 pass
+
+    # Extract serializable entries from Req.extra (e.g., mu for Z-Image)
+    extra = getattr(req, "extra", None)
+    if extra:
+        _extract_extra_fields(extra, scalar_fields)
 
     # Also extract key fields from sampling_params
     sp = getattr(req, "sampling_params", None)
