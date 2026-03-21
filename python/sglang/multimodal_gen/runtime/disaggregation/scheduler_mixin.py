@@ -65,6 +65,31 @@ class SchedulerDisaggMixin:
     # Initialization
     # ------------------------------------------------------------------
 
+    def _init_disagg_state(self: Scheduler, server_args, local_rank: int) -> None:
+        """Initialize all disaggregation state, sockets, and transfer infrastructure."""
+        from sglang.multimodal_gen.runtime.disaggregation.metrics import DisaggMetrics
+
+        self._disagg_role = server_args.disagg_role
+        self._disagg_timeout_s = float(getattr(server_args, "disagg_timeout", 600))
+        self._disagg_metrics = None
+        self._disagg_mode = getattr(server_args, "disagg_mode", False)
+        self._pool_work_pull = None
+        self._pool_result_push = None
+        self._transfer_manager = None
+        self._transfer_stream = None
+        self._rdma_push_queue = None
+        self._rdma_push_thread = None
+        self._rdma_push_zmq = None
+        self._compute_ready_queue = None
+        self._recv_prefetch_thread = None
+
+        if self._disagg_role != RoleType.MONOLITHIC:
+            self._disagg_metrics = DisaggMetrics(role=self._disagg_role.value)
+            device = torch.device(f"cuda:{local_rank}")
+            self._transfer_stream = torch.cuda.Stream(device=device)
+            self._init_disagg_sockets()
+            self._init_disagg_transfer_manager()
+
     def _init_disagg_sockets(self: Scheduler):
         """Initialize ZMQ sockets for disaggregated mode (DiffusionServer-mediated).
 

@@ -10,6 +10,10 @@ import threading
 import psutil
 import uvicorn
 
+from sglang.multimodal_gen.runtime.disaggregation.diffusion_server import (
+    DiffusionServer,
+)
+from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 from sglang.multimodal_gen.runtime.entrypoints.http_server import create_app
 from sglang.multimodal_gen.runtime.managers.gpu_worker import run_scheduler_process
 from sglang.multimodal_gen.runtime.server_args import (
@@ -17,6 +21,7 @@ from sglang.multimodal_gen.runtime.server_args import (
     prepare_server_args,
     set_global_server_args,
 )
+from sglang.multimodal_gen.runtime.utils.common import is_port_available
 from sglang.multimodal_gen.runtime.utils.logging_utils import configure_logger, logger
 
 
@@ -215,12 +220,6 @@ def launch_pool_disagg_server(
             decoder_gpus=[[0], [2]],
         )
     """
-    from sglang.multimodal_gen.runtime.disaggregation.diffusion_server import (
-        DiffusionServer,
-    )
-    from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
-    from sglang.multimodal_gen.runtime.utils.common import is_port_available
-
     configure_logger(server_args)
 
     num_encoders = len(encoder_gpus)
@@ -451,10 +450,6 @@ def launch_disagg_server(server_args: ServerArgs):
         denoiser result: scheduler_port + 2
         decoder result: scheduler_port + 3
     """
-    from sglang.multimodal_gen.runtime.disaggregation.diffusion_server import (
-        DiffusionServer,
-    )
-
     configure_logger(server_args)
 
     for name, val in [
@@ -524,8 +519,6 @@ def launch_disagg_role(server_args: ServerArgs):
        (derived from --disagg-server-addr + role offset)
     3. Spawns GPU worker processes for the assigned role.
     """
-    from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
-
     configure_logger(server_args)
 
     role_type = server_args.disagg_role
@@ -555,8 +548,6 @@ def launch_disagg_role(server_args: ServerArgs):
     # Build role-specific ServerArgs
     # Use a different port for the scheduler's internal ROUTER socket to avoid
     # conflicting with the pool work PULL socket (both bind on scheduler_port).
-    from sglang.multimodal_gen.runtime.utils.common import is_port_available
-
     internal_scheduler_port = server_args.scheduler_port + 10000
     if internal_scheduler_port > 65535:
         internal_scheduler_port = server_args.scheduler_port - 10000
@@ -640,8 +631,6 @@ def launch_disagg_role(server_args: ServerArgs):
 
 def dispatch_launch(server_args: ServerArgs):
     """Route to the correct launch function based on --disagg-role."""
-    from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
-
     role = server_args.disagg_role
     if role == RoleType.MONOLITHIC:
         launch_server(server_args)
