@@ -44,13 +44,13 @@ from sglang.multimodal_gen.runtime.disaggregation.transport.protocol import (
     encode_transfer_msg,
     is_transfer_message,
 )
+from sglang.multimodal_gen.runtime.pipelines_core import Req
 from sglang.multimodal_gen.runtime.utils.common import get_zmq_socket
 from sglang.multimodal_gen.runtime.utils.distributed import broadcast_pyobj
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 if TYPE_CHECKING:
     from sglang.multimodal_gen.runtime.managers.scheduler import Scheduler
-    from sglang.multimodal_gen.runtime.pipelines_core import Req
 
 logger = init_logger(__name__)
 
@@ -1023,8 +1023,6 @@ class SchedulerDisaggMixin:
         Initializes all dataclass field defaults first, then overlays
         scalar and tensor fields from the transfer message.
         """
-        from sglang.multimodal_gen.runtime.pipelines_core import Req
-
         req = object.__new__(Req)
         # Initialize all dataclass fields with their defaults
         for f in dataclasses.fields(Req):
@@ -1059,8 +1057,6 @@ class SchedulerDisaggMixin:
         Note: Scheduler timestep init is done in _handle_transfer_ready
         to overlap with tensor loading.
         """
-        from sglang.multimodal_gen.runtime.pipelines_core import Req
-
         # Run denoising
         start_time = time.monotonic()
         result = self.worker.execute_forward([req], return_req=True)

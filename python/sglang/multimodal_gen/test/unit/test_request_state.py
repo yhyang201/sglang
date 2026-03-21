@@ -131,30 +131,6 @@ class TestRequestTracker(unittest.TestCase):
         self.assertIsNone(tracker.get("r1"))
         self.assertIsNone(tracker.remove("r1"))  # Already removed
 
-    def test_count_by_state(self):
-        tracker = RequestTracker()
-        tracker.submit("r1")
-        tracker.submit("r2")
-        tracker.submit("r3")
-        tracker.transition("r1", RequestState.ENCODER_RUNNING)
-        tracker.transition("r2", RequestState.ENCODER_RUNNING)
-
-        self.assertEqual(tracker.count_by_state(RequestState.PENDING), 1)
-        self.assertEqual(tracker.count_by_state(RequestState.ENCODER_RUNNING), 2)
-        self.assertEqual(tracker.count_active(), 3)
-
-    def test_count_at_instance(self):
-        tracker = RequestTracker()
-        tracker.submit("r1")
-        tracker.submit("r2")
-        tracker.submit("r3")
-        tracker.transition("r1", RequestState.ENCODER_RUNNING, encoder_instance=0)
-        tracker.transition("r2", RequestState.ENCODER_RUNNING, encoder_instance=0)
-        tracker.transition("r3", RequestState.ENCODER_RUNNING, encoder_instance=1)
-
-        self.assertEqual(tracker.count_at_instance("encoder", 0), 2)
-        self.assertEqual(tracker.count_at_instance("encoder", 1), 1)
-
     def test_snapshot(self):
         tracker = RequestTracker()
         tracker.submit("r1")

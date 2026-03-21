@@ -31,61 +31,27 @@ class RequestState(enum.Enum):
     TIMED_OUT = "timed_out"
 
 
+_TERMINAL_STATES = {RequestState.DONE, RequestState.FAILED, RequestState.TIMED_OUT}
+_ACTIVE_STATES = set(RequestState) - _TERMINAL_STATES
+
+# Normal (non-failure) transitions.  FAILED and TIMED_OUT are handled
+# separately in transition() — any active state can reach them.
 _VALID_TRANSITIONS: dict[RequestState, set[RequestState]] = {
-    RequestState.PENDING: {
-        RequestState.ENCODER_WAITING,
-        RequestState.ENCODER_RUNNING,
-        RequestState.FAILED,
-    },
-    RequestState.ENCODER_WAITING: {
-        RequestState.ENCODER_RUNNING,
-        RequestState.FAILED,
-    },
-    RequestState.ENCODER_RUNNING: {
-        RequestState.ENCODER_DONE,
-        RequestState.FAILED,
-    },
+    RequestState.PENDING: {RequestState.ENCODER_WAITING, RequestState.ENCODER_RUNNING},
+    RequestState.ENCODER_WAITING: {RequestState.ENCODER_RUNNING},
+    RequestState.ENCODER_RUNNING: {RequestState.ENCODER_DONE},
     RequestState.ENCODER_DONE: {
         RequestState.DENOISING_WAITING,
         RequestState.DENOISING_RUNNING,
-        RequestState.FAILED,
     },
-    RequestState.DENOISING_WAITING: {
-        RequestState.DENOISING_RUNNING,
-        RequestState.FAILED,
-    },
-    RequestState.DENOISING_RUNNING: {
-        RequestState.DENOISING_DONE,
-        RequestState.FAILED,
-    },
+    RequestState.DENOISING_WAITING: {RequestState.DENOISING_RUNNING},
+    RequestState.DENOISING_RUNNING: {RequestState.DENOISING_DONE},
     RequestState.DENOISING_DONE: {
         RequestState.DECODER_WAITING,
         RequestState.DECODER_RUNNING,
-        RequestState.FAILED,
     },
-    RequestState.DECODER_WAITING: {
-        RequestState.DECODER_RUNNING,
-        RequestState.FAILED,
-    },
-    RequestState.DECODER_RUNNING: {
-        RequestState.DONE,
-        RequestState.FAILED,
-    },
-    RequestState.DONE: set(),
-    RequestState.FAILED: set(),
-    RequestState.TIMED_OUT: set(),
-}
-
-_ACTIVE_STATES = {
-    RequestState.PENDING,
-    RequestState.ENCODER_WAITING,
-    RequestState.ENCODER_RUNNING,
-    RequestState.ENCODER_DONE,
-    RequestState.DENOISING_WAITING,
-    RequestState.DENOISING_RUNNING,
-    RequestState.DENOISING_DONE,
-    RequestState.DECODER_WAITING,
-    RequestState.DECODER_RUNNING,
+    RequestState.DECODER_WAITING: {RequestState.DECODER_RUNNING},
+    RequestState.DECODER_RUNNING: {RequestState.DONE},
 }
 
 
@@ -104,11 +70,7 @@ class RequestRecord:
         return time.monotonic() - self.submit_time
 
     def is_terminal(self) -> bool:
-        return self.state in (
-            RequestState.DONE,
-            RequestState.FAILED,
-            RequestState.TIMED_OUT,
-        )
+        return self.state in _TERMINAL_STATES
 
 
 class RequestTracker:
@@ -143,10 +105,12 @@ class RequestTracker:
 
             old_state = record.state
 
-            if new_state == RequestState.TIMED_OUT:
+            if new_state in _TERMINAL_STATES and new_state != RequestState.DONE:
+                # FAILED / TIMED_OUT: allowed from any active state
                 if old_state not in _ACTIVE_STATES:
                     raise ValueError(
-                        f"Cannot time out request {request_id} in state {old_state.value}"
+                        f"Cannot transition {request_id} from terminal state "
+                        f"{old_state.value} to {new_state.value}"
                     )
             elif new_state not in _VALID_TRANSITIONS.get(old_state, set()):
                 raise ValueError(
@@ -178,14 +142,6 @@ class RequestTracker:
         with self._lock:
             return self._requests.pop(request_id, None)
 
-    def count_by_state(self, state: RequestState) -> int:
-        with self._lock:
-            return sum(1 for r in self._requests.values() if r.state == state)
-
-    def count_active(self) -> int:
-        with self._lock:
-            return sum(1 for r in self._requests.values() if not r.is_terminal())
-
     def find_timed_out(self, timeout_s: float) -> list[str]:
         now = time.monotonic()
         with self._lock:
@@ -194,15 +150,6 @@ class RequestTracker:
                 for r in self._requests.values()
                 if r.state in _ACTIVE_STATES and (now - r.submit_time) > timeout_s
             ]
-
-    def count_at_instance(self, role: str, instance_id: int) -> int:
-        attr = f"{role}_instance"
-        with self._lock:
-            return sum(
-                1
-                for r in self._requests.values()
-                if not r.is_terminal() and getattr(r, attr, None) == instance_id
-            )
 
     def snapshot(self) -> dict:
         with self._lock:
