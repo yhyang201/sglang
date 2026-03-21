@@ -772,15 +772,6 @@ class ServerArgs:
             "Default: round_robin.",
         )
         parser.add_argument(
-            "--disagg-p2p-mode",
-            action="store_true",
-            default=False,
-            help="Enable P2P transfer mode (RDMA/TransferEngine). "
-            "Role instances transfer tensors directly instead of relaying "
-            "through DiffusionServer. Requires mooncake-transfer-engine or "
-            "falls back to in-process mock for testing.",
-        )
-        parser.add_argument(
             "--disagg-transfer-pool-size",
             type=int,
             default=256 * 1024 * 1024,

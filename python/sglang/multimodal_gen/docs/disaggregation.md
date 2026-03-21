@@ -57,7 +57,7 @@ curl http://127.0.0.1:22000/v1/videos \
     -d '{"model": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers", "prompt": "A curious raccoon exploring a garden, cinematic", "size": "832x480"}'
 ```
 
-> **Tested result (8×H200, relay mode):**
+> **Tested result (8×H200):**
 > Encoder 2.3 s (TextEncoding) → Denoiser 312.8 s (50 steps, layerwise offload) → Decoder 7.1 s (VAE decode).
 > Total ~322 s for 81-frame 1024×1024 video.
 
@@ -68,7 +68,7 @@ curl http://127.0.0.1:22000/v1/videos \
 ### Multi-Machine Example
 
 The exact same CLI pattern — just replace `127.0.0.1` with actual IPs and add
-P2P flags for RDMA direct transfer:
+RDMA flags for direct transfer:
 
 ```bash
 # Machine A (10.0.0.1): Encoder
@@ -77,7 +77,7 @@ sglang serve --model-path Wan-AI/Wan2.1-T2V-14B-Diffusers \
     --disagg-server-addr tcp://10.0.0.4:19655 \
     --scheduler-port 19000 \
     --num-gpus 1 \
-    --disagg-p2p-mode --disagg-p2p-hostname 10.0.0.1 --disagg-ib-device mlx5_0
+    --disagg-p2p-hostname 10.0.0.1 --disagg-ib-device mlx5_0
 
 # Machine B (10.0.0.2): Denoiser (4 GPUs with SP)
 sglang serve --model-path Wan-AI/Wan2.1-T2V-14B-Diffusers \
@@ -85,7 +85,7 @@ sglang serve --model-path Wan-AI/Wan2.1-T2V-14B-Diffusers \
     --disagg-server-addr tcp://10.0.0.4:19655 \
     --scheduler-port 19001 \
     --num-gpus 4 --denoiser-sp 4 --denoiser-ulysses 2 --denoiser-ring 2 \
-    --disagg-p2p-mode --disagg-p2p-hostname 10.0.0.2 --disagg-ib-device mlx5_0
+    --disagg-p2p-hostname 10.0.0.2 --disagg-ib-device mlx5_0
 
 # Machine C (10.0.0.3): Decoder
 sglang serve --model-path Wan-AI/Wan2.1-T2V-14B-Diffusers \
@@ -93,7 +93,7 @@ sglang serve --model-path Wan-AI/Wan2.1-T2V-14B-Diffusers \
     --disagg-server-addr tcp://10.0.0.4:19655 \
     --scheduler-port 19002 \
     --num-gpus 1 \
-    --disagg-p2p-mode --disagg-p2p-hostname 10.0.0.3 --disagg-ib-device mlx5_0
+    --disagg-p2p-hostname 10.0.0.3 --disagg-ib-device mlx5_0
 
 # Machine D (10.0.0.4): DiffusionServer head
 sglang serve --model-path Wan-AI/Wan2.1-T2V-14B-Diffusers \
@@ -103,8 +103,7 @@ sglang serve --model-path Wan-AI/Wan2.1-T2V-14B-Diffusers \
     --decoder-urls  "tcp://10.0.0.3:19002" \
     --host 0.0.0.0 --port 30000 \
     --scheduler-port 19655 \
-    --disagg-dispatch-policy max_free_slots \
-    --disagg-p2p-mode
+    --disagg-dispatch-policy max_free_slots
 ```
 
 > ZMQ handles startup order gracefully — instances and head can start in any order.
@@ -123,7 +122,7 @@ sglang serve --model-path ... --disagg-role server \
 
 ## Port Convention
 
-Result endpoints are derived deterministically from the head node's `--scheduler-port` (default: 5655):
+Result endpoints are derived deterministically from the head node's `--scheduler-port` (default: 5555):
 
 | Socket | Port |
 |--------|------|
@@ -134,17 +133,33 @@ Result endpoints are derived deterministically from the head node's `--scheduler
 
 Role instances derive their result endpoint automatically from `--disagg-server-addr`. No manual endpoint configuration needed.
 
-## P2P Transfer Mode & Mooncake
+## Transfer Mechanism
 
-By default, tensor data relays through DiffusionServer. For direct RDMA transfers:
+Tensor data between roles (encoder→denoiser, denoiser→decoder) is transferred via a P2P transfer engine. The DiffusionServer only routes lightweight control messages (alloc/push/ready); actual tensor data flows directly between instances.
+
+- If **mooncake-transfer-engine** is installed, transfers use RDMA for direct GPU-to-GPU data movement.
+- Otherwise, a **MockTransferEngine** (in-process `memmove`) is used as fallback — suitable for testing and single-machine setups.
 
 ```bash
+# Install for production RDMA transfers:
 pip install mooncake-transfer-engine
 ```
 
+### Transfer Flow
+
+1. **Sender** (encoder/denoiser) stages tensors: async copy to transfer buffer (GPU or CPU pinned, depending on GPUDirect support), overlapped with metadata JSON serialization.
+2. **Sender** sends `transfer_staged` control message to DiffusionServer (metadata only, no tensor data).
+3. **DiffusionServer** sends `transfer_alloc` to receiver → receiver allocates buffer slot → replies `transfer_allocated`.
+4. **DiffusionServer** sends `transfer_push` to receiver with sender's address info.
+5. **Receiver** pulls data via transfer engine (Mooncake RDMA or mock), sends `transfer_ready`.
+6. **Receiver** loads tensors async on a dedicated transfer stream, overlapped with the previous request's compute.
+
+Decoder results (final output) flow back through DiffusionServer as raw ZMQ frames to the HTTP client.
+
+### RDMA Flags
+
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--disagg-p2p-mode` | `False` | Enable P2P transfer |
 | `--disagg-p2p-hostname` | `127.0.0.1` | RDMA-reachable hostname/IP of this instance |
 | `--disagg-ib-device` | `None` | InfiniBand device (e.g., `mlx5_0`, `mlx5_roce0`) |
 | `--disagg-transfer-pool-size` | 256 MiB | Pinned memory pool per instance |
@@ -170,7 +185,7 @@ If not specified, parallelism is auto-derived from `--num-gpus`.
 
 ## Python API
 
-For programmatic single-machine deployment, `launch_pool_disagg_server()` is still available:
+For programmatic single-machine deployment, `launch_pool_disagg_server()` is available:
 
 ```python
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
@@ -193,14 +208,30 @@ launch_pool_disagg_server(
 ## Architecture
 
 ```
-Client -> HTTP Server (port 30000)
-              |
-         DiffusionServer (ROUTER, scheduler_port)
-              |
-    +---------+---------+
-    | PUSH              | PULL (scheduler_port + 1/2/3)
-    v                   |
-  Encoder[0..N-1]   result
-  Denoiser[0..M-1]  result
-  Decoder[0..K-1]   result -> Client
+Client ─── HTTP (port 30000) ──► FastAPI Server
+                                      │
+                                      ▼
+                              DiffusionServer (ROUTER, scheduler_port)
+                              ┌───────┼───────┐
+                   PUSH work  │       │       │  PUSH work
+                              ▼       │       ▼
+                    Encoder[0..N]     │    Decoder[0..K]
+                              │       │       ▲
+                   P2P tensor │       │       │ P2P tensor
+                   transfer   ▼       │       │ transfer
+                          Denoiser[0..M] ─────┘
+                                      │
+                    PULL results ◄────┘  (decoder → DS → client)
 ```
+
+### Request State Machine
+
+```
+PENDING → ENCODER_WAITING → ENCODER_RUNNING → ENCODER_DONE
+                                                    │
+                        DENOISING_WAITING → DENOISING_RUNNING → DENOISING_DONE
+                                                                       │
+                                    DECODER_WAITING → DECODER_RUNNING → DONE
+```
+
+Any state can transition to `FAILED` or `TIMED_OUT`.

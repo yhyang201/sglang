@@ -186,26 +186,6 @@ def launch_server(server_args: ServerArgs, launch_http_server: bool = True):
     return processes
 
 
-def parse_gpu_string(gpu_str: str) -> list[list[int]]:
-    """Parse a GPU assignment string into a list of GPU ID lists.
-
-    Format: semicolons separate instances, commas separate GPUs within an instance.
-    Examples:
-        "0"         -> [[0]]
-        "0;4"       -> [[0], [4]]
-        "1,2,3,4"   -> [[1, 2, 3, 4]]
-        "0,1;2,3"   -> [[0, 1], [2, 3]]
-    """
-    instances = []
-    for part in gpu_str.split(";"):
-        part = part.strip()
-        if not part:
-            continue
-        gpu_ids = [int(g.strip()) for g in part.split(",")]
-        instances.append(gpu_ids)
-    return instances
-
-
 def launch_pool_disagg_server(
     server_args: ServerArgs,
     encoder_gpus: list[list[int]],

@@ -201,18 +201,9 @@ class ComposedPipelineBase(ABC):
         full_model_index: dict[str, Any],
         server_args: ServerArgs,
     ) -> None:
-        """Read HF configs for components this role won't load.
-
-        Some pipeline_config parameters (e.g., spatial_compression_ratio,
-        vae_scale_factor) are derived inside ``VAEConfig.post_init()`` which
-        normally runs after the VAE weights are loaded.  In disagg mode a
-        denoiser never loads the VAE, so those derived values stay at their
-        dataclass defaults and downstream code (e.g., ``get_freqs_cis``)
-        silently produces wrong results.
-
-        This method reads only the lightweight JSON config for each skipped
-        component and calls ``update_model_arch`` + ``post_init`` so the
-        pipeline_config is fully initialized without loading any weights.
+        """Read HF JSON configs for skipped components and run
+        update_model_arch + post_init so pipeline_config is fully
+        initialized without loading weights.
         """
         from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
             get_diffusers_component_config,
@@ -347,11 +338,8 @@ class ComposedPipelineBase(ABC):
             len(model_index) > 1
         ), "model_index.json must contain at least one pipeline module"
 
-        # In disagg mode, some components (e.g., VAE) are not loaded by every
-        # role, but their HF config may contain values needed to derive
-        # pipeline_config parameters (e.g., spatial_compression_ratio from
-        # block_out_channels).  Read the HF config for skipped components so
-        # that update_model_arch + post_init can run.
+        # In disagg mode, read HF config for skipped components (e.g., VAE)
+        # so that update_model_arch + post_init can derive pipeline_config.
         if self._disagg_role != RoleType.MONOLITHIC:
             self._init_skipped_component_configs(model_index, server_args)
 

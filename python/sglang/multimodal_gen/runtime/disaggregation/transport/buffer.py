@@ -32,7 +32,6 @@ class TransferTensorBuffer:
     """Memory pool for staging tensor payloads between roles.
 
     Wraps a contiguous block of memory (CPU pinned or GPU) with a BuddyAllocator.
-    GPU pools enable GPUDirect RDMA, eliminating D2H/H2D copies.
     """
 
     def __init__(
