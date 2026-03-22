@@ -1334,17 +1334,6 @@ def data_hash(data) -> int:
     return int.from_bytes(hash_bytes, byteorder="big", signed=False)
 
 
-def _hash_buffer(hasher, tensor: torch.Tensor, chunk_size: int = 8 * 1024 * 1024):
-    raw = tensor.view(torch.uint8)
-    np_arr = raw.numpy()
-    n = np_arr.nbytes
-    if n <= chunk_size:
-        hasher.update(memoryview(np_arr))
-    else:
-        for start in range(0, n, chunk_size):
-            hasher.update(memoryview(np_arr[start : start + chunk_size]))
-
-
 def tensor_hash(tensor_list) -> int:
     """
     hash a tensor or a tensor list
@@ -1359,11 +1348,11 @@ def tensor_hash(tensor_list) -> int:
         if any(isinstance(t, torch.Tensor) and t.is_cuda for t in tensors):
             tensor = torch.concat(tensors)
             return gpu_tensor_hash(tensor.cuda())
-        # CPU path: stream each tensor into SHA-256 incrementally (no concat)
+        # CPU path: hash each tensor incrementally without concat
         hasher = hashlib.sha256()
         for t in tensors:
             t = t.detach().contiguous()
-            _hash_buffer(hasher, t)
+            hasher.update(memoryview(t.view(torch.uint8).numpy()))
         hash_bytes = hasher.digest()[:8]
         return int.from_bytes(hash_bytes, byteorder="big", signed=False)
 
@@ -1372,7 +1361,7 @@ def tensor_hash(tensor_list) -> int:
         return gpu_tensor_hash(tensor.cuda())
     tensor = tensor.detach().contiguous()
     hasher = hashlib.sha256()
-    _hash_buffer(hasher, tensor)
+    hasher.update(memoryview(tensor.view(torch.uint8).numpy()))
     hash_bytes = hasher.digest()[:8]
     return int.from_bytes(hash_bytes, byteorder="big", signed=False)
 
