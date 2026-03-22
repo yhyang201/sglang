@@ -1335,12 +1335,6 @@ def data_hash(data) -> int:
 
 
 def _hash_buffer(hasher, tensor: torch.Tensor, chunk_size: int = 8 * 1024 * 1024):
-    """Feed a contiguous CPU tensor into hasher without extra memory copies.
-
-    Uses view(torch.uint8) to reinterpret raw bytes (works for all dtypes
-    including bfloat16) and passes a memoryview directly to hasher.update(),
-    avoiding the full-copy that .tobytes() would create.
-    """
     raw = tensor.view(torch.uint8)
     np_arr = raw.numpy()
     n = np_arr.nbytes
