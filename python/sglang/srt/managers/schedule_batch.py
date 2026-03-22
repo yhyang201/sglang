@@ -630,6 +630,8 @@ class Req(ReqDllmMixin):
 
         # For multimodal inputs
         self.multimodal_inputs: Optional[MultimodalInputs] = None
+        self.pinned_mm_hashes: List[int] = []
+        self.mm_embeddings_pinned: bool = False
 
         # Prefix info
         # The indices to kv cache for the shared prefix.

@@ -576,12 +576,10 @@ def _get_chunked_prefill_embedding(
                 else embedding
             )
             if not embedding_cache.set(embedding_items_hash, embedding_per_req):
-                print_warning_once(
-                    "Multimodal embedding cache is full. This typically occurs when a single "
-                    "embedding exceeds the cache size limit. Consider increasing the "
-                    "`SGLANG_VLM_CACHE_SIZE_MB` environment variable or reducing the input "
-                    "embedding size."
-                )
+                # Fallback: store as pinned entry (bypasses max_size).
+                # This ensures the embedding is available for chunked prefill
+                # even when SGLANG_VLM_CACHE_SIZE_MB=0.
+                embedding_cache.set_pinned(embedding_items_hash, embedding_per_req)
 
         extend_prefix_len = prefix_length[i]
         extend_seq_len = extend_length[i] if i < len(extend_length) else 0

@@ -140,7 +140,10 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromIPCReqInput,
     UpdateWeightsFromTensorReqInput,
 )
-from sglang.srt.managers.mm_utils import init_mm_embedding_cache, unwrap_shm_features
+from sglang.srt.managers.mm_utils import (
+    init_mm_embedding_cache,
+    unwrap_shm_features,
+)
 from sglang.srt.managers.overlap_utils import FutureMap
 from sglang.srt.managers.prefill_delayer import (
     PrefillDelayer,
@@ -148,6 +151,7 @@ from sglang.srt.managers.prefill_delayer import (
 )
 from sglang.srt.managers.schedule_batch import (
     FINISH_ABORT,
+    Modality,
     ModelWorkerBatch,
     MultimodalInputs,
     Req,
@@ -177,6 +181,7 @@ from sglang.srt.managers.session_controller import SessionController
 from sglang.srt.managers.utils import GenerationBatchResult, validate_input_length
 from sglang.srt.mem_cache.cache_init_params import CacheInitParams
 from sglang.srt.mem_cache.common import release_kv_cache
+from sglang.srt.mem_cache.multimodal_cache import MultimodalCache
 from sglang.srt.mem_cache.radix_cache import RadixCache
 from sglang.srt.mem_cache.session_aware_cache import SessionAwareCache
 from sglang.srt.model_executor.forward_batch_info import ForwardMode, PPProxyTensors
@@ -1609,9 +1614,61 @@ class Scheduler(
         else:
             return MultimodalInputs.from_dict(mm_inputs_dict)
 
-    def _maybe_clear_mm_inputs(self, batch: ScheduleBatch) -> None:
+    def _compute_mm_cache_keys(self, req: Req) -> List[int]:
+        """Compute the combined cache keys for each modality of a request."""
+        keys = []
+        mm_inputs = req.multimodal_inputs
+        if mm_inputs is None:
+            return keys
+        for modality in Modality.all():
+            items = [
+                item
+                for item in mm_inputs.mm_items
+                if item.is_modality(modality=modality)
+            ]
+            if not items:
+                continue
+            item_hashes = [item.hash for item in items]
+            combined = MultimodalCache.combine_hashes(item_hashes)
+            if combined is not None:
+                keys.append(combined)
+        return keys
+
+    def _maybe_pin_mm_embeddings(self, batch: ScheduleBatch) -> None:
+        """Pin multimodal embeddings in cache for active requests, then discard raw features."""
+        import sglang.srt.managers.mm_utils as mm_utils_module
+
+        cache = mm_utils_module.embedding_cache
+        if cache is None:
+            return
         for req in batch.reqs:
-            if not req.finished() or not (mm_inputs := req.multimodal_inputs):
+            if req.mm_embeddings_pinned or not req.pinned_mm_hashes:
+                continue
+            all_pinned = True
+            for h in req.pinned_mm_hashes:
+                if not cache.pin(h):
+                    all_pinned = False
+            if all_pinned:
+                req.mm_embeddings_pinned = True
+                # Discard raw features now that embeddings are pinned
+                if req.multimodal_inputs is not None:
+                    for item in req.multimodal_inputs.mm_items:
+                        item.feature = None
+
+    def _maybe_clear_mm_inputs(self, batch: ScheduleBatch) -> None:
+        import sglang.srt.managers.mm_utils as mm_utils_module
+
+        cache = mm_utils_module.embedding_cache
+        for req in batch.reqs:
+            if not req.finished():
+                continue
+            # Unpin embeddings from cache
+            if req.pinned_mm_hashes and cache is not None:
+                for h in req.pinned_mm_hashes:
+                    cache.unpin(h)
+                req.pinned_mm_hashes = []
+                req.mm_embeddings_pinned = False
+            if not (mm_inputs := req.multimodal_inputs):
                 continue
             # For session requests, keep mm_inputs for the next request
             if req.session:
@@ -1740,6 +1797,10 @@ class Scheduler(
                 req.origin_input_ids, image_inputs
             )
             req.extend_image_inputs(image_inputs)
+
+            # Pre-compute cache keys for pinning embeddings later
+            if req.multimodal_inputs:
+                req.pinned_mm_hashes = self._compute_mm_cache_keys(req)
 
             if len(req.origin_input_ids) >= self.max_req_input_len:
                 req.set_finish_with_abort(
@@ -1993,6 +2054,10 @@ class Scheduler(
                 )
 
             req.extend_image_inputs(image_inputs)
+
+            # Pre-compute cache keys for pinning embeddings later
+            if req.multimodal_inputs:
+                req.pinned_mm_hashes = self._compute_mm_cache_keys(req)
 
             if len(req.origin_input_ids) >= self.max_req_input_len:
                 req.set_finish_with_abort(
@@ -2654,6 +2719,8 @@ class Scheduler(
             self.process_batch_result_idle(batch, result)
 
         self.log_batch_result_stats(batch, result)
+        if batch.forward_mode.is_extend():
+            self._maybe_pin_mm_embeddings(batch)
         self._maybe_clear_mm_inputs(batch)
         self.maybe_send_health_check_signal()
 
