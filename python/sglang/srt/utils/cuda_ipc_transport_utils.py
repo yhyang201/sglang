@@ -174,14 +174,30 @@ class MmItemMemoryPool:
 
         return None
 
-    def return_a_slice_tensor_with_flag(self, src_tensor: torch.Tensor):
-        with self._lock:
-            available_chunk = self.get_available_chunk(src_tensor)
-            if available_chunk is not None:
-                return (
-                    available_chunk.sync_flag.meta_data,
-                    self.memory_pool[available_chunk.start : available_chunk.end],
-                )
+    def return_a_slice_tensor_with_flag(
+        self, src_tensor: torch.Tensor, max_retries: int = 20, retry_interval: float = 0.05
+    ):
+        for attempt in range(max_retries + 1):
+            with self._lock:
+                available_chunk = self.get_available_chunk(src_tensor)
+                if available_chunk is not None:
+                    return (
+                        available_chunk.sync_flag.meta_data,
+                        self.memory_pool[available_chunk.start : available_chunk.end],
+                    )
+                # Try to recycle and merge before retrying
+                if attempt < max_retries:
+                    self.recycle_chunks()
+                    self.merge_chunks()
+            if attempt < max_retries:
+                time.sleep(retry_interval)
+        logger.warning(
+            "CUDA IPC memory pool exhausted after %d retries (%.1fs), "
+            "falling back to CPU transfer. "
+            "Consider increasing SGLANG_MM_FEATURE_CACHE_MB.",
+            max_retries,
+            max_retries * retry_interval,
+        )
         return None, None
 
     def recycle_chunks(self):
@@ -334,11 +350,12 @@ class CudaIpcTensorTransportProxy:
                         sync_flag += 1
                         fcntl.flock(f, fcntl.LOCK_UN)
 
-                    self.close_shm()
-
             except Exception as e:
                 logger.info(f"Error: Failed to deserialize from CUDA IPC handle ({e}).")
                 raise e
+            finally:
+                if self.sync_buffer is not None:
+                    self.close_shm()
         elif isinstance(self.proxy_state["tensor_data"], torch.Tensor):
             reconstructed_tensor = self.proxy_state["tensor_data"].to(
                 rebuild_device, non_blocking=True

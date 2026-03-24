@@ -1143,6 +1143,7 @@ class BaseMultimodalProcessor(ABC):
                         available_slice.copy_(
                             item.feature.view(torch.int8).view(-1), non_blocking=True
                         )
+                        torch.cuda.current_stream().synchronize()
                         item.feature = CudaIpcTensorTransportProxy(
                             data=available_slice,
                             info_data=item.feature,
@@ -1165,6 +1166,7 @@ class BaseMultimodalProcessor(ABC):
                             item.precomputed_embeddings.view(torch.int8).view(-1),
                             non_blocking=True,
                         )
+                        torch.cuda.current_stream().synchronize()
                         item.precomputed_embeddings = CudaIpcTensorTransportProxy(
                             data=available_slice,
                             info_data=item.precomputed_embeddings,
