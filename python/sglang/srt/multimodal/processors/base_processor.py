@@ -363,6 +363,72 @@ class BaseMultimodalProcessor(ABC):
             "video_token_id": getattr(self, "VIDEO_TOKEN_ID", None),
         }
 
+    # Estimated bytes per pixel for image preprocessing intermediate tensors.
+    # Each pixel needs ~3 channels * 4 bytes (float32), with a multiplier to
+    # account for multiple intermediate copies during resize/normalize/cat.
+    _IMAGE_PREPROCESS_BYTES_PER_PIXEL = 3 * 4 * 4  # ~48 bytes/pixel
+
+    # Fraction of free GPU memory that must remain after image preprocessing.
+    # This safety margin accounts for concurrent requests and other allocations.
+    _GPU_MEMORY_SAFETY_FRACTION = 0.5
+
+    def _estimate_media_pixels(self, images, videos) -> int:
+        """Estimate total pixel count from images and video frames."""
+        total_pixels = 0
+        if images:
+            for img in images:
+                if isinstance(img, Image.Image):
+                    w, h = img.size
+                    total_pixels += w * h
+                elif isinstance(img, torch.Tensor):
+                    # Tensor shape is typically (C, H, W) or (H, W, C)
+                    total_pixels += img.numel() // max(img.shape[0], 1)
+                elif isinstance(img, np.ndarray):
+                    h, w = img.shape[:2]
+                    total_pixels += w * h
+        if videos:
+            for video in videos:
+                if isinstance(video, list):
+                    # List of PIL frames
+                    for frame in video:
+                        if isinstance(frame, Image.Image):
+                            w, h = frame.size
+                            total_pixels += w * h
+                elif isinstance(video, torch.Tensor):
+                    total_pixels += video.numel() // max(video.shape[0], 1)
+                elif isinstance(video, np.ndarray):
+                    # (num_frames, H, W, C)
+                    total_pixels += video.shape[0] * video.shape[1] * video.shape[2]
+        return total_pixels
+
+    def _select_image_processing_device(self, images, videos) -> str:
+        """Select device for image preprocessing based on estimated memory usage.
+
+        Falls back to CPU when GPU free memory is insufficient for the estimated
+        preprocessing workload, preventing CUDA OOM during image preprocessing.
+        """
+        total_pixels = self._estimate_media_pixels(images, videos)
+        if total_pixels == 0:
+            return "cuda"
+
+        estimated_bytes = total_pixels * self._IMAGE_PREPROCESS_BYTES_PER_PIXEL
+        try:
+            free_mem, _ = torch.cuda.mem_get_info()
+        except Exception:
+            return "cuda"
+
+        usable_mem = int(free_mem * self._GPU_MEMORY_SAFETY_FRACTION)
+        if estimated_bytes > usable_mem:
+            logger.info(
+                "Image preprocessing falling back to CPU: "
+                "estimated %.1f MiB needed, %.1f MiB usable on GPU",
+                estimated_bytes / 1024 / 1024,
+                usable_mem / 1024 / 1024,
+            )
+            return "cpu"
+
+        return "cuda"
+
     def process_mm_data(
         self, input_text, images=None, videos=None, audios=None, **kwargs
     ) -> dict:
@@ -398,7 +464,7 @@ class BaseMultimodalProcessor(ABC):
             elif _is_xpu:
                 kwargs["device"] = "xpu"
             elif not _is_npu:
-                kwargs["device"] = "cuda"
+                kwargs["device"] = self._select_image_processing_device(images, videos)
             else:
                 # Note: for qwen-vl, processor has some reshape issue because of dims restriction on Ascend.
                 from sglang.srt.hardware_backend.npu.modules.qwen_vl_processor import (
