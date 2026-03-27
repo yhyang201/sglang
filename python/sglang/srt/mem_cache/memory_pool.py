@@ -1216,6 +1216,232 @@ class MHATokenToKVPoolFP4(MHATokenToKVPool):
             self.v_scale_buffer[layer_id - self.start_layer][loc] = cache_v_fp4_sf
 
 
+class MHATokenToKVPoolTurboQuant(MHATokenToKVPool):
+    """KV cache pool using TurboQuant compression for keys.
+
+    Keys are stored as packed codebook indices + key norms (+ optional QJL data).
+    Values remain unquantized in bf16/fp16.
+    """
+
+    def __init__(self, turbo_quant_config, **kwargs):
+        from sglang.srt.layers.quantization.turbo_quant import TurboQuantConfig
+
+        self.tq_config: TurboQuantConfig = turbo_quant_config
+        super().__init__(**kwargs)
+
+    def _create_buffers(self):
+
+        config = self.tq_config
+        m = self.size + self.page_size
+
+        with self.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
+            with (
+                torch.cuda.use_mem_pool(self.custom_mem_pool)
+                if self.enable_custom_mem_pool
+                else nullcontext()
+            ):
+                # Packed codebook indices: [m, num_heads, packed_k_dim] uint8
+                self.k_quant_buffer = [
+                    torch.zeros(
+                        (m, self.head_num, config.packed_k_dim),
+                        dtype=torch.uint8,
+                        device=self.device,
+                    )
+                    for _ in range(self.layer_num)
+                ]
+
+                # Key norms: [m, num_heads] float16
+                self.k_norm_buffer = [
+                    torch.zeros(
+                        (m, self.head_num),
+                        dtype=torch.float16,
+                        device=self.device,
+                    )
+                    for _ in range(self.layer_num)
+                ]
+
+                # Values: unquantized [m, num_heads, v_head_dim]
+                self.v_buffer = [
+                    torch.zeros(
+                        (m, self.head_num, self.v_head_dim),
+                        dtype=self.dtype,
+                        device=self.device,
+                    )
+                    for _ in range(self.layer_num)
+                ]
+
+                # Optional QJL buffers
+                if config.use_qjl:
+                    self.k_qjl_buffer = [
+                        torch.zeros(
+                            (m, self.head_num, config.qjl_dim),
+                            dtype=torch.uint8,
+                            device=self.device,
+                        )
+                        for _ in range(self.layer_num)
+                    ]
+                    self.k_residual_norm_buffer = [
+                        torch.zeros(
+                            (m, self.head_num),
+                            dtype=torch.float16,
+                            device=self.device,
+                        )
+                        for _ in range(self.layer_num)
+                    ]
+                else:
+                    self.k_qjl_buffer = None
+                    self.k_residual_norm_buffer = None
+
+        # For compatibility with base class (used in move_kv_cache etc.)
+        # We set k_buffer to k_quant_buffer for the data_ptrs tracking
+        self.k_buffer = self.k_quant_buffer
+        self.k_data_ptrs = torch.tensor(
+            [x.data_ptr() for x in self.k_quant_buffer],
+            dtype=torch.uint64,
+            device=self.device,
+        )
+        self.v_data_ptrs = torch.tensor(
+            [x.data_ptr() for x in self.v_buffer],
+            dtype=torch.uint64,
+            device=self.device,
+        )
+        self.data_ptrs = torch.cat([self.k_data_ptrs, self.v_data_ptrs], dim=0)
+        self.data_strides = torch.tensor(
+            [
+                np.prod(x.shape[1:]) * x.dtype.itemsize
+                for x in self.k_quant_buffer + self.v_buffer
+            ],
+            device=self.device,
+        )
+
+    def _clear_buffers(self):
+        del self.k_quant_buffer
+        del self.k_norm_buffer
+        del self.v_buffer
+        if self.k_qjl_buffer is not None:
+            del self.k_qjl_buffer
+        if self.k_residual_norm_buffer is not None:
+            del self.k_residual_norm_buffer
+
+    def get_kv_size_bytes(self):
+        total_k = sum(get_tensor_size_bytes(b) for b in self.k_quant_buffer)
+        total_k += sum(get_tensor_size_bytes(b) for b in self.k_norm_buffer)
+        if self.k_qjl_buffer is not None:
+            total_k += sum(get_tensor_size_bytes(b) for b in self.k_qjl_buffer)
+        if self.k_residual_norm_buffer is not None:
+            total_k += sum(
+                get_tensor_size_bytes(b) for b in self.k_residual_norm_buffer
+            )
+        total_v = sum(get_tensor_size_bytes(b) for b in self.v_buffer)
+        return total_k, total_v
+
+    def _get_key_buffer(self, layer_id: int):
+        """Return dequantized keys for attention backends that need float tensors.
+
+        This performs full dequantization: unpack indices → codebook lookup → inverse rotation × norm.
+        """
+        from sglang.srt.layers.quantization.turbo_quant import _unpack_indices
+
+        idx = layer_id - self.start_layer
+        config = self.tq_config
+
+        packed = self.k_quant_buffer[idx]  # [m, H, packed_dim]
+        norms = self.k_norm_buffer[idx]  # [m, H]
+
+        # Unpack indices and look up codebook
+        indices = _unpack_indices(packed, config.bits, config.head_dim)  # [m, H, D]
+        k_rot = config.codebook[indices.long()]  # [m, H, D]
+
+        # Inverse rotation: k_unit = k_rot @ Π
+        k_unit = torch.matmul(k_rot, config.rotation_matrix)
+
+        # Scale by norms
+        k = k_unit * norms.unsqueeze(-1)
+
+        return k.to(self.dtype)
+
+    def _get_value_buffer(self, layer_id: int):
+        return self.v_buffer[layer_id - self.start_layer]
+
+    def set_kv_buffer(
+        self,
+        layer: RadixAttention,
+        loc: torch.Tensor,
+        cache_k: torch.Tensor,
+        cache_v: torch.Tensor,
+        k_scale: Optional[float] = None,
+        v_scale: Optional[float] = None,
+        layer_id_override: Optional[int] = None,
+    ):
+        from sglang.srt.layers.quantization.turbo_quant import turbo_quant_encode
+
+        if layer_id_override is not None:
+            layer_id = layer_id_override
+        else:
+            layer_id = layer.layer_id
+        idx = layer_id - self.start_layer
+        config = self.tq_config
+
+        # Encode keys using TurboQuant
+        packed_indices, key_norms, qjl_signs, residual_norms = turbo_quant_encode(
+            cache_k, config
+        )
+
+        # Store quantized key data
+        self.k_quant_buffer[idx][loc] = packed_indices
+        self.k_norm_buffer[idx][loc] = key_norms
+
+        # Store QJL data if enabled
+        if config.use_qjl and qjl_signs is not None:
+            self.k_qjl_buffer[idx][loc] = qjl_signs
+            self.k_residual_norm_buffer[idx][loc] = residual_norms
+
+        # Store values (unquantized)
+        if cache_v.dtype != self.dtype:
+            cache_v = cache_v.to(self.dtype)
+        self.v_buffer[idx][loc] = cache_v
+
+    def get_turbo_quant_buffers(self, layer_id: int):
+        """Get raw TurboQuant buffers for the custom Triton attention kernel.
+
+        Returns:
+            k_quant: [m, H, packed_dim] uint8
+            k_norms: [m, H] float16
+            v: [m, H, v_head_dim] dtype
+            k_qjl: [m, H, qjl_dim] uint8 or None
+            k_res_norms: [m, H] float16 or None
+        """
+        if self.layer_transfer_counter is not None:
+            self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
+        idx = layer_id - self.start_layer
+        k_qjl = self.k_qjl_buffer[idx] if self.k_qjl_buffer is not None else None
+        k_res = (
+            self.k_residual_norm_buffer[idx]
+            if self.k_residual_norm_buffer is not None
+            else None
+        )
+        return (
+            self.k_quant_buffer[idx],
+            self.k_norm_buffer[idx],
+            self.v_buffer[idx],
+            k_qjl,
+            k_res,
+        )
+
+    def move_kv_cache(self, tgt_loc: torch.Tensor, src_loc: torch.Tensor):
+        """Copy KV cache entries from src_loc to tgt_loc across all layers."""
+        for i in range(self.layer_num):
+            self.k_quant_buffer[i][tgt_loc] = self.k_quant_buffer[i][src_loc]
+            self.k_norm_buffer[i][tgt_loc] = self.k_norm_buffer[i][src_loc]
+            self.v_buffer[i][tgt_loc] = self.v_buffer[i][src_loc]
+            if self.k_qjl_buffer is not None:
+                self.k_qjl_buffer[i][tgt_loc] = self.k_qjl_buffer[i][src_loc]
+            if self.k_residual_norm_buffer is not None:
+                self.k_residual_norm_buffer[i][tgt_loc] = self.k_residual_norm_buffer[
+                    i
+                ][src_loc]
+
+
 class HybridLinearKVPool(KVCache):
     """KV cache with separate pools for full and linear attention layers."""
 

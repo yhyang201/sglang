@@ -23,6 +23,7 @@ from sglang.srt.mem_cache.memory_pool import (
     HybridReqToTokenPool,
     MHATokenToKVPool,
     MHATokenToKVPoolFP4,
+    MHATokenToKVPoolTurboQuant,
     MLATokenToKVPool,
     MLATokenToKVPoolFP4,
     NSATokenToKVPool,
@@ -136,6 +137,20 @@ class ModelRunnerKVCacheMixin:
                 cell_size = (cell_size // 2) + (
                     (n * k * num_layers * 2 * kv_size) // scale_block_size
                 )
+
+            if str(self.kv_cache_dtype).startswith("turbo_quant"):
+                import math
+
+                bits = 3 if "3bit" in str(self.kv_cache_dtype) else 4
+                n = self.model_config.get_num_kv_heads(get_attention_tp_size())
+                head_dim = self.model_config.head_dim
+                v_head_dim = self.model_config.v_head_dim
+                packed_k_dim = math.ceil(head_dim * bits / 8)
+                # Per token: packed_indices (uint8) + key_norms (fp16) + V (dtype)
+                k_bytes = (packed_k_dim + 2) * n  # packed indices + norm
+                v_bytes = v_head_dim * n * kv_size
+                cell_size = (k_bytes + v_bytes) * num_layers
+
         return cell_size
 
     def profile_max_num_token(self: ModelRunner, pre_model_load_memory: int):
@@ -646,7 +661,33 @@ class ModelRunnerKVCacheMixin:
                     **extra_args,
                 )
             else:
-                if is_float4_e2m1fn_x2(self.kv_cache_dtype):
+                if str(self.server_args.kv_cache_dtype).startswith("turbo_quant"):
+                    from sglang.srt.layers.quantization.turbo_quant import (
+                        TurboQuantConfig,
+                    )
+
+                    bits = 3 if "3bit" in self.server_args.kv_cache_dtype else 4
+                    head_dim = self.model_config.head_dim
+                    tq_config = TurboQuantConfig(bits=bits)
+                    tq_config.initialize(head_dim=head_dim, device=self.device)
+
+                    self.token_to_kv_pool = MHATokenToKVPoolTurboQuant(
+                        turbo_quant_config=tq_config,
+                        size=self.max_total_num_tokens,
+                        page_size=self.page_size,
+                        dtype=torch.bfloat16,  # V cache dtype
+                        head_num=self.model_config.get_num_kv_heads(
+                            get_attention_tp_size()
+                        ),
+                        head_dim=head_dim,
+                        layer_num=self.num_effective_layers,
+                        device=self.device,
+                        enable_memory_saver=self.server_args.enable_memory_saver,
+                        start_layer=self.start_layer,
+                        end_layer=self.end_layer,
+                        enable_alt_stream=not self.server_args.enable_pdmux,
+                    )
+                elif is_float4_e2m1fn_x2(self.kv_cache_dtype):
                     self.token_to_kv_pool = MHATokenToKVPoolFP4(
                         self.max_total_num_tokens,
                         page_size=self.page_size,

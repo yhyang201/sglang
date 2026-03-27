@@ -79,6 +79,25 @@ class TritonAttnBackend(AttentionBackend):
         )
         self.build_unified_kv_indices = torch.compiler.disable(build_unified_kv_indices)
 
+        # Detect TurboQuant mode
+        self.use_turbo_quant = getattr(
+            model_runner.server_args, "kv_cache_dtype", ""
+        ).startswith("turbo_quant")
+        if self.use_turbo_quant:
+            from sglang.srt.layers.attention.triton_ops.turbo_quant_decode_attention import (
+                turbo_quant_decode_attention_fwd,
+            )
+            from sglang.srt.mem_cache.memory_pool import MHATokenToKVPoolTurboQuant
+
+            self.turbo_quant_decode_fwd = torch.compiler.disable(
+                turbo_quant_decode_attention_fwd
+            )
+            pool = model_runner.token_to_kv_pool
+            assert isinstance(
+                pool, MHATokenToKVPoolTurboQuant
+            ), "TurboQuant requires MHATokenToKVPoolTurboQuant"
+            self.tq_config = pool.tq_config
+
         # Parse args
         self.skip_prefill = skip_prefill
         max_bs = model_runner.req_to_token_pool.size
@@ -1081,6 +1100,33 @@ class TritonAttnBackend(AttentionBackend):
         else:
             kv_indptr = self.forward_metadata.kv_indptr
             kv_indices = self.forward_metadata.kv_indices
+
+        if self.use_turbo_quant:
+            # TurboQuant path: pre-rotate query, then use custom kernel
+            q_shaped = q.view(-1, layer.tp_q_head_num, layer.qk_head_dim)
+            Pi = self.tq_config.rotation_matrix.float()
+            q_rotated = torch.matmul(q_shaped.float(), Pi.t()).to(q_shaped.dtype)
+
+            k_quant, k_norms, v_buf, k_qjl, k_res = (
+                forward_batch.token_to_kv_pool.get_turbo_quant_buffers(layer.layer_id)
+            )
+
+            self.turbo_quant_decode_fwd(
+                q_rotated,
+                k_quant,
+                k_norms,
+                v_buf,
+                self.tq_config.codebook,
+                o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
+                kv_indptr,
+                kv_indices,
+                self.forward_metadata.num_kv_splits,
+                self.max_kv_splits,
+                layer.scaling,
+                logit_cap=logits_soft_cap,
+                bits=self.tq_config.bits,
+            )
+            return o
 
         if layer.k_scale is not None and layer.v_scale is not None:
             k_descale = layer.k_scale_float
