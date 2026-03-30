@@ -992,6 +992,178 @@ class BaseMultimodalProcessor(ABC):
 
         return list(zip(indices_start.tolist(), indices_end.tolist()))
 
+    @staticmethod
+    def _split_mm_item_by_offsets(
+        item: MultimodalDataItem,
+    ) -> List[MultimodalDataItem]:
+        """Split a bundled MultimodalDataItem (multiple offsets) into per-item items.
+
+        Returns a list of items, each with a single offset. If the item cannot
+        be split (e.g. single offset, missing metadata), returns [item] unchanged.
+        """
+        import copy
+
+        from sglang.srt.managers.mm_utils import (
+            _get_length,
+            _slice_model_data,
+            _slice_value,
+        )
+
+        if item.offsets is None or len(item.offsets) <= 1:
+            return [item]
+
+        num_items = len(item.offsets)
+        feature = (
+            item.feature if item.feature is not None else item.precomputed_embeddings
+        )
+        feature_len = _get_length(feature)
+
+        # Strategy 1: image_grid_thw available — use grid patches for slice indices
+        image_grid_thw = item.model_specific_data.get("image_grid_thw")
+        if image_grid_thw is not None and _get_length(image_grid_thw) == num_items:
+            patches_per_item = []
+            for grid in image_grid_thw:
+                grid_tensor = torch.as_tensor(grid, dtype=torch.long)
+                patches_per_item.append(int(torch.prod(grid_tensor).item()))
+            cumulative = torch.cumsum(
+                torch.tensor(patches_per_item, dtype=torch.long), dim=0
+            )
+            slice_indices = [0] + cumulative.tolist()
+            if feature_len is not None and slice_indices[-1] == feature_len:
+                result = []
+                for i in range(num_items):
+                    start, end = slice_indices[i], slice_indices[i + 1]
+                    new_item = copy.copy(item)
+                    if item.feature is not None:
+                        new_item.feature = _slice_value(item.feature, start, end)
+                    if item.precomputed_embeddings is not None:
+                        new_item.precomputed_embeddings = _slice_value(
+                            item.precomputed_embeddings, start, end
+                        )
+                    new_item.offsets = [item.offsets[i]]
+                    new_item.model_specific_data = _slice_model_data(
+                        item.model_specific_data,
+                        index=i,
+                        start=start,
+                        end=end,
+                        num_items=num_items,
+                        total_feature_len=feature_len,
+                    )
+                    new_item.hash = None
+                    result.append(new_item)
+                return result
+
+        # Strategy 2: video_grid_thw available
+        video_grid_thw = item.model_specific_data.get("video_grid_thw")
+        if video_grid_thw is not None:
+            grid_len = _get_length(video_grid_thw)
+            if grid_len is not None:
+                frames_per_video = []
+                patches_per_video = []
+                for i in range(grid_len):
+                    grid = video_grid_thw[i]
+                    grid_tensor = torch.as_tensor(grid, dtype=torch.long)
+                    T = int(grid_tensor[0].item())
+                    frames_per_video.append(T)
+                    patches_per_video.append(int(torch.prod(grid_tensor).item()))
+
+                total_frames = sum(frames_per_video)
+                if total_frames == num_items:
+                    cumulative = torch.cumsum(
+                        torch.tensor(patches_per_video, dtype=torch.long), dim=0
+                    )
+                    slice_indices = [0] + cumulative.tolist()
+                    if feature_len is not None and slice_indices[-1] == feature_len:
+                        result = []
+                        frame_offset = 0
+                        for vid_idx in range(grid_len):
+                            start, end = (
+                                slice_indices[vid_idx],
+                                slice_indices[vid_idx + 1],
+                            )
+                            nf = frames_per_video[vid_idx]
+                            new_item = copy.copy(item)
+                            if item.feature is not None:
+                                new_item.feature = _slice_value(
+                                    item.feature, start, end
+                                )
+                            if item.precomputed_embeddings is not None:
+                                new_item.precomputed_embeddings = _slice_value(
+                                    item.precomputed_embeddings, start, end
+                                )
+                            new_item.offsets = item.offsets[
+                                frame_offset : frame_offset + nf
+                            ]
+                            new_item.model_specific_data = _slice_model_data(
+                                item.model_specific_data,
+                                index=vid_idx,
+                                start=start,
+                                end=end,
+                                num_items=grid_len,
+                                total_feature_len=feature_len,
+                            )
+                            new_item.hash = None
+                            result.append(new_item)
+                            frame_offset += nf
+                        return result
+
+        # Strategy 3: feature is a list with len == num_offsets
+        if isinstance(feature, list) and len(feature) == num_items:
+            result = []
+            for i in range(num_items):
+                new_item = copy.copy(item)
+                if item.feature is not None and isinstance(item.feature, list):
+                    new_item.feature = [item.feature[i]]
+                if item.precomputed_embeddings is not None and isinstance(
+                    item.precomputed_embeddings, list
+                ):
+                    new_item.precomputed_embeddings = [item.precomputed_embeddings[i]]
+                new_item.offsets = [item.offsets[i]]
+                new_item.model_specific_data = _slice_model_data(
+                    item.model_specific_data,
+                    index=i,
+                    start=i,
+                    end=i + 1,
+                    num_items=num_items,
+                    total_feature_len=num_items,
+                )
+                new_item.hash = None
+                result.append(new_item)
+            return result
+
+        # Strategy 4: feature tensor dim(0) == num_offsets (stacked per-item)
+        if feature_len is not None and feature_len == num_items:
+            result = []
+            for i in range(num_items):
+                new_item = copy.copy(item)
+                if item.feature is not None:
+                    new_item.feature = _slice_value(item.feature, i, i + 1)
+                if item.precomputed_embeddings is not None:
+                    new_item.precomputed_embeddings = _slice_value(
+                        item.precomputed_embeddings, i, i + 1
+                    )
+                new_item.offsets = [item.offsets[i]]
+                new_item.model_specific_data = _slice_model_data(
+                    item.model_specific_data,
+                    index=i,
+                    start=i,
+                    end=i + 1,
+                    num_items=num_items,
+                    total_feature_len=num_items,
+                )
+                new_item.hash = None
+                result.append(new_item)
+            return result
+
+        # Fallback: cannot determine how to split, keep bundled
+        logger.warning(
+            "Cannot split bundled mm_item with %d offsets (feature_len=%s). "
+            "Keeping bundled.",
+            num_items,
+            feature_len,
+        )
+        return [item]
+
     def collect_mm_items_from_processor_output(
         self, data_dict: dict, modality: Modality = None
     ) -> List[MultimodalDataItem]:
@@ -1129,7 +1301,8 @@ class BaseMultimodalProcessor(ABC):
                 add_special_tokens=True,
             ).input_ids.flatten()
 
-        # Add offsets to all items
+        # Add offsets to all items and split bundled items into per-item items
+        split_items = []
         for mm_item in all_collected_items:
             mm_token_id = mm_tokens.get_token_id_by_modality(mm_item.modality)
             if mm_token_id is None:
@@ -1138,6 +1311,8 @@ class BaseMultimodalProcessor(ABC):
                 input_ids=input_ids,
                 mm_token_id=mm_token_id,
             )
+            split_items.extend(self._split_mm_item_by_offsets(mm_item))
+        all_collected_items = split_items
 
         """
         solution for cuda-ipc memory-leak:

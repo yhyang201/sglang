@@ -184,14 +184,12 @@ class LlavaImageProcessor(BaseMultimodalProcessor):
                     pixel_values.append(pixel_v)
                     data_hashes.append(image_h)
                     image_sizes.append(image_s)
-
-                if isinstance(pixel_values[0], np.ndarray):
-                    pixel_values = np.stack(pixel_values, axis=0)
             else:
                 # A single image
                 pixel_values, image_hash, image_size = await self._process_single_image(
                     image_data[0], aspect_ratio, grid_pinpoints
                 )
+                pixel_values = [pixel_values]
                 image_sizes = [image_size]
         else:
             raise ValueError(f"Invalid image data: {image_data}")
@@ -202,17 +200,21 @@ class LlavaImageProcessor(BaseMultimodalProcessor):
             elif request_obj.modalities[0] == "video":
                 modality = Modality.VIDEO
 
-        return {
-            "mm_items": [
+        # Create one item per image for fine-grained RadixAttention caching
+        mm_items = []
+        for pv, img_s in zip(pixel_values, image_sizes):
+            if isinstance(pv, np.ndarray):
+                pv = np.expand_dims(pv, axis=0)
+            mm_items.append(
                 MultimodalDataItem(
-                    feature=pixel_values,
+                    feature=pv,
                     model_specific_data={
-                        "image_sizes": image_sizes,
+                        "image_sizes": [img_s],
                     },
                     modality=modality,
                 )
-            ],
-        }
+            )
+        return {"mm_items": mm_items}
 
 
 class LlavaMultimodalProcessor(BaseMultimodalProcessor):

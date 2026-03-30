@@ -399,14 +399,12 @@ class MultimodalInputs:
         for mm_item in original_mm_items:
             mm_item.reconstruct()
 
-        # Check if MM splitting is enabled
-        if not envs.SGLANG_ENABLE_MM_SPLITTING.get():
-            mm_items = original_mm_items
-        else:
-            from sglang.srt.managers.mm_utils import get_new_expanded_mm_items
+        # Safety net: split any remaining bundled items into per-item items.
+        # Most processors should already produce split items, but this catches
+        # edge cases where items arrive still bundled.
+        from sglang.srt.managers.mm_utils import get_new_expanded_mm_items
 
-            # Now, `mm_items` contains one item per image.
-            mm_items = get_new_expanded_mm_items(original_mm_items)
+        mm_items = get_new_expanded_mm_items(original_mm_items)
 
         ret = MultimodalInputs(
             mm_items=mm_items,

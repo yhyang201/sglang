@@ -588,17 +588,39 @@ class InternVLProcessor(BaseMultimodalProcessor):
 
         items = []
         if image_tensor is not None:
-            items.append(
-                MultimodalDataItem(
-                    feature=image_tensor, modality=Modality.IMAGE, offsets=image_offsets
+            # Split into per-image items for fine-grained RadixAttention caching
+            patch_offset = 0
+            for i, num_patches in enumerate(num_patches_list):
+                items.append(
+                    MultimodalDataItem(
+                        feature=image_tensor[patch_offset : patch_offset + num_patches],
+                        modality=Modality.IMAGE,
+                        offsets=[image_offsets[i]] if i < len(image_offsets) else [],
+                    )
                 )
-            )
+                patch_offset += num_patches
         if video_tensor is not None:
-            items.append(
-                MultimodalDataItem(
-                    feature=video_tensor, modality=Modality.VIDEO, offsets=video_offsets
+            # Split into per-video items
+            patch_offset = 0
+            video_offset_idx = 0
+            for vid_idx, frame_patch_list in enumerate(video_patch_lists):
+                total_patches = sum(frame_patch_list)
+                num_frames = len(frame_patch_list)
+                # Each frame has its own offset in video_offsets
+                vid_offsets = video_offsets[
+                    video_offset_idx : video_offset_idx + num_frames
+                ]
+                items.append(
+                    MultimodalDataItem(
+                        feature=video_tensor[
+                            patch_offset : patch_offset + total_patches
+                        ],
+                        modality=Modality.VIDEO,
+                        offsets=vid_offsets,
+                    )
                 )
-            )
+                patch_offset += total_patches
+                video_offset_idx += num_frames
 
         return {
             "input_ids": input_ids,
@@ -702,11 +724,17 @@ class InternVLProcessor(BaseMultimodalProcessor):
 
         items = []
         if pixel_values is not None:
-            items.append(
-                MultimodalDataItem(
-                    feature=pixel_values, modality=Modality.IMAGE, offsets=image_offsets
+            # Split into per-image items for fine-grained RadixAttention caching
+            patch_offset = 0
+            for i, num_patches in enumerate(num_patches_list):
+                items.append(
+                    MultimodalDataItem(
+                        feature=pixel_values[patch_offset : patch_offset + num_patches],
+                        modality=Modality.IMAGE,
+                        offsets=[image_offsets[i]] if i < len(image_offsets) else [],
+                    )
                 )
-            )
+                patch_offset += num_patches
 
         return {
             "input_ids": input_ids,
