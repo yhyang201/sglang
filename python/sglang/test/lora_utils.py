@@ -379,7 +379,7 @@ def run_lora_test_one_by_one(
     disable_radix_cache: bool = False,
     mem_fraction_static: float = 0.88,
     test_tag: str = "",
-    attention_backend: str = "fa3",
+    attention_backend: Optional[str] = None,
 ):
     """
     Input a batch of prompts, and run lora tests one by one with several generate requests
