@@ -1704,7 +1704,10 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
                         "Accuracy may be affected."
                     )
 
-                w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
+                w13_weight_scale_2 = torch.max(
+                    layer.w13_weight_scale_2[:, 0],
+                    layer.w13_weight_scale_2[:, 1],
+                )
         else:
             w13_weight_scale_2 = layer.w13_weight_scale_2[:]
 
