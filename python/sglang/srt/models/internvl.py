@@ -335,6 +335,7 @@ class InternVisionEncoder(nn.Module):
         inputs_embeds,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        cu_seqlens=None,
     ) -> Union[Tuple, BaseModelOutput]:
         r"""
         Args:
@@ -345,6 +346,9 @@ class InternVisionEncoder(nn.Module):
                 for more detail.
             return_dict (`bool`, *optional*):
                 Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
+            cu_seqlens: Optional cumulative sequence lengths for variable-length
+                sequences (e.g. ragged image batches). When None, a SingletonCache
+                is used which lazily computes uniform cu_seqlens.
         """
         if self.enable_cg and (not output_hidden_states):
             # graph path only returns last_hidden_state
@@ -366,7 +370,8 @@ class InternVisionEncoder(nn.Module):
         encoder_states = () if output_hidden_states else None
         hidden_states = inputs_embeds
 
-        cu_seqlens = SingletonCache()
+        if cu_seqlens is None:
+            cu_seqlens = SingletonCache()
 
         for idx, encoder_layer in enumerate(self.layers):
             if output_hidden_states:

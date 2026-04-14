@@ -169,6 +169,40 @@ class NemotronH_Nano_VL_V2(EVS):
         vit_embeds = torch.cat(vit_embeds_list, dim=0)
         return vit_embeds
 
+    def extract_feature_dynamic(self, pixel_values_list: list[torch.Tensor]):
+        """Extract features from variable-size images (dynamic resolution).
+
+        Each image has different spatial dimensions. They are passed as a list
+        to RADIO which handles ragged packing with cu_seqlens internally.
+        """
+        features, num_patches_list = self.vision_model(pixel_values_list)
+        # Apply pixel_shuffle and MLP per image since each has different h, w
+        results = []
+        offset = 0
+        for num_patches in num_patches_list:
+            img_feats = features[0, offset : offset + num_patches]
+            h = w = int(num_patches**0.5)
+            img_feats = img_feats.reshape(1, h, w, -1)
+            img_feats = self.pixel_shuffle(img_feats, self.downsample_ratio)
+            img_feats = img_feats.view(-1, self.rmsnorm_hidden_size)
+            img_feats = self.mlp1(img_feats)
+            results.append(img_feats)
+            offset += num_patches
+        return torch.cat(results, dim=0)
+
+    def extract_video_feature_temporal(self, pixel_values, num_frames):
+        """Extract video features with temporal compression (tubelet grouping)."""
+        vit_embeds = self.vision_model(pixel_values, num_frames=num_frames)
+        # vit_embeds: [num_tubelets, spatial_patches, hidden]
+        num_tubelets = vit_embeds.shape[0]
+        h = w = int(vit_embeds.shape[1] ** 0.5)
+        vit_embeds = vit_embeds.reshape(num_tubelets, h, w, -1)
+        vit_embeds = self.pixel_shuffle(vit_embeds, self.downsample_ratio)
+        vit_embeds = vit_embeds.view(-1, self.rmsnorm_hidden_size)
+        vit_embeds = self.mlp1(vit_embeds)
+        vit_embeds = vit_embeds.view(num_tubelets, -1, self.llm_hidden_size)
+        return vit_embeds
+
     def get_image_feature(self, items: list[MultimodalDataItem]):
         """
         Projects the last hidden state from the vision model into language model space.
@@ -176,6 +210,12 @@ class NemotronH_Nano_VL_V2(EVS):
         Returns:
             image_features (`torch.Tensor`): Image feature tensor of shape `(num_images, image_length, embed_dim)`).
         """
+        # Check if any item is dynamic resolution
+        is_dynamic = any(getattr(item, "is_dynamic", False) for item in items)
+        if is_dynamic:
+            pixel_values_list = [item.feature for item in items]
+            return self.extract_feature_dynamic(pixel_values_list)
+
         pixel_values = torch.cat([item.feature for item in items])
         image_features = self.extract_feature(pixel_values)
         return image_features
@@ -188,6 +228,9 @@ class NemotronH_Nano_VL_V2(EVS):
             video_features (`torch.Tensor`): Video feature tensor of shape `(num_videos, video_length, embed_dim)`).
         """
         pixel_values = torch.cat([item.feature for item in items])
+        if getattr(self.config, "video_temporal_patch_size", 1) > 1:
+            num_frames = pixel_values.shape[0]
+            return self.extract_video_feature_temporal(pixel_values, num_frames)
         video_features = self.extract_feature(pixel_values)
         return video_features
 

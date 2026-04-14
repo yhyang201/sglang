@@ -12,6 +12,7 @@
 # limitations under the License.
 
 import logging
+import math
 from math import sqrt
 
 import numpy as np
@@ -27,7 +28,11 @@ from sglang.srt.managers.schedule_batch import (
 from sglang.srt.models.nano_nemotron_vl import NemotronH_Nano_VL_V2
 from sglang.srt.models.parakeet import ParakeetExtractor
 from sglang.srt.multimodal.evs import EVSProcessor
-from sglang.srt.multimodal.internvl_utils import image_to_pixel_values
+from sglang.srt.multimodal.internvl_utils import (
+    dynamic_resize_image,
+    image_to_pixel_values,
+    video_to_pixel_values,
+)
 from sglang.srt.multimodal.processors.base_processor import (
     BaseMultimodalProcessor,
     MultimodalSpecialTokens,
@@ -112,6 +117,24 @@ class NanoNemotronVLImageProcessor(BaseMultimodalProcessor):
         self.PLACEHOLDER_ID = tokenizer.convert_tokens_to_ids(self.PLACEHOLDER)
         assert isinstance(self.PLACEHOLDER_ID, int)
 
+        # Dynamic resolution config
+        self.dynamic_resolution = getattr(hf_config, "dynamic_resolution", False)
+        self.min_num_patches = getattr(hf_config, "min_num_patches", 0)
+        self.max_num_patches = getattr(hf_config, "max_num_patches", 0)
+        self.patch_size = hf_config.patch_size
+        self.downsample_ratio = hf_config.downsample_ratio
+
+        # Video temporal compression config
+        self.video_temporal_patch_size = getattr(
+            hf_config, "video_temporal_patch_size", 1
+        )
+        self.video_target_num_patches = getattr(
+            hf_config, "video_target_num_patches", 0
+        )
+        self.video_maintain_aspect_ratio = getattr(
+            hf_config, "video_maintain_aspect_ratio", True
+        )
+
     def preprocess_image(
         self, image: Image.Image, *, max_num_tiles: int = DEFAULT_NUM_TILES
     ) -> torch.Tensor:
@@ -127,8 +150,29 @@ class NanoNemotronVLImageProcessor(BaseMultimodalProcessor):
     def render_image(self, *, num_tiles: int):
         return f"{self.IMG_START_TOKEN}{self.IMG_CONTEXT_TOKEN * self.num_image_token * num_tiles}{self.IMG_END_TOKEN}"
 
+    def render_image_dynamic(self, *, num_tokens: int):
+        return f"{self.IMG_START_TOKEN}{self.IMG_CONTEXT_TOKEN * num_tokens}{self.IMG_END_TOKEN}"
+
     def render_frame(self, frame_index: int, *, timestamp: float, num_tokens: int):
         return f"Frame {frame_index + 1} sampled at {timestamp:.2f} seconds: {self.PLACEHOLDER}{self.IMG_CONTEXT_TOKEN * num_tokens}{self.IMG_END_TOKEN}"
+
+    def render_tubelet(
+        self,
+        tubelet_index: int,
+        frame_indices: list[int],
+        timestamps: list[float],
+        num_tokens: int,
+    ):
+        """Render a tubelet (group of T frames) for temporal compression."""
+        if len(frame_indices) == 1:
+            return self.render_frame(
+                frame_indices[0], timestamp=timestamps[0], num_tokens=num_tokens
+            )
+        parts = " and ".join(
+            f"frame {fi + 1} sampled at {ts:.2f} seconds"
+            for fi, ts in zip(frame_indices, timestamps)
+        )
+        return f"{parts}: {self.PLACEHOLDER}{self.IMG_CONTEXT_TOKEN * num_tokens}{self.IMG_END_TOKEN}"
 
     @staticmethod
     def parse_video(video) -> tuple[np.ndarray, list[float]]:
@@ -168,17 +212,60 @@ class NanoNemotronVLImageProcessor(BaseMultimodalProcessor):
 
         videos = [self.parse_video(video) for video in base_output.videos]
 
-        rows = cols = int(sqrt(self.num_image_token))
-        create_data_items, tokens_per_frame = self.evs.static_size_data_items(
-            frames_per_video=[len(frames) for frames, _ in videos],
-            num_images=len(base_output.images),
-            rows=rows,
-            cols=cols,
-        )
+        T = self.video_temporal_patch_size
+
+        # For temporal compression, EVS operates on tubelets not frames
+        if T > 1:
+            # Compute tokens per tubelet based on video target resolution
+            if self.video_target_num_patches > 0:
+                ds = int(1 / self.downsample_ratio)
+                tokens_per_tubelet = self.video_target_num_patches // (ds * ds)
+            else:
+                tokens_per_tubelet = self.num_image_token
+            tubelets_per_video = [math.ceil(len(frames) / T) for frames, _ in videos]
+            rows = cols = int(sqrt(tokens_per_tubelet))
+            create_data_items, tokens_per_frame = self.evs.static_size_data_items(
+                frames_per_video=tubelets_per_video,
+                num_images=len(base_output.images),
+                rows=rows,
+                cols=cols,
+            )
+        else:
+            rows = cols = int(sqrt(self.num_image_token))
+            create_data_items, tokens_per_frame = self.evs.static_size_data_items(
+                frames_per_video=[len(frames) for frames, _ in videos],
+                num_images=len(base_output.images),
+                rows=rows,
+                cols=cols,
+            )
 
         prompt = input_text
         image_feature = None
-        if base_output.images:
+        # Dynamic resolution: each image resized to variable dimensions
+        image_is_dynamic = False
+        num_tokens_per_image = []
+        if base_output.images and self.dynamic_resolution:
+            image_is_dynamic = True
+            preprocessed_images = []
+            for image in base_output.images:
+                pv, n_tokens = dynamic_resize_image(
+                    image,
+                    patch_size=self.patch_size,
+                    downsample_ratio=self.downsample_ratio,
+                    min_num_patches=self.min_num_patches,
+                    max_num_patches=self.max_num_patches,
+                    mean=self.norm_mean,
+                    std=self.norm_std,
+                )
+                preprocessed_images.append(pv.to(dtype=torch.bfloat16))
+                num_tokens_per_image.append(n_tokens)
+            rendered_images = [
+                self.render_image_dynamic(num_tokens=nt) for nt in num_tokens_per_image
+            ]
+            prompt = prompt.replace(self.IMG_CONTEXT_TOKEN, "".join(rendered_images), 1)
+            # For dynamic resolution, image_feature is a list of variable-size tensors
+            image_feature = preprocessed_images
+        elif base_output.images:
             preprocessed_images = [
                 self.preprocess_image(image) for image in base_output.images
             ]
@@ -190,33 +277,69 @@ class NanoNemotronVLImageProcessor(BaseMultimodalProcessor):
             image_feature = torch.cat(preprocessed_images, dim=0)
 
         video_feature = None
+        T = self.video_temporal_patch_size
         if base_output.videos:
             preprocessed_videos = []
             for (video_array, timestamps), tpf in zip(
                 videos, tokens_per_frame, strict=True
             ):
-                frames_tensors = [
-                    self.preprocess_image(
-                        Image.fromarray(frame, mode="RGB"),
-                        max_num_tiles=NUM_VIDEO_TILES,
-                    )
-                    for frame in video_array
-                ]
+                if self.video_target_num_patches > 0:
+                    # Resize frames to target resolution for temporal compression
+                    frames_tensors = []
+                    for frame in video_array:
+                        pv, _ = video_to_pixel_values(
+                            Image.fromarray(frame, mode="RGB"),
+                            patch_size=self.patch_size,
+                            downsample_ratio=self.downsample_ratio,
+                            target_num_patches=self.video_target_num_patches,
+                            maintain_aspect_ratio=self.video_maintain_aspect_ratio,
+                            mean=self.norm_mean,
+                            std=self.norm_std,
+                        )
+                        frames_tensors.append(pv.to(dtype=torch.bfloat16))
+                else:
+                    frames_tensors = [
+                        self.preprocess_image(
+                            Image.fromarray(frame, mode="RGB"),
+                            max_num_tiles=NUM_VIDEO_TILES,
+                        )
+                        for frame in video_array
+                    ]
                 preprocessed_video = torch.cat(frames_tensors, dim=0)
                 preprocessed_videos.append(preprocessed_video)
-                rendered_frames = [
-                    self.render_frame(
-                        i,
-                        timestamp=timestamp,
-                        num_tokens=num_tokens,
+
+                # Render frames/tubelets into prompt
+                if T > 1:
+                    num_frames = len(video_array)
+                    num_tubelets = math.ceil(num_frames / T)
+                    rendered_parts = []
+                    for ti in range(num_tubelets):
+                        start_fi = ti * T
+                        end_fi = min(start_fi + T, num_frames)
+                        fi_list = list(range(start_fi, end_fi))
+                        ts_list = [timestamps[fi] for fi in fi_list]
+                        rendered_parts.append(
+                            self.render_tubelet(
+                                ti, fi_list, ts_list, num_tokens=tpf[ti]
+                            )
+                        )
+                    prompt = prompt.replace(
+                        self.VIDEO_CONTEXT_TOKEN, "\n".join(rendered_parts), 1
                     )
-                    for i, (timestamp, num_tokens) in enumerate(
-                        zip(timestamps, tpf, strict=True)
+                else:
+                    rendered_frames = [
+                        self.render_frame(
+                            i,
+                            timestamp=timestamp,
+                            num_tokens=num_tokens,
+                        )
+                        for i, (timestamp, num_tokens) in enumerate(
+                            zip(timestamps, tpf, strict=True)
+                        )
+                    ]
+                    prompt = prompt.replace(
+                        self.VIDEO_CONTEXT_TOKEN, "".join(rendered_frames), 1
                     )
-                ]
-                prompt = prompt.replace(
-                    self.VIDEO_CONTEXT_TOKEN, "".join(rendered_frames), 1
-                )
             video_feature = torch.cat(preprocessed_videos, dim=0)
 
         # Process audio data through the Parakeet feature extractor
@@ -280,13 +403,37 @@ class NanoNemotronVLImageProcessor(BaseMultimodalProcessor):
 
         prompt_ids_list = prompt_ids.tolist()
 
-        items = create_data_items(
-            image=image_feature,
-            image_offsets=img_offsets,
-            video=video_feature,
-            video_offsets=video_offsets,
-            input_ids_list=prompt_ids_list,
-        )
+        if image_is_dynamic and image_feature is not None:
+            # Dynamic resolution: create items with variable-size image tensors
+            # Store list of tensors and per-image token counts in model_specific_data
+            combined_feature = torch.cat(image_feature, dim=0)
+            items = create_data_items(
+                image=combined_feature,
+                image_offsets=img_offsets,
+                video=video_feature,
+                video_offsets=video_offsets,
+                input_ids_list=prompt_ids_list,
+            )
+            # Attach dynamic resolution metadata to image items
+            img_item_idx = 0
+            for item in items:
+                if item.modality == Modality.IMAGE and img_item_idx < len(
+                    num_tokens_per_image
+                ):
+                    item.model_specific_data = item.model_specific_data or {}
+                    item.model_specific_data["num_tokens"] = num_tokens_per_image[
+                        img_item_idx
+                    ]
+                    item.model_specific_data["is_dynamic"] = True
+                    img_item_idx += 1
+        else:
+            items = create_data_items(
+                image=image_feature,
+                image_offsets=img_offsets,
+                video=video_feature,
+                video_offsets=video_offsets,
+                input_ids_list=prompt_ids_list,
+            )
         items.extend(audio_items)
 
         return MultimodalProcessorOutput(

@@ -76,6 +76,12 @@ class RadioConfig(PretrainedConfig):
         reg_tokens: int | None = None,
         drop_path_rate: float = 0.0,
         dropout: float = 0.0,
+        min_num_patches: int = 0,
+        max_num_patches: int = 0,
+        video_temporal_patch_size: int = 1,
+        separate_video_embedder: bool = True,
+        video_target_num_patches: int = 0,
+        video_maintain_aspect_ratio: bool = True,
         **kwargs,
     ):
         self.model_name = model_name
@@ -103,4 +109,10 @@ class RadioConfig(PretrainedConfig):
         self.reg_tokens = reg_tokens
         self.drop_path_rate = drop_path_rate
         self.dropout = dropout
+        self.min_num_patches = min_num_patches
+        self.max_num_patches = max_num_patches
+        self.video_temporal_patch_size = video_temporal_patch_size
+        self.separate_video_embedder = separate_video_embedder
+        self.video_target_num_patches = video_target_num_patches
+        self.video_maintain_aspect_ratio = video_maintain_aspect_ratio
         super().__init__(**kwargs)
