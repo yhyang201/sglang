@@ -71,6 +71,9 @@ class NemotronH_Nano_VL_V2(EVS):
         vision_projection_hidden_size = config.projector_hidden_size
         llm_hidden_size = config.llm_config.hidden_size
 
+        self.llm_hidden_size = llm_hidden_size
+        self.model_dtype = self.language_model.config.torch_dtype
+
         self.mlp1 = nn.Sequential(
             RMSNorm(
                 hidden_size=self.rmsnorm_hidden_size,
@@ -83,7 +86,7 @@ class NemotronH_Nano_VL_V2(EVS):
             ),
             ReLU2(),
             nn.Linear(vision_projection_hidden_size, llm_hidden_size, bias=False),
-        ).to(self.language_model.config.torch_dtype)
+        ).to(self.model_dtype)
 
         self.sound_encoder: ProjectedParakeet | None = None
         if getattr(config, "sound_config", None) is not None:
@@ -150,16 +153,18 @@ class NemotronH_Nano_VL_V2(EVS):
         n = pixel_values.shape[0]
         vit_embeds_list = []
         for i in range(0, n, micro_batch_size):
-            vit_embeds = self.vision_model(pixel_values[i : i + micro_batch_size])
-            vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
+            chunk = pixel_values[i : i + micro_batch_size]
+            batch_size = chunk.shape[0]
+            vit_embeds = self.vision_model(chunk)
+            vit_embeds = vit_embeds.to(dtype=self.model_dtype)
             h = w = int(vit_embeds.shape[1] ** 0.5)
-            vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
+            vit_embeds = vit_embeds.reshape(batch_size, h, w, -1)
             vit_embeds = self.pixel_shuffle(
                 vit_embeds, scale_factor=self.downsample_ratio
             )
             vit_embeds = vit_embeds.view(-1, self.rmsnorm_hidden_size)
             vit_embeds = self.mlp1(vit_embeds)
-            vit_embeds = vit_embeds.view(n, -1, self.rmsnorm_hidden_size)
+            vit_embeds = vit_embeds.view(batch_size, -1, self.llm_hidden_size)
             vit_embeds_list.append(vit_embeds)
         vit_embeds = torch.cat(vit_embeds_list, dim=0)
         return vit_embeds
