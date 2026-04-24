@@ -226,11 +226,13 @@ export const DeepSeekV4Deployment = () => {
     // Recipe-specific env (matches allinone exactly, taking size into account).
     const recipeEnv = [];
     if (recipe === "low-latency") {
+      recipeEnv.push("SGLANG_ENABLE_SPEC_V2=1");
       // H200 big low-latency has extra dispatch-token cap (allinone line 233).
       if (hardware === "h200" && isBig) {
         recipeEnv.push("SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=128");
       }
     } else if (recipe === "balanced") {
+      recipeEnv.push("SGLANG_ENABLE_SPEC_V2=1");
       if (hardware === "h200") {
         recipeEnv.push("SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=256");
       } else {
@@ -258,10 +260,8 @@ export const DeepSeekV4Deployment = () => {
           : "SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=1024");
       }
     }
-    // SGLANG_ENABLE_SPEC_V2=1 was in allinone's _ENV_MTP for low-latency / balanced
-    // recipes, but V4 auto-enables spec-v2 when MTP is detected — human confirmed
-    // the env is redundant on the public cookbook path. Kept as a no-op reference
-    // in allinone for legacy runs.
+    // SGLANG_ENABLE_SPEC_V2=1 is required for low-latency / balanced recipes
+    // that use EAGLE speculative decoding.
 
     // ---- flags ----
     const flags = [];
