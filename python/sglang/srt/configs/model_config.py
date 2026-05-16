@@ -220,6 +220,7 @@ class ModelConfig:
                 "Gemma3ForConditionalGeneration",
                 "Llama4ForConditionalGeneration",
                 "Step3VLForConditionalGeneration",
+                "Step3p6ForConditionalGeneration",
             ]
             if (
                 self.hf_config.architectures[0] in mm_disabled_models
@@ -888,6 +889,8 @@ class ModelConfig:
     # adapted from https://github.com/vllm-project/vllm/blob/v0.6.4.post1/vllm/config.py
     def _parse_quant_hf_config(self):
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
+        if quant_cfg is None:
+            quant_cfg = getattr(self.hf_text_config, "quantization_config", None)
         if quant_cfg is not None and not isinstance(quant_cfg, dict):
             quant_cfg = quant_cfg.to_dict()
         if quant_cfg is not None:
@@ -1042,6 +1045,11 @@ class ModelConfig:
     def _is_already_quantized(self) -> bool:
         """Check if the model is already quantized based on config files."""
         # Check for quantization in hf_config (config.json)
+        # Also check text_config for multimodal models
+        if getattr(self.hf_text_config, "quantization_config", None) or getattr(
+            self.hf_text_config, "compression_config", None
+        ):
+            return True
         if getattr(self.hf_config, "quantization_config", None) or getattr(
             self.hf_config, "compression_config", None
         ):
@@ -1552,6 +1560,7 @@ multimodal_model_archs = [
     "PaddleOCRVLForConditionalGeneration",
     "MiDashengLMModel",
     "StepVLForConditionalGeneration",
+    "Step3p6ForConditionalGeneration",
     "KimiK25ForConditionalGeneration",
 ]
 
@@ -1668,6 +1677,7 @@ def is_hybrid_swa_model(model_architectures: List[str]):
         "MiMoV2MTP",
         "Step3p5ForCausalLM",
         "Step3p5MTP",
+        "Step3p6ForConditionalGeneration",
         "Gemma4ForCausalLM",
         "Gemma4ForConditionalGeneration",
         "LagunaForCausalLM",
@@ -1706,7 +1716,10 @@ def get_hybrid_layer_ids(
     elif "MiMoV2MTP" in model_architectures:
         swa_attention_layer_ids = [0]
         full_attention_layer_ids = []
-    elif "Step3p5ForCausalLM" in model_architectures:
+    elif (
+        "Step3p5ForCausalLM" in model_architectures
+        or "Step3p6ForConditionalGeneration" in model_architectures
+    ):
         layer_types = hf_text_config.layer_types
         swa_attention_layer_ids = [
             i
