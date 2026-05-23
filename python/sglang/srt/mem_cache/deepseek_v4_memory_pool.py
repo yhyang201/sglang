@@ -492,8 +492,24 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
 
     def translate_loc_from_full_to_swa(self, kv_indices: torch.Tensor):
         assert self.full_to_swa_index_mapping is not None
+        stack = getattr(self, "full_to_swa_mapping_stack", None)
+        if stack is not None:
+            from sglang.srt.mem_cache.swa_memory_pool import _SWA_CANARY_FREED_SENTINEL
 
-        return self.full_to_swa_index_mapping[kv_indices].to(torch.int32)
+            combined = stack[:, kv_indices]
+            prod_at_read = combined[0]
+            canary_at_read = combined[1]
+            out = prod_at_read.to(torch.int32)
+            real_race = (canary_at_read == _SWA_CANARY_FREED_SENTINEL) & (
+                prod_at_read == 0
+            )
+            torch._assert_async(
+                (~real_race).all(),
+                "SWA mapping race: forward read a slot that schedule freed",
+            )
+        else:
+            out = self.full_to_swa_index_mapping[kv_indices].to(torch.int32)
+        return out
 
     def set_swa_loc(self, loc: torch.Tensor) -> None:
         # No-op: SWAKVPool's set_swa_loc precomputes SWA-translated loc once per
