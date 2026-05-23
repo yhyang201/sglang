@@ -18,6 +18,8 @@ from sglang.srt.utils.common import get_num_new_pages
 logger = logging.getLogger(__name__)
 GB = 1024 * 1024 * 1024
 
+_SWA_CANARY_FREED_SENTINEL = -2
+
 
 class SWAKVPool(KVCache):
     """KV cache with separate pools for full and SWA attention layers."""
@@ -84,6 +86,8 @@ class SWAKVPool(KVCache):
         for swa_layer_id, global_layer_id in enumerate(swa_attention_layer_ids):
             self.layers_mapping[global_layer_id] = (swa_layer_id, True)
         self.full_to_swa_index_mapping: Optional[torch.Tensor] = None
+        self.full_to_swa_canary_mapping: Optional[torch.Tensor] = None
+        self.full_to_swa_mapping_stack: Optional[torch.Tensor] = None
 
         k_size, v_size = self.get_kv_size_bytes()
         self.mem_usage = (k_size + v_size) / GB
@@ -143,9 +147,21 @@ class SWAKVPool(KVCache):
     def translate_loc_from_full_to_swa(self, kv_indices: torch.Tensor):
         assert self.full_to_swa_index_mapping is not None
 
-        # Note: kv_indices could have -1 values (from alloc_extend), which will be mapped to -1
-        # since the last item of full_to_swa_index_mapping is -1.
-        return self.full_to_swa_index_mapping[kv_indices].to(torch.int32)
+        if self.full_to_swa_mapping_stack is not None:
+            combined = self.full_to_swa_mapping_stack[:, kv_indices]
+            prod_at_read = combined[0]
+            canary_at_read = combined[1]
+            out = prod_at_read.to(torch.int32)
+            real_race = (canary_at_read == _SWA_CANARY_FREED_SENTINEL) & (
+                prod_at_read == 0
+            )
+            torch._assert_async(
+                (~real_race).all(),
+                "SWA mapping race: forward read a slot that schedule freed",
+            )
+        else:
+            out = self.full_to_swa_index_mapping[kv_indices].to(torch.int32)
+        return out
 
     def set_kv_buffer(
         self,
@@ -329,15 +345,20 @@ class SWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         # Note: append one more item of value -1 in the end so -1 maps to -1.
         # It is needed for the last_loc in alloc_extend, where the first full_last_loc
         # is -1, and we need to map it to swa_last_loc -1 as well.
-        self.full_to_swa_index_mapping = torch.cat(
-            [
-                torch.zeros(
-                    size + self.page_size,
-                    dtype=torch.int64,
-                    device=device,
-                ),
-                torch.tensor([-1], dtype=torch.int64, device=device),
-            ]
+        mapping_len = size + self.page_size + 1
+        self.full_to_swa_mapping_stack = torch.zeros(
+            2,
+            mapping_len,
+            dtype=torch.int64,
+            device=device,
+        )
+        self.full_to_swa_mapping_stack[:, -1] = -1
+        self.full_to_swa_index_mapping = self.full_to_swa_mapping_stack[0]
+        self.full_to_swa_canary_mapping = self.full_to_swa_mapping_stack[1]
+        self._free_fill_value = torch.tensor(
+            [[0], [_SWA_CANARY_FREED_SENTINEL]],
+            dtype=torch.int64,
+            device=device,
         )
 
         self.need_sort = need_sort
@@ -349,6 +370,8 @@ class SWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         self.clear()
         self._kvcache = kvcache
         self._kvcache.register_mapping(weakref.proxy(self.full_to_swa_index_mapping))
+        self._kvcache.full_to_swa_mapping_stack = self.full_to_swa_mapping_stack
+        self._kvcache.full_to_swa_canary_mapping = self.full_to_swa_canary_mapping
 
     def available_size(self):
         return min(
@@ -401,7 +424,7 @@ class SWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         assert alloc_full_indices is not None
         assert alloc_swa_indices is not None
 
-        self.full_to_swa_index_mapping[alloc_full_indices] = alloc_swa_indices
+        self.full_to_swa_mapping_stack[:, alloc_full_indices] = alloc_swa_indices
         return alloc_full_indices
 
     def alloc_extend(
@@ -444,7 +467,7 @@ class SWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         assert alloc_full_indices is not None
         assert alloc_swa_indices is not None
 
-        self.full_to_swa_index_mapping[alloc_full_indices] = alloc_swa_indices
+        self.full_to_swa_mapping_stack[:, alloc_full_indices] = alloc_swa_indices
 
         return alloc_full_indices
 
@@ -508,7 +531,7 @@ class SWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         )
         assert alloc_swa_indices is not None
 
-        self.full_to_swa_index_mapping[alloc_full_indices[-swa_tail_len:]] = (
+        self.full_to_swa_mapping_stack[:, alloc_full_indices[-swa_tail_len:]] = (
             alloc_swa_indices
         )
         return alloc_full_indices
@@ -532,7 +555,7 @@ class SWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         if alloc_full_indices is None or alloc_swa_indices is None:
             return None
 
-        self.full_to_swa_index_mapping[alloc_full_indices] = alloc_swa_indices
+        self.full_to_swa_mapping_stack[:, alloc_full_indices] = alloc_swa_indices
 
         return alloc_full_indices
 
@@ -555,7 +578,7 @@ class SWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         swa_indices = self.full_to_swa_index_mapping[free_index]
         swa_indices = swa_indices[swa_indices > 0]
         self.swa_attn_allocator.free(swa_indices)
-        self.full_to_swa_index_mapping[free_index] = 0
+        self.full_to_swa_mapping_stack[:, free_index] = self._free_fill_value
 
     def backup_state(self):
         return [
@@ -572,7 +595,7 @@ class SWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         self.swa_attn_allocator.clear()
         self.full_attn_allocator.clear()
         # Note: the last item is -1, we don't clear it, see the comment in __init__
-        self.full_to_swa_index_mapping[:-1].fill_(0)
+        self.full_to_swa_mapping_stack[:, :-1].fill_(0)
         self.is_not_in_free_group = True
         self.free_group = []
 

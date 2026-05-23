@@ -578,8 +578,24 @@ class DeepSeekV4TokenToKVPool(KVCache):
 
     def translate_loc_from_full_to_swa(self, kv_indices: torch.Tensor):
         assert self.full_to_swa_index_mapping is not None
+        stack = getattr(self, "full_to_swa_mapping_stack", None)
+        if stack is not None:
+            from sglang.srt.mem_cache.swa_memory_pool import _SWA_CANARY_FREED_SENTINEL
 
-        return self.full_to_swa_index_mapping[kv_indices].to(torch.int32)
+            combined = stack[:, kv_indices]
+            prod_at_read = combined[0]
+            canary_at_read = combined[1]
+            out = prod_at_read.to(torch.int32)
+            real_race = (canary_at_read == _SWA_CANARY_FREED_SENTINEL) & (
+                prod_at_read == 0
+            )
+            torch._assert_async(
+                (~real_race).all(),
+                "SWA mapping race: forward read a slot that schedule freed",
+            )
+        else:
+            out = self.full_to_swa_index_mapping[kv_indices].to(torch.int32)
+        return out
 
     def get_contiguous_buf_infos(self) -> Tuple[List[int], List[int], List[int]]:
         data_ptrs: List[int] = []
@@ -630,7 +646,9 @@ class DeepSeekV4TokenToKVPool(KVCache):
         c128_state_pool_size = self.c128_state_pool_size
         total_L = len(self.compression_ratios)
         self.compress_state_pools: List[Optional[CompressStatePool]] = [None] * total_L
-        self.indexer_compress_state_pools: List[Optional[CompressStatePool]] = [None] * total_L
+        self.indexer_compress_state_pools: List[Optional[CompressStatePool]] = [
+            None
+        ] * total_L
 
         for idx in range(self._stage_start, self._stage_end):
             ratio = self.compression_ratios[idx]
@@ -723,7 +741,9 @@ class DeepSeekV4TokenToKVPool(KVCache):
         loc: torch.Tensor,
         cache_nope_fp8_rope_bf16_pack: NopeFp8RopeBf16Pack,
     ) -> None:
-        self.swa_kv_pool.set_key_buffer(self._swa_layer_id(layer_id), loc, cache_nope_fp8_rope_bf16_pack)
+        self.swa_kv_pool.set_key_buffer(
+            self._swa_layer_id(layer_id), loc, cache_nope_fp8_rope_bf16_pack
+        )
 
     def get_extra_key_page_size(self, layer_id: int) -> int:
         _, _, compress_kv_pool = self.layer_mapping[layer_id]
@@ -818,7 +838,9 @@ class DeepSeekV4TokenToKVPool(KVCache):
             swa_loc = self.cached_loc
         else:
             swa_loc = self.translate_loc_from_full_to_swa(raw_loc)
-        return self.swa_kv_pool.set_key_buffer_fused(self._swa_layer_id(layer_id), swa_loc, cache_k)
+        return self.swa_kv_pool.set_key_buffer_fused(
+            self._swa_layer_id(layer_id), swa_loc, cache_k
+        )
 
     def set_swa_key_buffer_radix_fused_norm_rope(
         self,
