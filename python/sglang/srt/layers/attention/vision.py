@@ -484,9 +484,17 @@ class VisionFlash4Attention(nn.Module):
                 )
             cu_seqlens = cu_seqlens.get_data()
 
-        cu_seqlens = cu_seqlens.to(dtype=torch.int32).to(q.device)
-        seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
-        max_seqlen = seq_lens.max().item()
+        # Use pre-computed max_seqlen if available to avoid per-layer .item() sync
+        _precomputed_max = kwargs.get("max_seqlen", None)
+        if _precomputed_max is not None:
+            max_seqlen = int(_precomputed_max) if not isinstance(_precomputed_max, int) else _precomputed_max
+            # cu_seqlens should already be on device and int32 if metadata is pre-computed
+            if cu_seqlens.dtype != torch.int32 or cu_seqlens.device != q.device:
+                cu_seqlens = cu_seqlens.to(dtype=torch.int32, device=q.device)
+        else:
+            cu_seqlens = cu_seqlens.to(dtype=torch.int32).to(q.device)
+            seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
+            max_seqlen = seq_lens.max().item()
 
         output = flash_attn_varlen_func(
             q,
@@ -1035,11 +1043,16 @@ class VisionAttention(nn.Module):
     ) -> torch.Tensor:
         r"""
         Args:
-            x: [b, s, embed_dim]
+            x: [b, s, embed_dim] or [s, b, embed_dim] if input_layout="sb"
             cu_seqlens: [b]
         Returns:
-             [s, b, head * head_size]
+             [b, s, head * head_size] or [s, b, head * head_size] if input_layout="sb"
         """
+        input_layout = kwargs.pop("input_layout", None)
+        if input_layout == "sb":
+            # Input is (s, b, d) — transpose to (b, s, d) via view (b=1, no copy)
+            s_in, bsz, _ = x.shape
+            x = x.transpose(0, 1)  # (b, s, d) — for b=1 this is just a view, no copy
         if x.dim() == 2:
             x = x.unsqueeze(0)
         assert x.dim() == 3, x.shape
@@ -1066,8 +1079,7 @@ class VisionAttention(nn.Module):
             # [b, s, embed_dim] --> [b, s, embed_dim]
             qkv, _ = self.qkv_proj(x)
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-
-            # [b, s, embed_dim] --> [b * s, head, head_size]
+            # [b, s, q_size] --> [b * s, head, head_size]
             q = q.reshape(bsz * s, head, -1).contiguous()
             k = k.reshape(bsz * s, kv_head, -1).contiguous()
             v = v.reshape(bsz * s, kv_head, -1).contiguous()
@@ -1205,5 +1217,9 @@ class VisionAttention(nn.Module):
 
             # [s, b, h * head_size] --> [b, s, h * head_size]
             output = output.view(bsz, s, -1)
+
+        if input_layout == "sb":
+            # Convert back to (s, b, d)
+            output = output.transpose(0, 1)
 
         return output

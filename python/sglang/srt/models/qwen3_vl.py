@@ -26,6 +26,104 @@ import torch.nn as nn
 from einops import rearrange
 from transformers.activations import ACT2FN
 
+try:
+    import triton
+    import triton.language as tl
+    HAS_TRITON = True
+except ImportError:
+    HAS_TRITON = False
+
+if HAS_TRITON:
+
+    @triton.jit
+    def _bilinear_pos_embed_kernel(
+        embed_ptr,
+        output_ptr,
+        H,
+        W,
+        h_scale,
+        w_scale,
+        NUM_GRID: tl.constexpr,
+        M_SIZE: tl.constexpr,
+        HIDDEN_DIM: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+    ):
+        """Fused bilinear pos-embed interpolation with spatial-merge reorder."""
+        pid = tl.program_id(0)
+        total_spatial = H * W
+        spatial_idx = pid % total_spatial
+
+        num_blocks_w = W // M_SIZE
+        block_idx = spatial_idx // (M_SIZE * M_SIZE)
+        local_idx = spatial_idx % (M_SIZE * M_SIZE)
+        br = block_idx // num_blocks_w
+        bc = block_idx % num_blocks_w
+        lr = local_idx // M_SIZE
+        lc = local_idx % M_SIZE
+        row = br * M_SIZE + lr
+        col = bc * M_SIZE + lc
+
+        h_frac = row.to(tl.float32) * h_scale
+        w_frac = col.to(tl.float32) * w_scale
+
+        hf = tl.math.floor(h_frac).to(tl.int32)
+        wf = tl.math.floor(w_frac).to(tl.int32)
+        hc = tl.minimum(hf + 1, NUM_GRID - 1)
+        wc = tl.minimum(wf + 1, NUM_GRID - 1)
+
+        dh = h_frac - hf.to(tl.float32)
+        dw = w_frac - wf.to(tl.float32)
+        w11 = dh * dw
+        w10 = dh - w11
+        w01 = dw - w11
+        w00 = 1.0 - dh - w01
+
+        off00 = (hf * NUM_GRID + wf) * HIDDEN_DIM
+        off01 = (hf * NUM_GRID + wc) * HIDDEN_DIM
+        off10 = (hc * NUM_GRID + wf) * HIDDEN_DIM
+        off11 = (hc * NUM_GRID + wc) * HIDDEN_DIM
+        out_off = pid * HIDDEN_DIM
+
+        out_dtype = output_ptr.dtype.element_ty
+        w00_c = w00.to(out_dtype)
+        w01_c = w01.to(out_dtype)
+        w10_c = w10.to(out_dtype)
+        w11_c = w11.to(out_dtype)
+
+        for d in tl.range(0, HIDDEN_DIM, BLOCK_D):
+            cols = d + tl.arange(0, BLOCK_D)
+            mask = cols < HIDDEN_DIM
+
+            e00 = tl.load(embed_ptr + off00 + cols, mask=mask)
+            e01 = tl.load(embed_ptr + off01 + cols, mask=mask)
+            e10 = tl.load(embed_ptr + off10 + cols, mask=mask)
+            e11 = tl.load(embed_ptr + off11 + cols, mask=mask)
+
+            val = w00_c * e00 + w01_c * e01 + w10_c * e10 + w11_c * e11
+
+            tl.store(output_ptr + out_off + cols, val, mask=mask)
+
+    def triton_pos_embed_interpolate(
+        embed_weight: torch.Tensor,
+        t: int,
+        h: int,
+        w: int,
+        num_grid_per_side: int,
+        m_size: int,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        hidden_dim = embed_weight.shape[1]
+        total_out = t * h * w
+        output = torch.empty(total_out, hidden_dim, device=embed_weight.device, dtype=dtype)
+        h_scale = float(num_grid_per_side - 1) / float(h - 1) if h > 1 else 0.0
+        w_scale = float(num_grid_per_side - 1) / float(w - 1) if w > 1 else 0.0
+        BLOCK_D = triton.next_power_of_2(hidden_dim)
+        _bilinear_pos_embed_kernel[(total_out,)](
+            embed_weight, output, h, w, h_scale, w_scale,
+            num_grid_per_side, m_size, hidden_dim, BLOCK_D,
+        )
+        return output
+
 from sglang.srt.configs.qwen3_vl import Qwen3VLConfig, Qwen3VLVisionConfig
 from sglang.srt.distributed import get_tensor_model_parallel_world_size
 from sglang.srt.distributed.parallel_state import get_pp_group
@@ -226,8 +324,8 @@ class Qwen3_VisionBlock(nn.Module):
         max_seqlen: Optional[torch.Tensor] = None,
         sequence_lengths: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        # x: (s, 1, d) — keep this layout throughout, no rearrange
         hidden_states = self.norm1(x)
-        hidden_states = rearrange(hidden_states, "s b ... -> b s ...")
         attn = self.attn(
             hidden_states,
             cu_seqlens=cu_seqlens,
@@ -236,8 +334,8 @@ class Qwen3_VisionBlock(nn.Module):
             output_ws=output_ws,
             max_seqlen=max_seqlen,
             sequence_lengths=sequence_lengths,
+            input_layout="sb",  # signal that input is (s, b, d)
         )
-        attn = rearrange(attn, "b s ... -> s b ...")
         x += attn
         norm2 = self.norm2(x)
         mlp = self.mlp(norm2)
@@ -337,13 +435,9 @@ class Qwen3VLMoeVisionModel(nn.Module, RotaryPosMixin):
         )
         self.patch_embed = Qwen3VLVisionPatchEmbed(config=vision_config)
         if self.pp_group.is_first_rank:
-            self.pos_embed = VocabParallelEmbedding(
+            self.pos_embed = nn.Embedding(
                 self.num_position_embeddings,
                 self.hidden_size,
-                quant_config=quant_config,
-                enable_tp=not use_data_parallel,
-                use_attn_tp_group=is_dp_attention_enabled() and not use_data_parallel,
-                prefix=add_prefix("pos_embed", prefix),
             )
         else:
             self.pos_embed = PPMissingLayer()
@@ -537,6 +631,24 @@ class Qwen3VLMoeVisionModel(nn.Module, RotaryPosMixin):
             return idx.clamp_(0, side - 1)
 
     def fast_pos_embed_interpolate_from_list(self, grid_thw):
+        if HAS_TRITON:
+            outputs = []
+            for t, h, w in grid_thw:
+                outputs.append(
+                    triton_pos_embed_interpolate(
+                        self.pos_embed.weight,
+                        t, h, w,
+                        self.num_grid_per_side,
+                        self.spatial_merge_size,
+                        self.dtype,
+                    )
+                )
+            return torch.cat(outputs, dim=0)
+        else:
+            return self._fast_pos_embed_interpolate_native(grid_thw)
+
+    def _fast_pos_embed_interpolate_native(self, grid_thw):
+        """Fallback native implementation when Triton is not available."""
         num_grid_per_side = self.num_grid_per_side
         m_size = self.spatial_merge_size
         hidden_dim = self.pos_embed.embedding_dim
@@ -558,18 +670,10 @@ class Qwen3VLMoeVisionModel(nn.Module, RotaryPosMixin):
             dh = h_idxs - h_floor
             dw = w_idxs - w_floor
 
-            # Create meshgrid view for all h, w vars
             dh_grid, dw_grid = torch.meshgrid(dh, dw, indexing="ij")
             h_floor_grid, w_floor_grid = torch.meshgrid(h_floor, w_floor, indexing="ij")
             h_ceil_grid, w_ceil_grid = torch.meshgrid(h_ceil, w_ceil, indexing="ij")
 
-            # original computation of weights
-            # w00 = (1 - dh_grid) * (1 - dw_grid)
-            # w01 = (1 - dh_grid) * dw_grid
-            # w10 = dh_grid * (1 - dw_grid)
-            # w11 = dh_grid * dw_grid
-            # we reuse w11 here to avoid duplicate
-            # dh_grid * dw_grid computation
             w11 = dh_grid * dw_grid
             w10 = dh_grid - w11
             w01 = dw_grid - w11
@@ -825,11 +929,19 @@ class Qwen3VLMoeVisionModel(nn.Module, RotaryPosMixin):
                 cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
             else:
                 cu_seqlens = cu_seqlens.to("cpu")
-            max_seqlen = None
+            # Pre-compute max_seqlen once to avoid per-layer .item() sync
+            _seq_lens_np = token_cu_seqlens[1:] - token_cu_seqlens[:-1]
+            max_seqlen = int(_seq_lens_np.max()) if len(_seq_lens_np) > 0 else 0
 
         x = x.unsqueeze(1)
 
         cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
+
+        # Pre-expand cos/sin for half-dim rotary to avoid per-layer torch.cat
+        head_dim = self.hidden_size // self.num_heads
+        if rotary_pos_emb_cos.size(-1) * 2 == head_dim:
+            rotary_pos_emb_cos = torch.cat([rotary_pos_emb_cos, rotary_pos_emb_cos], dim=-1)
+            rotary_pos_emb_sin = torch.cat([rotary_pos_emb_sin, rotary_pos_emb_sin], dim=-1)
 
         deepstack_feature_lists = []
         num_deepstack_captured = 0
