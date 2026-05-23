@@ -1214,7 +1214,59 @@ class Qwen3VLForConditionalGeneration(nn.Module):
                 rope_type="rope_3d",
             )
         else:
+            if not getattr(self, '_vit_bench_done', False) and self.visual.tp_rank == 0:
+                self._vit_bench_done = True
+                self._run_vit_bench(pixel_values, image_grid_thw)
             return self.visual(pixel_values, grid_thw=image_grid_thw)
+
+    def _run_vit_bench(self, pixel_values, grid_thw):
+        import torch, time, json, os
+        visual = self.visual
+        pv = pixel_values.clone()
+        gt = grid_thw.clone() if isinstance(grid_thw, torch.Tensor) else torch.tensor(grid_thw)
+        if gt.dim() == 1:
+            gt = gt.unsqueeze(0)
+        rank = self.visual.tp_rank
+        print(f"[ViT Bench] rank={rank} pixel_values={pv.shape} grid_thw={gt.shape}", flush=True)
+        for _ in range(3):
+            with torch.no_grad():
+                visual(pv, grid_thw=gt)
+            torch.cuda.synchronize()
+        results = {}
+        for bs in [1, 2, 4, 8, 16, 32, 64, 100]:
+            pv_n = pv.repeat(bs, 1)
+            gt_n = gt.repeat(bs, 1)
+            with torch.no_grad():
+                visual(pv_n, grid_thw=gt_n)
+            torch.cuda.synchronize()
+            times = []
+            for _ in range(5):
+                torch.cuda.synchronize()
+                t0 = time.monotonic()
+                with torch.no_grad():
+                    visual(pv_n, grid_thw=gt_n)
+                torch.cuda.synchronize()
+                times.append((time.monotonic() - t0) * 1000)
+            avg = sum(times) / len(times)
+            results[bs] = {"avg_ms": round(avg, 2), "min_ms": round(min(times), 2), "per_item_ms": round(avg / bs, 2)}
+            print(f"[ViT Bench] bs={bs:3d}: avg={avg:.2f}ms  per_item={avg/bs:.2f}ms", flush=True)
+        for pbs in [1, 64]:
+            pv_p = pv.repeat(pbs, 1)
+            gt_p = gt.repeat(pbs, 1)
+            with torch.no_grad():
+                visual(pv_p, grid_thw=gt_p)
+            torch.cuda.synchronize()
+            with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA, torch.profiler.ProfilerActivity.CPU]) as prof:
+                with torch.no_grad():
+                    visual(pv_p, grid_thw=gt_p)
+                torch.cuda.synchronize()
+            prof.export_chrome_trace(f"/tmp/vit_profile_bs{pbs}_rank{rank}.json")
+            with open(f"/tmp/vit_profile_bs{pbs}_rank{rank}.txt", "w") as f:
+                f.write(prof.key_averages().table(sort_by="cuda_time_total", row_limit=40))
+        if rank == 0:
+            with open("/tmp/vit_bench.json", "w") as f:
+                json.dump(results, f, indent=2)
+        print(f"[ViT Bench] rank={rank} Done!", flush=True)
 
     def get_video_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
         # in qwen-vl, last dim is the same
