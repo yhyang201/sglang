@@ -518,10 +518,22 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
             real_race = (canary_at_read == _SWA_CANARY_FREED_SENTINEL) & (
                 prod_at_read == 0
             )
-            torch._assert_async(
-                (~real_race).all(),
-                "SWA mapping race: forward read a slot that schedule freed",
-            )
+            if real_race.any().item():
+                import traceback
+
+                race_idx = real_race.nonzero(as_tuple=True)[0]
+                bad_kv = kv_indices.flatten()[race_idx].cpu().tolist()[:10]
+                logger.error(
+                    "SWA RACE in DSV4Pool.translate: "
+                    f"kv_indices.shape={list(kv_indices.shape)}, "
+                    f"race_count={race_idx.numel()}, "
+                    f"bad_full_indices={bad_kv}"
+                )
+                traceback.print_stack()
+                torch._assert_async(
+                    (~real_race).all(),
+                    "SWA mapping race: forward read a slot that schedule freed",
+                )
         else:
             out = self.full_to_swa_index_mapping[kv_indices].to(torch.int32)
         return out

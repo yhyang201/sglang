@@ -14,15 +14,13 @@ from sglang.test.test_utils import (
 
 register_cuda_ci(est_time=250, stage="base-c", runner_config="dsv4-8-gpu-h200")
 
-DSV4_FLASH_MODEL = "sgl-project/DeepSeek-V4-Flash-FP8"
+DSV4_FLASH_MODEL = "/root/models/DeepSeek-V4-Flash-FP8"
 
 DEEPEP_CONFIG = '{"normal_dispatch":{"num_sms":96},"normal_combine":{"num_sms":96}}'
 
 DSV4_FLASH_ENV = {
     "SGLANG_DSV4_FP4_EXPERTS": "0",
     "SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK": "256",
-    # DEBUG: serialize every CUDA kernel launch to eliminate cross-stream races
-    "CUDA_LAUNCH_BLOCKING": "1",
 }
 
 _EAGLE_SPEC_ARGS = [

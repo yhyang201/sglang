@@ -194,12 +194,6 @@ class SWAKVPool(BaseSWAKVPool):
                     "without invalidate_loc_cache() — possible missing call site"
                 )
             if self.full_to_swa_mapping_stack is not None:
-                # CANARY combined read: single advanced-indexing kernel snapshots
-                # both prod (row 0) and canary (row 1) atomically. A real race is
-                # canary == sentinel AND prod == 0 (free_swa is the only writer
-                # that produces this pair). canary == sentinel with prod != 0 is
-                # impossible because every write to the stack is also a single
-                # kernel, so prod and canary are never observed out-of-sync.
                 combined = self.full_to_swa_mapping_stack[:, kv_indices]
                 prod_at_read = combined[0]
                 canary_at_read = combined[1]
@@ -207,10 +201,22 @@ class SWAKVPool(BaseSWAKVPool):
                 real_race = (canary_at_read == _SWA_CANARY_FREED_SENTINEL) & (
                     prod_at_read == 0
                 )
-                torch._assert_async(
-                    (~real_race).all(),
-                    "SWA mapping race: forward read a slot that schedule freed",
-                )
+                if real_race.any().item():
+                    import traceback
+
+                    race_idx = real_race.nonzero(as_tuple=True)[0]
+                    bad_kv = kv_indices.flatten()[race_idx].cpu().tolist()[:10]
+                    logger.error(
+                        "SWA RACE in SWAKVPool.translate: "
+                        f"kv_indices.shape={list(kv_indices.shape)}, "
+                        f"race_count={race_idx.numel()}, "
+                        f"bad_full_indices={bad_kv}"
+                    )
+                    traceback.print_stack()
+                    torch._assert_async(
+                        (~real_race).all(),
+                        "SWA mapping race: forward read a slot that schedule freed",
+                    )
             else:
                 self._cached_swa_loc = self.full_to_swa_index_mapping[kv_indices].to(
                     torch.int32
