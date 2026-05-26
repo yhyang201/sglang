@@ -137,13 +137,6 @@ class Mxfp4MarlinMoEMethod:
         layer: Module,
         dispatch_output: DispatchOutput,
     ) -> CombineInput:
-        from sglang.srt.layers.moe.token_dispatcher.standard import StandardCombineInput
-        from sglang.srt.layers.moe.topk import TopKOutputChecker
-
-        topk_output = dispatch_output.topk_output
-        if not TopKOutputChecker.format_is_standard(topk_output):
-            raise ValueError(f"Unsupported topk output format: {topk_output.format}")
-
         quant_info = MarlinMoeQuantInfo(
             w13_qweight=layer.w13_weight,
             w2_qweight=layer.w2_weight,
@@ -154,6 +147,6 @@ class Mxfp4MarlinMoEMethod:
             weight_bits=4,
             is_k_full=True,
         )
-        runner_output = self.runner.run(dispatch_output, quant_info=quant_info)
-
-        return StandardCombineInput(hidden_states=runner_output.hidden_states)
+        # MoeRunner selects the correct fused func based on a2a backend
+        # (e.g. "none" → standard path, "deepep" → DeepEP path).
+        return self.runner.run(dispatch_output, quant_info=quant_info)

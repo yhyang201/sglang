@@ -222,10 +222,14 @@ def get_deepep_output_dtype(self) -> DeepEPOutputDtype:
         if dispatcher_output_dtype is not None:
             return DeepEPOutputDtype(dispatcher_output_dtype)
 
-    # 4. flashinfer_cutedsl and is_cutlass expects BF16 dispatch
+    # 4. Backends that quantize hidden_states internally expect BF16 dispatch.
+    # This includes W4A16 backends (marlin, flashinfer_mxfp4) whose kernels
+    # take BF16 activations, and cutedsl/cutlass which do their own quant.
     if (
         get_moe_runner_backend().is_flashinfer_cutedsl()
         or get_moe_runner_backend().is_cutlass()
+        or get_moe_runner_backend().is_marlin()
+        or get_moe_runner_backend().is_flashinfer_mxfp4()
     ):
         return DeepEPOutputDtype.BF16
 

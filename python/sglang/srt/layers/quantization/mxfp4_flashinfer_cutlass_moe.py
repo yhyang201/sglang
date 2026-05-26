@@ -213,19 +213,16 @@ class Mxfp4FlashinferCutlassMoEMethod:
 
     # --- Forward -----------------------------------------------------------
 
-    def apply(
+    def _call_cutlass_kernel(
         self,
         layer: Module,
-        dispatch_output: "DispatchOutput",
-    ) -> "CombineInput":
-        topk_output = dispatch_output.topk_output
-        if not TopKOutputChecker.format_is_standard(topk_output):
-            raise ValueError(f"Unsupported topk output format: {topk_output.format}")
-
-        x = dispatch_output.hidden_states
-        topk_weights = topk_output.topk_weights
-        topk_ids = topk_output.topk_ids
-
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        ep_size: int = 1,
+        ep_rank: int = 0,
+    ) -> torch.Tensor:
+        """Run FlashInfer CUTLASS SM90 mixed-input fused MoE kernel."""
         output_dtype = torch.bfloat16
         with use_symmetric_memory(
             get_tp_group(), disabled=not is_allocation_symmetric()
@@ -245,19 +242,115 @@ class Mxfp4FlashinferCutlassMoEMethod:
                 layer.w13_weight_scale_inv.view(torch.int32),
                 layer.w2_weight_scale_inv.view(torch.int32),
             ],
-            fc1_expert_biases=None,  # DSv4 has no MoE expert bias.
+            fc1_expert_biases=None,
             fc2_expert_biases=None,
-            swiglu_alpha=self._swiglu_alpha_tensor,  # ones: standard SiLU gate
-            swiglu_beta=self._swiglu_beta_tensor,  # zeros: standard up
+            swiglu_alpha=self._swiglu_alpha_tensor,
+            swiglu_beta=self._swiglu_beta_tensor,
             swiglu_limit=self._swiglu_limit_tensor,
             tp_size=layer.moe_tp_size,
             tp_rank=layer.moe_tp_rank,
-            ep_size=layer.moe_ep_size,
-            ep_rank=layer.moe_ep_rank,
+            ep_size=ep_size,
+            ep_rank=ep_rank,
             use_w4_group_scaling=True,
             activation_type=ActivationType.Swiglu,
             tune_max_num_tokens=next_power_of_2(x.shape[0]),
             output=out,
         )
+        return out
 
+    def apply(
+        self,
+        layer: Module,
+        dispatch_output: "DispatchOutput",
+    ) -> "CombineInput":
+        from sglang.srt.layers.moe.token_dispatcher import DispatchOutputChecker
+
+        if DispatchOutputChecker.format_is_deepep_ll(dispatch_output):
+            return self._apply_deepep_ll(layer, dispatch_output)
+        elif DispatchOutputChecker.format_is_deepep_normal(dispatch_output):
+            return self._apply_deepep_normal(layer, dispatch_output)
+
+        topk_output = dispatch_output.topk_output
+        if not TopKOutputChecker.format_is_standard(topk_output):
+            raise ValueError(f"Unsupported topk output format: {topk_output.format}")
+
+        out = self._call_cutlass_kernel(
+            layer,
+            dispatch_output.hidden_states,
+            topk_output.topk_ids,
+            topk_output.topk_weights,
+            ep_size=layer.moe_ep_size,
+            ep_rank=layer.moe_ep_rank,
+        )
         return StandardCombineInput(hidden_states=out)
+
+    def _apply_deepep_ll(
+        self,
+        layer: Module,
+        dispatch_output: "DispatchOutput",
+    ) -> "CombineInput":
+        from sglang.srt.layers.moe.token_dispatcher.deepep import DeepEPLLCombineInput
+
+        hidden_states = dispatch_output.hidden_states
+        masked_m = dispatch_output.masked_m
+        expected_m = dispatch_output.expected_m
+        num_experts = masked_m.shape[0]
+        device = hidden_states.device
+
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+
+        # Build per-token expert assignment (top_k=1):
+        # token at position i*expected_m + j → expert i.
+        topk_ids = (
+            torch.arange(num_experts, device=device)
+            .unsqueeze(1)
+            .expand(-1, expected_m)
+            .reshape(-1, 1)
+        )
+        # Padding tokens get weight 0.0 → contribute nothing.
+        token_pos = torch.arange(expected_m, device=device).unsqueeze(0)
+        valid_mask = token_pos < masked_m.unsqueeze(1)
+        topk_weights = valid_mask.float().reshape(-1, 1)
+
+        # Tokens are already local; treat all weight experts as local.
+        out = self._call_cutlass_kernel(
+            layer, x, topk_ids, topk_weights, ep_size=1, ep_rank=0
+        )
+
+        return DeepEPLLCombineInput(
+            hidden_states=out,
+            topk_ids=dispatch_output.topk_ids,
+            topk_weights=dispatch_output.topk_weights,
+        )
+
+    def _apply_deepep_normal(
+        self,
+        layer: Module,
+        dispatch_output: "DispatchOutput",
+    ) -> "CombineInput":
+        from sglang.srt.layers.moe.token_dispatcher.deepep import (
+            DeepEPNormalCombineInput,
+        )
+
+        hidden_states = dispatch_output.hidden_states
+        num_recv = dispatch_output.num_recv_tokens_per_expert
+        device = hidden_states.device
+
+        # Build per-token expert assignment from expert-grouped layout.
+        counts = torch.tensor(num_recv, device=device, dtype=torch.long)
+        topk_ids = torch.repeat_interleave(
+            torch.arange(len(num_recv), device=device), counts
+        ).unsqueeze(1)
+        topk_weights = torch.ones(
+            hidden_states.shape[0], 1, device=device, dtype=torch.float32
+        )
+
+        out = self._call_cutlass_kernel(
+            layer, hidden_states, topk_ids, topk_weights, ep_size=1, ep_rank=0
+        )
+
+        return DeepEPNormalCombineInput(
+            hidden_states=out,
+            topk_ids=dispatch_output.topk_ids,
+            topk_weights=dispatch_output.topk_weights,
+        )
