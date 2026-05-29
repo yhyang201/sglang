@@ -441,6 +441,7 @@ class LayerCommunicator:
         # Reduce scatter requires skipping all-reduce in model code after MoE/MLP, so only enable for models which have that implemented. Remove flag once done for all models that use LayerCommunicator.
         allow_reduce_scatter: bool = False,
         is_last_layer: bool = False,
+        allow_last_layer_fusion: bool = False,
         qkv_latent_func: Optional[Callable] = None,
     ):
         self.layer_scatter_modes = layer_scatter_modes
@@ -448,6 +449,7 @@ class LayerCommunicator:
         self.post_attention_layernorm = post_attention_layernorm
         self.allow_reduce_scatter = allow_reduce_scatter
         self.is_last_layer = is_last_layer
+        self.allow_last_layer_fusion = allow_last_layer_fusion
         self.qkv_latent_func = qkv_latent_func
 
         self._context = CommunicateContext.init_new()
@@ -763,7 +765,7 @@ class LayerCommunicator:
                     and get_global_server_args().enable_aiter_allreduce_fusion
                 )
             )
-            and (not self.is_last_layer)
+            and (not self.is_last_layer or self.allow_last_layer_fusion)
             and (self._context.tp_size > 1)
         )
 

@@ -778,7 +778,7 @@ class GemmaRMSNorm(MultiPlatformOp):
             residual,
             post_residual_addition,
             self.gemma_weight,
-            use_attn_tp_group=True,
+            use_attn_tp_group=use_attn_tp_group,
         )
 
 
