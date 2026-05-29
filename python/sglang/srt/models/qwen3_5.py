@@ -34,14 +34,23 @@ from sglang.srt.configs.qwen3_5 import (
 )
 
 # Distributed
-from sglang.srt.distributed import get_pp_group
+from sglang.srt.distributed import (
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+    moe_tensor_model_parallel_all_reduce,
+)
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
 
 # Layers - Attention
 from sglang.srt.layers.attention.fla.layernorm_gated import RMSNorm as RMSNormGated
 from sglang.srt.layers.attention.mamba.mamba import mamba_v2_sharded_weight_loader
-from sglang.srt.layers.communicator import LayerCommunicator, LayerScatterModes
+from sglang.srt.layers.communicator import (
+    LayerCommunicator,
+    LayerScatterModes,
+    apply_aiter_all_reduce_fusion,
+    apply_flashinfer_allreduce_fusion,
+)
 from sglang.srt.layers.dp_attention import (
     get_attention_tp_rank,
     get_attention_tp_size,
@@ -606,6 +615,7 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
             post_attention_layernorm=self.post_attention_layernorm,
             allow_reduce_scatter=True,
             is_last_layer=(layer_id == config.num_hidden_layers - 1),
+            allow_last_layer_fusion=True,
         )
 
     def forward(
@@ -811,6 +821,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
             post_attention_layernorm=self.post_attention_layernorm,
             allow_reduce_scatter=True,
             is_last_layer=(layer_id == config.num_hidden_layers - 1),
+            allow_last_layer_fusion=True,
         )
 
         self.alt_stream = alt_stream
@@ -1138,10 +1149,19 @@ class Qwen3_5ForCausalLM(nn.Module):
         # Initialize hidden states
         if self.pp_group.is_first_rank:
             if input_embeds is None:
-                hidden_states = self.embed_tokens(input_ids)
+                tp_size = get_tensor_model_parallel_world_size()
+                batch_size = input_ids.shape[0]
+                can_fuse = tp_size > 1 and apply_flashinfer_allreduce_fusion(batch_size)
+                if can_fuse:
+                    hidden_states = self.embed_tokens(input_ids, reduce_results=False)
+                    residual = torch.zeros_like(hidden_states)
+                    hidden_states._sglang_needs_allreduce_fusion = True
+                else:
+                    hidden_states = self.embed_tokens(input_ids)
+                    residual = None
             else:
                 hidden_states = input_embeds
-            residual = None
+                residual = None
         else:
             assert pp_proxy_tensors is not None
             hidden_states = pp_proxy_tensors["hidden_states"]
@@ -1188,7 +1208,21 @@ class Qwen3_5ForCausalLM(nn.Module):
 
         # Apply final normalization
         if hidden_states.shape[0] != 0:
-            if residual is None:
+            if (
+                hasattr(hidden_states, "_sglang_needs_allreduce_fusion")
+                and hidden_states._sglang_needs_allreduce_fusion
+            ):
+                if (
+                    apply_flashinfer_allreduce_fusion(hidden_states.shape[0])
+                    or apply_aiter_all_reduce_fusion(hidden_states)
+                ) and hasattr(self.norm, "forward_with_allreduce_fusion"):
+                    hidden_states, _ = self.norm.forward_with_allreduce_fusion(
+                        hidden_states, residual, use_attn_tp_group=False
+                    )
+                else:
+                    hidden_states = moe_tensor_model_parallel_all_reduce(hidden_states)
+                    hidden_states, _ = self.norm(hidden_states, residual)
+            elif residual is None:
                 hidden_states = self.norm(hidden_states)
             else:
                 hidden_states, _ = self.norm(hidden_states, residual)
