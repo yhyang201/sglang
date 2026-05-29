@@ -470,7 +470,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         param[: loaded_weight.shape[0]].data.copy_(loaded_weight)
         param[loaded_weight.shape[0] :].data.fill_(0)
 
-    def forward(self, input_):
+    def forward(self, input_, reduce_results=True, use_nccl=False):
         if self.tp_size > 1:
             # Build the mask.
             masked_input, input_mask = get_masked_input_and_mask(
@@ -493,9 +493,15 @@ class VocabParallelEmbedding(torch.nn.Module):
         if self.tp_size > 1:
             # Mask the output embedding.
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
-            if not get_attn_tp_context().input_scattered:
+            if reduce_results and not get_attn_tp_context().input_scattered:
                 if self.use_attn_tp_group:
                     output_parallel = attn_tp_all_reduce(output_parallel)
+                elif use_nccl:
+                    import torch.distributed
+
+                    torch.distributed.all_reduce(
+                        output_parallel, group=get_tp_group().device_group
+                    )
                 else:
                     # Reduce across all the model parallel GPUs.
                     output_parallel = tensor_model_parallel_all_reduce(output_parallel)

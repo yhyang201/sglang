@@ -150,11 +150,14 @@ class Qwen3_5ForCausalLMMTP(nn.Module):
         ):
             assert input_embeds is not None
             input_embeds = torch.cat(
-                [input_embeds[:-1], self.model.embed_tokens(input_ids[-1].unsqueeze(0))]
+                [
+                    input_embeds[:-1],
+                    self.model.embed_tokens(input_ids[-1].unsqueeze(0), use_nccl=True),
+                ]
             )
 
         if input_embeds is None:
-            input_embeds = self.model.embed_tokens(input_ids)
+            input_embeds = self.model.embed_tokens(input_ids, use_nccl=True)
 
         hidden_states = forward_batch.spec_info.hidden_states
 
