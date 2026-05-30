@@ -456,7 +456,7 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
                 metadata.cache_seqlens_int32.copy_(
                     seq_lens + self.speculative_step_id + 1
                 )
-                metadata.max_seq_len_k = seq_lens.max().item() + (
+                metadata.max_seq_len_k = seq_lens_cpu.max().item() + (
                     self.speculative_step_id + 1
                 )
 
@@ -488,8 +488,8 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
             metadata = self.target_verify_metadata[bs]
             metadata.cache_seqlens_int32.copy_(seq_lens + metadata.max_seq_len_q)
 
-            metadata.max_seq_len_k = seq_lens_cpu.max().item() + metadata.max_seq_len_q
             max_len = seq_lens_cpu.max().item()
+            metadata.max_seq_len_k = max_len + metadata.max_seq_len_q
             metadata.cu_seqlens_k[1:].copy_(
                 torch.cumsum(metadata.cache_seqlens_int32, dim=0, dtype=torch.int32)
             )
