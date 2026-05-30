@@ -36,7 +36,6 @@ from sglang.srt.layers.quantization.base_config import (
 from sglang.srt.layers.quantization.unquant import UnquantizedEmbeddingMethod
 from sglang.srt.utils import (
     cpu_has_amx_support,
-    get_compiler_backend,
     is_cpu,
     is_npu,
     set_weight_attrs,
@@ -132,7 +131,7 @@ class VocabParallelEmbeddingShardIndices:
         assert self.num_added_elements <= self.num_added_elements_padded
 
 
-@torch.compile(dynamic=True, backend=get_compiler_backend(), disable=_is_npu)
+# @torch.compile(dynamic=True, backend=get_compiler_backend(), disable=_is_npu)
 def get_masked_input_and_mask(
     input_: torch.Tensor,
     org_vocab_start_index: int,
