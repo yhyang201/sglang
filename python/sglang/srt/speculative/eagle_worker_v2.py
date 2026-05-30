@@ -362,7 +362,9 @@ class EagleDraftWorker(BaseDraftWorker):
             self.draft_runner,
             self.topk,
             self.speculative_num_steps,
+            cached_draft_batch=getattr(self, "_cached_draft_forward_batch", None),
         )
+        self._cached_draft_forward_batch = forward_batch
 
         # Run draft
         if can_cuda_graph:
@@ -649,7 +651,9 @@ class EagleDraftWorker(BaseDraftWorker):
                 self.speculative_num_draft_tokens,
                 self.draft_runner,
                 self.cuda_graph_runner_for_draft_extend,
+                cached_extend_batch=getattr(self, "_cached_extend_forward_batch", None),
             )
+            self._cached_extend_forward_batch = forward_batch
 
         if self.plan_stream:
             torch.get_device_module(self.device).current_stream().wait_stream(

@@ -181,6 +181,7 @@ class EagleDraftInputV2Mixin:
         draft_model_runner: ModelRunner,
         topk: int,
         num_steps: int,
+        cached_draft_batch: "ForwardBatch | None" = None,
     ):
         if not batch.forward_mode.is_idle():
             bs = len(batch.seq_lens)
@@ -205,12 +206,30 @@ class EagleDraftInputV2Mixin:
         # Get a forward batch
         self.num_tokens_per_req = topk
         self.num_tokens_for_logprob_per_req = topk
+        self.positions = batch.seq_lens.repeat_interleave(topk, dim=0)
+
+        # Fast path: reuse cached ForwardBatch
+        if (
+            cached_draft_batch is not None
+            and not batch.forward_mode.is_idle()
+            and cached_draft_batch.batch_size == len(batch.seq_lens)
+        ):
+            cached_draft_batch.seq_lens = batch.seq_lens
+            cached_draft_batch.seq_lens_cpu = batch.seq_lens_cpu
+            cached_draft_batch.seq_lens_sum = batch.seq_lens_sum
+            cached_draft_batch.out_cache_loc = batch.out_cache_loc
+            cached_draft_batch.spec_info = batch.spec_info
+            can_cuda_graph = cuda_graph_runner and cuda_graph_runner.can_run(
+                cached_draft_batch
+            )
+            return cached_draft_batch, can_cuda_graph
+
+        # Slow path: create ForwardBatch from scratch
         capture_mode = (
             CaptureHiddenMode.NULL
             if draft_model_runner.spec_algorithm.is_standalone()
             else CaptureHiddenMode.LAST
         )
-        self.positions = batch.seq_lens.repeat_interleave(topk, dim=0)
         batch.capture_hidden_mode = capture_mode
         forward_batch = ForwardBatch.init_new(batch, draft_model_runner)
         can_cuda_graph = cuda_graph_runner and cuda_graph_runner.can_run(forward_batch)
@@ -223,10 +242,10 @@ class EagleDraftInputV2Mixin:
         num_draft_tokens: int,
         draft_model_runner: Any,
         cuda_graph_runner: Any,
+        cached_extend_batch: "ForwardBatch | None" = None,
     ):
         bs = len(batch.seq_lens)
         extend_num_tokens = bs * num_draft_tokens
-        # When seq_lens_cpu is absent, stay on GPU-only path -- no .tolist()/.cpu().
         gpu_only = batch.seq_lens_cpu is None
 
         batch.spec_info = self
@@ -237,8 +256,37 @@ class EagleDraftInputV2Mixin:
             batch.model_config.vocab_size,
             "v2 prepare_for_extend_to_fill_draft_kvcache input_ids",
         )
-        # init_new requires both list or both Tensor;
-        # gpu_only emits device tensors to skip H2D.
+
+        # Fast path: reuse cached ForwardBatch
+        if (
+            cached_extend_batch is not None
+            and not batch.forward_mode.is_idle()
+            and cached_extend_batch.batch_size == bs
+        ):
+            cached_extend_batch.input_ids = predict
+            cached_extend_batch.seq_lens = batch.seq_lens + num_draft_tokens
+            cached_extend_batch.seq_lens_cpu = (
+                batch.seq_lens_cpu + num_draft_tokens
+                if batch.seq_lens_cpu is not None
+                else None
+            )
+            cached_extend_batch.seq_lens_sum = (
+                int(cached_extend_batch.seq_lens_cpu.sum())
+                if cached_extend_batch.seq_lens_cpu is not None
+                else None
+            )
+            cached_extend_batch.spec_info = self
+            cached_extend_batch.sampling_info = batch.sampling_info
+            can_cuda_graph = cuda_graph_runner and cuda_graph_runner.can_run(
+                cached_extend_batch
+            )
+            if not can_cuda_graph:
+                draft_model_runner.attn_backend.init_forward_metadata(
+                    cached_extend_batch
+                )
+            return cached_extend_batch
+
+        # Slow path: create ForwardBatch from scratch
         if gpu_only:
             batch.prefix_lens = batch.seq_lens.to(torch.int32)
             batch.extend_lens = torch.full(
@@ -260,15 +308,11 @@ class EagleDraftInputV2Mixin:
         )
         batch.capture_hidden_mode = capture_mode
         forward_batch = ForwardBatch.init_new(batch, draft_model_runner)
-        # Forward sees post-write length (draft extend writes num_draft_tokens
-        # slots); mutation stays on forward_batch to preserve SB.seq_lens.
         forward_batch.seq_lens = forward_batch.seq_lens + num_draft_tokens
         if not gpu_only:
             forward_batch.seq_lens_cpu = forward_batch.seq_lens_cpu + num_draft_tokens
             forward_batch.seq_lens_sum = int(forward_batch.seq_lens_cpu.sum())
         else:
-            # Supply CPU mirror (extend_seq_lens are all num_draft_tokens) so
-            # backend max() reads from list without a per-iter D2H sync.
             forward_batch.extend_seq_lens_cpu = [num_draft_tokens] * bs
         can_cuda_graph = cuda_graph_runner and cuda_graph_runner.can_run(forward_batch)
         if not batch.forward_mode.is_idle() and not can_cuda_graph:
