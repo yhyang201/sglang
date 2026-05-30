@@ -283,6 +283,7 @@ class EagleVerifyInputV2Mixin:
         req_to_token_pool: ReqToTokenPool,
         batch: ScheduleBatch,
         target_worker: TpModelWorker,
+        cached_verify_batch: "ForwardBatch | None" = None,
     ):
         if not batch.forward_mode.is_idle():
             # Assign cache locations
@@ -318,7 +319,35 @@ class EagleVerifyInputV2Mixin:
                 else None
             )
 
-        # Get a forward batch
+        # Fast path: reuse cached ForwardBatch, only update changed fields
+        if (
+            cached_verify_batch is not None
+            and not batch.forward_mode.is_idle()
+            and cached_verify_batch.batch_size == len(batch.seq_lens)
+        ):
+            cached_verify_batch.input_ids = batch.input_ids
+            cached_verify_batch.seq_lens = batch.seq_lens
+            cached_verify_batch.seq_lens_cpu = batch.seq_lens_cpu
+            cached_verify_batch.seq_lens_sum = batch.seq_lens_sum
+            cached_verify_batch.out_cache_loc = batch.out_cache_loc
+            cached_verify_batch.spec_info = batch.spec_info
+            cached_verify_batch.sampling_info = batch.sampling_info
+            cached_verify_batch.mamba_track_indices = batch.mamba_track_indices
+            cached_verify_batch.mamba_track_mask = batch.mamba_track_mask
+            cached_verify_batch.mamba_track_seqlens = batch.mamba_track_seqlens
+
+            verify_forward_batch = cached_verify_batch
+
+            graph_runner = target_worker.model_runner.graph_runner
+            can_run_cuda_graph = bool(
+                graph_runner and graph_runner.can_run(verify_forward_batch)
+            )
+            if can_run_cuda_graph:
+                graph_runner.fast_replay_prepare(verify_forward_batch)
+
+            return verify_forward_batch, can_run_cuda_graph
+
+        # Slow path: create ForwardBatch from scratch (first call or batch size changed)
         batch.forward_mode = (
             ForwardMode.IDLE
             if batch.forward_mode.is_idle()

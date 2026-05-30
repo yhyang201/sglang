@@ -1262,6 +1262,64 @@ class CudaGraphRunner:
         if self.model_runner.hisparse_coordinator is not None:
             self.model_runner.hisparse_coordinator.num_real_reqs.fill_(raw_bs)
 
+    def fast_replay_prepare(self, forward_batch: ForwardBatch):
+        """Fast path for replay_prepare when batch size hasn't changed.
+
+        Only updates the fields that change between decode rounds
+        (input_ids, seq_lens, out_cache_loc) and reruns attention
+        metadata init. Skips unchanged fields (req_pool_indices,
+        positions/mrope, custom_mask) to save ~600us per round.
+        """
+        buffers = self.buffers
+        raw_bs = forward_batch.batch_size
+        bs = self.bs  # reuse padded bs from previous prepare
+
+        # Only copy the changing tensors
+        raw_num_token = raw_bs * self.num_tokens_per_bs
+        dsts = [
+            buffers.input_ids[:raw_num_token],
+            buffers.seq_lens[:raw_bs],
+            buffers.out_cache_loc[:raw_num_token],
+        ]
+        srcs = [
+            forward_batch.input_ids,
+            forward_batch.seq_lens,
+            forward_batch.out_cache_loc,
+        ]
+
+        if (
+            buffers.mamba_track_indices is not None
+            and forward_batch.mamba_track_indices is not None
+        ):
+            dsts.append(buffers.mamba_track_indices[:raw_bs])
+            srcs.append(forward_batch.mamba_track_indices)
+
+        _grouped_foreach_copy_(dsts, srcs)
+
+        # CPU tensor copy
+        if forward_batch.seq_lens_cpu is not None:
+            buffers.seq_lens_cpu[:raw_bs].copy_(forward_batch.seq_lens_cpu)
+
+        # Attention backend metadata update (still needed for page tables)
+        attn_backend = self.attn_backend
+        attn_backend._replay_forward_batch = forward_batch
+        seq_lens_sum_arg = (
+            None
+            if forward_batch.seq_lens_sum is None
+            else forward_batch.seq_lens_sum + (bs - raw_bs) * self.seq_len_fill_value
+        )
+        attn_backend.init_forward_metadata_replay_cuda_graph(
+            bs,
+            buffers.req_pool_indices[:bs],
+            buffers.seq_lens[:bs],
+            seq_lens_sum_arg,
+            buffers.encoder_lens[:bs] if self.is_encoder_decoder else None,
+            self.capture_forward_mode,
+            forward_batch.spec_info,
+            seq_lens_cpu=buffers.seq_lens_cpu[:bs],
+        )
+        attn_backend._replay_forward_batch = None
+
     def replay(
         self,
         forward_batch: ForwardBatch,

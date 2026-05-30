@@ -1055,8 +1055,12 @@ class EAGLEWorkerV2(BaseSpecWorker):
                     self.req_to_token_pool,
                     batch,
                     self.target_worker,
+                    cached_verify_batch=getattr(
+                        self, "_cached_verify_forward_batch", None
+                    ),
                 )
             )
+            self._cached_verify_forward_batch = verify_forward_batch
 
         # Cover post-prepare rebinds: draft_token, plan_stream-allocated out_cache_loc.
         record_stream_each((batch.input_ids, batch.out_cache_loc), fwd_stream)
