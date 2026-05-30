@@ -256,6 +256,8 @@ class MambaPool:
 
         self.size = size
         self.device = device
+        self.spec_state_size = spec_state_size
+        self.speculative_num_draft_tokens = speculative_num_draft_tokens
 
         # for disagg with nvlink
         self.enable_custom_mem_pool, self.custom_mem_pool, _ = (
@@ -270,73 +272,74 @@ class MambaPool:
                 else nullcontext()
             ),
         ):
-            conv_state = [
-                torch.zeros(
-                    size=(num_mamba_layers, size + 1) + conv_shape,
-                    dtype=conv_dtype,
-                    device=device,
-                )
-                for conv_shape in conv_state_shape
-            ]
-
-            if _is_npu:
-                from sglang.srt.hardware_backend.npu.memory_pool_npu import (
-                    _init_npu_conv_state,
-                )
-
-                conv_state = _init_npu_conv_state(
-                    conv_state[0], conv_state_shape, speculative_num_draft_tokens
-                )
-
-            if _is_cpu and _cpu_has_amx_support:
-                from sglang.srt.layers.amx_utils import _init_amx_conv_state
-
-                # CPU uses a different layout of conv_state for kernel optimization
-                conv_state = _init_amx_conv_state(conv_state)
-
-            temporal_state = torch.zeros(
-                size=(num_mamba_layers, size + 1) + temporal_state_shape,
-                dtype=ssm_dtype,
-                device=device,
-            )
             if speculative_num_draft_tokens is not None:
                 if _is_npu:
-                    temporal_state = temporal_state.transpose(-1, -2)
-                    temporal_state_shape = (
+                    temporal_state_shape_alloc = (
                         *temporal_state_shape[:-2],
                         temporal_state_shape[-1],
                         temporal_state_shape[-2],
                     )
-                # Cache intermediate SSM states per draft token during target verify
-                # Shape: [num_layers, size + 1, speculative_num_draft_tokens, HV, K, V]
-                intermediate_ssm_state_cache = torch.zeros(
-                    size=(
-                        num_mamba_layers,
-                        spec_state_size + 1,
-                        speculative_num_draft_tokens,
-                        temporal_state_shape[0],
-                        temporal_state_shape[1],
-                        temporal_state_shape[2],
-                    ),
-                    dtype=ssm_dtype,
-                    device="cuda",
-                )
-                # Cache intermediate conv windows (last K-1 inputs) per draft token during target verify
-                # Shape: [num_layers, size + 1, speculative_num_draft_tokens, dim, K-1]
-                intermediate_conv_window_cache = [
+                else:
+                    temporal_state_shape_alloc = temporal_state_shape
+
+                # Unified pool: working slots + draft slots in one tensor.
+                # Draft slots: (spec_state_size + 1) * speculative_num_draft_tokens
+                # Layout: [0..size] = working+pad, [size+1..] = draft slots
+                draft_total = (spec_state_size + 1) * speculative_num_draft_tokens
+                self.draft_base = size + 1  # first draft slot index
+                self.draft_slots_per_req = speculative_num_draft_tokens
+                total_pool_size = size + 1 + draft_total
+
+                conv_state = [
                     torch.zeros(
-                        size=(
-                            num_mamba_layers,
-                            spec_state_size + 1,
-                            speculative_num_draft_tokens,
-                            conv_shape[0],
-                            conv_shape[1],
-                        ),
+                        size=(num_mamba_layers, total_pool_size) + conv_shape,
                         dtype=conv_dtype,
-                        device="cuda",
+                        device=device,
                     )
                     for conv_shape in conv_state_shape
                 ]
+
+                temporal_state = torch.zeros(
+                    size=(num_mamba_layers, total_pool_size)
+                    + temporal_state_shape_alloc,
+                    dtype=ssm_dtype,
+                    device=device,
+                )
+
+                if _is_npu:
+                    temporal_state = temporal_state.transpose(-1, -2)
+
+                # Create views into the draft portion as intermediate buffers.
+                # intermediate shape: [num_layers, spec_state_size+1, draft_tokens, ...]
+                # This is a VIEW of pool[draft_base : draft_base + draft_total]
+                # reshaped from [num_layers, draft_total, ...] to
+                # [num_layers, spec_state_size+1, draft_tokens, ...]
+                intermediate_ssm_state_cache = temporal_state[
+                    :, self.draft_base : self.draft_base + draft_total
+                ].view(
+                    num_mamba_layers,
+                    spec_state_size + 1,
+                    speculative_num_draft_tokens,
+                    *temporal_state_shape_alloc,
+                )
+
+                intermediate_conv_window_cache = [
+                    cs[:, self.draft_base : self.draft_base + draft_total].view(
+                        num_mamba_layers,
+                        spec_state_size + 1,
+                        speculative_num_draft_tokens,
+                        *conv_shape,
+                    )
+                    for cs, conv_shape in zip(conv_state, conv_state_shape)
+                ]
+
+                # current_input_indices: tracks which pool slot each req reads from.
+                # Initialized to identity (working slot = req's own pool index).
+                # After verify, updated to point to the accepted draft slot.
+                self.current_input_indices = torch.arange(
+                    total_pool_size, dtype=torch.int32, device=device
+                )
+
                 self.mamba_cache = self.SpeculativeState(
                     conv=conv_state,
                     temporal=temporal_state,
@@ -344,14 +347,48 @@ class MambaPool:
                     intermediate_conv_window=intermediate_conv_window_cache,
                 )
                 logger.info(
-                    f"Mamba Cache is allocated. "
-                    f"max_mamba_cache_size: {size}, "
+                    f"Mamba Cache (unified pool) is allocated. "
+                    f"max_mamba_cache_size: {size}, draft_slots: {draft_total}, "
+                    f"total_pool_size: {total_pool_size}, "
                     f"conv_state size: {get_tensor_size_bytes(conv_state) / GB:.2f}GB, "
                     f"ssm_state size: {get_tensor_size_bytes(temporal_state) / GB:.2f}GB "
-                    f"intermediate_ssm_state_cache size: {get_tensor_size_bytes(intermediate_ssm_state_cache) / GB:.2f}GB "
-                    f"intermediate_conv_window_cache size: {get_tensor_size_bytes(intermediate_conv_window_cache) / GB:.2f}GB "
                 )
             else:
+                conv_state = [
+                    torch.zeros(
+                        size=(num_mamba_layers, size + 1) + conv_shape,
+                        dtype=conv_dtype,
+                        device=device,
+                    )
+                    for conv_shape in conv_state_shape
+                ]
+
+                if _is_npu:
+                    from sglang.srt.hardware_backend.npu.memory_pool_npu import (
+                        _init_npu_conv_state,
+                    )
+
+                    conv_state = _init_npu_conv_state(
+                        conv_state[0],
+                        conv_state_shape,
+                        speculative_num_draft_tokens,
+                    )
+
+                if _is_cpu and _cpu_has_amx_support:
+                    from sglang.srt.layers.amx_utils import _init_amx_conv_state
+
+                    conv_state = _init_amx_conv_state(conv_state)
+
+                temporal_state = torch.zeros(
+                    size=(num_mamba_layers, size + 1) + temporal_state_shape,
+                    dtype=ssm_dtype,
+                    device=device,
+                )
+
+                self.draft_base = None
+                self.draft_slots_per_req = None
+                self.current_input_indices = None
+
                 self.mamba_cache = self.State(conv=conv_state, temporal=temporal_state)
                 logger.info(
                     f"Mamba Cache is allocated. "
@@ -372,6 +409,45 @@ class MambaPool:
 
     def mamba2_layer_cache(self, layer_id: int):
         return self.mamba_cache.at_layer_idx(layer_id)
+
+    def get_draft_slot_indices(
+        self, spec_req_indices: torch.Tensor, step: int
+    ) -> torch.Tensor:
+        """Get pool indices for draft slots at a given step."""
+        assert self.draft_base is not None
+        return self.draft_base + spec_req_indices * self.draft_slots_per_req + step
+
+    def update_current_inputs_after_verify(
+        self,
+        mamba_cache_indices: torch.Tensor,
+        spec_req_indices: torch.Tensor,
+        accepted_steps: torch.Tensor,
+    ):
+        """Pointer-switch: update current_input_indices to point to accepted draft slot.
+
+        Args:
+            mamba_cache_indices: [bs] working pool indices for each request
+            spec_req_indices: [bs] speculative request indices (for draft slot lookup)
+            accepted_steps: [bs] last accepted draft step per request (>=0 valid, <0 skip)
+        """
+        assert self.current_input_indices is not None
+        # Compute draft slot for each request. For invalid entries (accepted_steps < 0),
+        # clamp to 0 so the index is valid; the state at that slot won't be read
+        # because invalid requests are filtered out elsewhere.
+        clamped_steps = accepted_steps.clamp(min=0)
+        draft_slots = (
+            self.draft_base
+            + spec_req_indices * self.draft_slots_per_req
+            + clamped_steps
+        )
+        self.current_input_indices[mamba_cache_indices] = draft_slots.to(torch.int32)
+
+    def reset_current_inputs(self, mamba_cache_indices: torch.Tensor):
+        """Reset current_input_indices to point back to working slots (identity)."""
+        if self.current_input_indices is not None:
+            self.current_input_indices[mamba_cache_indices] = mamba_cache_indices.to(
+                torch.int32
+            )
 
     def available_size(self):
         return len(self.free_slots)
@@ -402,12 +478,22 @@ class MambaPool:
     def free(self, free_index: torch.Tensor):
         if free_index.numel() == 0:
             return
+        # Reset current_input_indices to identity for freed slots
+        if self.current_input_indices is not None:
+            self.current_input_indices[free_index] = free_index.to(torch.int32)
         self.free_slots = torch.cat((self.free_slots, free_index))
 
     def clear(self):
         self.free_slots = torch.arange(
             1, self.size + 1, dtype=torch.int64, device=self.device
         )
+        # Reset all current_input_indices to identity
+        if self.current_input_indices is not None:
+            self.current_input_indices = torch.arange(
+                len(self.current_input_indices),
+                dtype=torch.int32,
+                device=self.device,
+            )
 
     def copy_from(self, src_indices: torch.Tensor, dst_indices: torch.Tensor):
         for i in range(len(self.mamba_cache.conv)):

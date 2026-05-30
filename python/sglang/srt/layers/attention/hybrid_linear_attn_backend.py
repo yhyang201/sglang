@@ -186,6 +186,18 @@ class MambaAttnBackendBase(AttentionBackend):
             forward_batch.req_pool_indices
         )
 
+        # Pointer-switch: remap cache indices through current_input_indices
+        # so forward reads from the accepted draft slot instead of the working slot.
+        # Applied for both decode (draft reads) and target_verify (verify reads initial state).
+        mamba_pool = self.req_to_token_pool.mamba_pool
+        if mamba_pool.current_input_indices is not None and (
+            forward_batch.forward_mode.is_decode_or_idle()
+            or forward_batch.forward_mode.is_target_verify()
+        ):
+            mamba_cache_indices = mamba_pool.current_input_indices[
+                mamba_cache_indices
+            ].to(mamba_cache_indices.dtype)
+
         if forward_batch.forward_mode.is_decode_or_idle():
             query_start_loc = torch.arange(
                 0, bs + 1, dtype=torch.int32, device=self.device
@@ -1053,13 +1065,10 @@ class HybridLinearAttnBackend(AttentionBackend):
         model,
     ):
         """
-        Update mamba states after MTP verify using fully fused Triton kernel.
+        Update mamba states after MTP verify.
 
-        This replaces the original advanced indexing operations with a single fused
-        gather-scatter kernel that also handles masking internally, avoiding:
-        - index_elementwise_kernel from tensor[bool_mask]
-        - index_select kernel launches
-        - nonzero kernel launches
+        Uses pointer-switch if the mamba pool supports it (unified pool with
+        draft slots), otherwise falls back to data-copy via fused Triton kernel.
         """
         request_number = last_correct_step_indices.shape[0]
 
@@ -1069,17 +1078,40 @@ class HybridLinearAttnBackend(AttentionBackend):
             ]
         )
 
-        mamba_caches = (
-            self.linear_attn_backend.req_to_token_pool.get_speculative_mamba2_params_all_layers()
-        )
+        mamba_pool = self.linear_attn_backend.req_to_token_pool.mamba_pool
+
+        # Pointer-switch path: update current_input_indices instead of copying data
+        if mamba_pool.current_input_indices is not None:
+            # spec_req_indices: in the current speculative batch, requests are
+            # indexed 0..request_number-1 in the intermediate buffer
+            spec_req_indices = torch.arange(
+                request_number,
+                dtype=last_correct_step_indices.dtype,
+                device=last_correct_step_indices.device,
+            )
+            mamba_pool.update_current_inputs_after_verify(
+                mamba_cache_indices=state_indices_tensor,
+                spec_req_indices=spec_req_indices,
+                accepted_steps=last_correct_step_indices,
+            )
+
+            # Track indices for prefix cache
+            if mamba_track_indices is not None and mamba_steps_to_track is not None:
+                mamba_pool.update_current_inputs_after_verify(
+                    mamba_cache_indices=mamba_track_indices,
+                    spec_req_indices=spec_req_indices,
+                    accepted_steps=mamba_steps_to_track,
+                )
+            return
+
+        # Fallback: data-copy path via fused Triton kernel
+        mamba_caches = mamba_pool.get_speculative_mamba2_params_all_layers()
 
         conv_states = mamba_caches.conv[0]
         ssm_states = mamba_caches.temporal
         intermediate_state_cache = mamba_caches.intermediate_ssm
         intermediate_conv_window_cache = mamba_caches.intermediate_conv_window[0]
 
-        # Use fully fused kernel that handles masking internally
-        # This avoids separate nonzero() and index_select() calls
         fused_mamba_state_scatter_with_mask(
             ssm_states,
             intermediate_state_cache,
@@ -1093,10 +1125,8 @@ class HybridLinearAttnBackend(AttentionBackend):
             last_correct_step_indices,
         )
 
-        # Track indices used for tracking mamba states for prefix cache
         if mamba_track_indices is not None:
             assert mamba_steps_to_track is not None
-            # Use fully fused kernel for track scatter operations
             fused_mamba_state_scatter_with_mask(
                 ssm_states,
                 intermediate_state_cache,
