@@ -1497,6 +1497,77 @@ class Scheduler(
             if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
                 self.invariant_checker.self_check_during_busy()
 
+    def event_loop_overlap_spec_v2(self):
+        """Dispatch-first overlap loop for spec_v2 decode.
+
+        Launches run_batch(N) before CPU scheduling work, so CPU post-processing
+        and batch preparation overlap with the GPU draft_extend tail (~2.5ms).
+        This eliminates the ~3ms kernel gap between decode iterations.
+        """
+        self.result_queue: Deque[
+            Tuple[ScheduleBatch, Union[GenerationBatchResult, EmbeddingBatchResult]]
+        ] = deque()
+
+        def pop_and_process():
+            tmp_batch, tmp_result = self.result_queue.popleft()
+            self.process_batch_result(tmp_batch, tmp_result)
+
+        # Bootstrap: prepare the first batch normally
+        recv_reqs = self.request_receiver.recv_requests()
+        self.process_input_requests(recv_reqs)
+        if self._war_barrier_enabled:
+            self.schedule_stream.wait_stream(self.forward_stream)
+        batch = self.get_next_batch_to_run()
+
+        while True:
+            self.cur_batch = batch
+
+            # 1. DISPATCH FIRST: launch GPU work for batch N
+            if batch:
+                disable_overlap = self.is_disable_overlap_for_batch(batch)
+                # If overlap is disabled for this batch, process previous result first
+                if disable_overlap and self.last_batch:
+                    pop_and_process()
+
+                batch_result = self.run_batch(batch)
+                self.result_queue.append((batch.copy(), batch_result))
+            else:
+                batch_result = None
+                disable_overlap = False
+
+            # 2. CPU work overlapped with GPU (draft_extend tail)
+            # 2a. Process previous batch results
+            if self.last_batch:
+                if not disable_overlap:
+                    pop_and_process()
+            elif batch is None:
+                self.on_idle()
+
+            # 2b. Sampling (depends on previous batch grammar state)
+            if self.is_generation:
+                self.launch_batch_sample_if_needed(batch_result)
+
+            # 2c. Receive new requests
+            recv_reqs = self.request_receiver.recv_requests()
+            self.process_input_requests(recv_reqs)
+            if self._engine_paused:
+                self.last_batch = batch
+                continue
+
+            # 2d. WAR barrier (GPU-side wait, CPU non-blocking)
+            if self._war_barrier_enabled:
+                self.schedule_stream.wait_stream(self.forward_stream)
+
+            # 2e. Schedule next batch
+            next_batch = self.get_next_batch_to_run()
+
+            # 3. Advance iteration
+            self.last_batch = batch
+            batch = next_batch
+
+            if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
+                self.invariant_checker.self_check_during_busy()
+
     def is_disable_overlap_for_batch(self, batch: ScheduleBatch) -> bool:
         # For two consecutive prefill batches, we disable overlap to improve the TTFT of the first batch.
         # This might slightly hurt the throughput, so we use an environment variable to control it.
@@ -3839,7 +3910,13 @@ def dispatch_event_loop(scheduler: Scheduler):
         elif scheduler.enable_overlap_mlx:
             scheduler.event_loop_overlap_mlx()
         elif scheduler.enable_overlap:
-            scheduler.event_loop_overlap()
+            if (
+                scheduler.spec_algorithm.supports_spec_v2()
+                and envs.SGLANG_SPEC_V2_DISPATCH_FIRST.get()
+            ):
+                scheduler.event_loop_overlap_spec_v2()
+            else:
+                scheduler.event_loop_overlap()
         else:
             scheduler.event_loop_normal()
     elif disaggregation_mode == DisaggregationMode.PREFILL:
