@@ -445,12 +445,14 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
     ):
         """Replay CUDA graph with new inputs.
 
-        Uses fixed max_num_pages for page table indexing to avoid
-        GPU→CPU sync from seq_lens_cpu.max().item().
+        Uses fixed max_num_pages for page table indexing. max_seq_len_k
+        is read from seq_lens_cpu (CPU pinned tensor, no GPU sync).
         """
         seq_lens = seq_lens[:bs]
         req_pool_indices = req_pool_indices[:bs]
-        # Use fixed max page count to avoid .item() GPU sync
+        if seq_lens_cpu is not None:
+            seq_lens_cpu = seq_lens_cpu[:bs]
+        # Fixed page count for page table — avoids dynamic slicing
         max_seq_pages = self.max_num_pages
         strided = self.decode_cuda_graph_metadata["strided_indices"][:max_seq_pages]
         metadata = None
@@ -464,11 +466,19 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
                 metadata.cache_seqlens_int32.copy_(
                     seq_lens + self.speculative_step_id + 1
                 )
-                metadata.max_seq_len_k = self.max_context_len
+                metadata.max_seq_len_k = (
+                    seq_lens_cpu.max().item() + self.speculative_step_id + 1
+                    if seq_lens_cpu is not None
+                    else self.max_context_len
+                )
             else:
                 # Normal Decode
                 metadata = self.decode_cuda_graph_metadata[bs]
-                metadata.max_seq_len_k = self.max_context_len
+                metadata.max_seq_len_k = (
+                    seq_lens_cpu.max().item()
+                    if seq_lens_cpu is not None
+                    else self.max_context_len
+                )
                 metadata.cache_seqlens_int32.copy_(seq_lens)
 
             metadata.cu_seqlens_k[1:].copy_(
@@ -483,7 +493,11 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
         elif forward_mode.is_target_verify():
             metadata = self.target_verify_metadata[bs]
             metadata.cache_seqlens_int32.copy_(seq_lens + metadata.max_seq_len_q)
-            metadata.max_seq_len_k = self.max_context_len
+            metadata.max_seq_len_k = (
+                seq_lens_cpu.max().item() + metadata.max_seq_len_q
+                if seq_lens_cpu is not None
+                else self.max_context_len
+            )
             metadata.cu_seqlens_k[1:].copy_(
                 torch.cumsum(metadata.cache_seqlens_int32, dim=0, dtype=torch.int32)
             )
@@ -496,7 +510,11 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
         elif forward_mode.is_draft_extend(include_v2=True):
             metadata = self.draft_extend_metadata[bs]
             metadata.cache_seqlens_int32.copy_(seq_lens)
-            metadata.max_seq_len_k = self.max_context_len
+            metadata.max_seq_len_k = (
+                seq_lens_cpu.max().item()
+                if seq_lens_cpu is not None
+                else self.max_context_len
+            )
             metadata.cu_seqlens_k[1:].copy_(
                 torch.cumsum(metadata.cache_seqlens_int32, dim=0, dtype=torch.int32)
             )
