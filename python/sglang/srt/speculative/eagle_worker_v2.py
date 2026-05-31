@@ -900,6 +900,10 @@ class EAGLEWorkerV2(BaseSpecWorker):
             ):
                 self.draft_worker._draft_extend_for_decode(batch, batch_output)
 
+            # Wait for mamba side stream to finish before returning
+            if getattr(self, "_mamba_side_stream_active", False):
+                torch.cuda.current_stream().wait_stream(self._mamba_side_stream)
+
             return batch_output
 
     def on_verify_complete_cpu(self, num_correct_drafts_per_req: list[int]) -> None:
@@ -1148,15 +1152,23 @@ class EAGLEWorkerV2(BaseSpecWorker):
         ) = verify_input.sample(batch, logits_output, vocab_mask)
         new_seq_lens = batch.seq_lens + accept_lens
 
-        # Update mamba state for hybrid GDN models after verification
+        # Update mamba state for hybrid GDN models after verification.
+        # Launch on side stream so it overlaps with draft_extend CUDA graph.
+        self._mamba_side_stream_active = False
         if (
             self.target_worker.model_runner.hybrid_gdn_config is not None
             or self.target_worker.model_runner.mamba2_config is not None
             or self.target_worker.model_runner.hybrid_lightning_config is not None
         ):
-            self._mamba_verify_update(
-                batch, verify_input, accept_lens, accept_index, bs
-            )
+            if not hasattr(self, "_mamba_side_stream"):
+                self._mamba_side_stream = torch.cuda.Stream()
+            main_stream = torch.cuda.current_stream()
+            self._mamba_side_stream.wait_stream(main_stream)
+            with torch.cuda.stream(self._mamba_side_stream):
+                self._mamba_verify_update(
+                    batch, verify_input, accept_lens, accept_index, bs
+                )
+            self._mamba_side_stream_active = True
 
         if not batch.forward_mode.is_idle():
             accept_tokens = predict[accept_index]
