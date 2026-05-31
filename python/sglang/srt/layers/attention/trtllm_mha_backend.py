@@ -218,7 +218,10 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
         kv_indices_buf: Optional[torch.Tensor] = None,
     ):
         """Initialize CUDA graph state for TRTLLM MHA."""
-        max_num_pages = (self.max_context_len + self.page_size - 1) // self.page_size
+        self.max_num_pages = (
+            self.max_context_len + self.page_size - 1
+        ) // self.page_size
+        max_num_pages = self.max_num_pages
         self.decode_cuda_graph_metadata = {
             "cache_seqlens": torch.zeros(max_bs, dtype=torch.int32, device=self.device),
             "page_table": torch.zeros(
@@ -440,15 +443,20 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
         spec_info: Optional[SpecInput],
         seq_lens_cpu: Optional[torch.Tensor],
     ):
-        """Replay CUDA graph with new inputs."""
+        """Replay CUDA graph with new inputs.
+
+        Uses fixed max_num_pages for page table indexing to avoid
+        GPU→CPU sync from seq_lens_cpu.max().item().
+        """
         seq_lens = seq_lens[:bs]
-        seq_lens_cpu = seq_lens_cpu[:bs]
         req_pool_indices = req_pool_indices[:bs]
+        # Use fixed max page count to avoid .item() GPU sync
+        max_seq_pages = self.max_num_pages
+        strided = self.decode_cuda_graph_metadata["strided_indices"][:max_seq_pages]
         metadata = None
         if forward_mode.is_decode_or_idle():
             if spec_info is not None:
                 # Draft Decode
-                # Here we only support topk = 1 for now.
                 metadata = self.decode_cuda_graph_metadata[bs]
                 metadata.cache_seqlens_int32 = self.decode_cuda_graph_metadata[
                     "cache_seqlens"
@@ -456,20 +464,11 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
                 metadata.cache_seqlens_int32.copy_(
                     seq_lens + self.speculative_step_id + 1
                 )
-                metadata.max_seq_len_k = seq_lens.max().item() + (
-                    self.speculative_step_id + 1
-                )
-
-                max_seq_pages = (
-                    metadata.max_seq_len_k + self.page_size - 1
-                ) // self.page_size
+                metadata.max_seq_len_k = self.max_context_len
             else:
                 # Normal Decode
                 metadata = self.decode_cuda_graph_metadata[bs]
-                max_len = seq_lens_cpu.max().item()
-                max_seq_pages = (max_len + self.page_size - 1) // self.page_size
-                metadata.max_seq_len_k = max_len
-
+                metadata.max_seq_len_k = self.max_context_len
                 metadata.cache_seqlens_int32.copy_(seq_lens)
 
             metadata.cu_seqlens_k[1:].copy_(
@@ -477,55 +476,34 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
             )
             page_indices = self.req_to_token[
                 req_pool_indices[:, None],
-                self.decode_cuda_graph_metadata["strided_indices"][:max_seq_pages][
-                    None, :
-                ],
+                strided[None, :],
             ]
             metadata.page_table[:, :max_seq_pages].copy_(page_indices // self.page_size)
             self._copy_swa_page_table(metadata, page_indices, max_seq_pages)
         elif forward_mode.is_target_verify():
-            # Here we only support topk = 1 for now.
             metadata = self.target_verify_metadata[bs]
             metadata.cache_seqlens_int32.copy_(seq_lens + metadata.max_seq_len_q)
-
-            metadata.max_seq_len_k = seq_lens_cpu.max().item() + metadata.max_seq_len_q
-            max_len = seq_lens_cpu.max().item()
+            metadata.max_seq_len_k = self.max_context_len
             metadata.cu_seqlens_k[1:].copy_(
                 torch.cumsum(metadata.cache_seqlens_int32, dim=0, dtype=torch.int32)
             )
-            max_seq_pages = (
-                metadata.max_seq_len_k + self.page_size - 1
-            ) // self.page_size
             page_indices = self.req_to_token[
                 req_pool_indices[:, None],
-                self.decode_cuda_graph_metadata["strided_indices"][:max_seq_pages],
+                strided,
             ]
             metadata.page_table[:, :max_seq_pages].copy_(page_indices // self.page_size)
             self._copy_swa_page_table(metadata, page_indices, max_seq_pages)
         elif forward_mode.is_draft_extend(include_v2=True):
             metadata = self.draft_extend_metadata[bs]
             metadata.cache_seqlens_int32.copy_(seq_lens)
-
-            metadata.max_seq_len_k = seq_lens_cpu.max().item()
-            max_len = seq_lens_cpu.max().item()
+            metadata.max_seq_len_k = self.max_context_len
             metadata.cu_seqlens_k[1:].copy_(
                 torch.cumsum(metadata.cache_seqlens_int32, dim=0, dtype=torch.int32)
             )
 
             if forward_mode.is_draft_extend_v2():
-                # V2: fixed shape per request, use num_tokens // bs
-                num_tokens_per_bs = metadata.max_seq_len_q  # set during capture
-                metadata.cu_seqlens_q[: bs + 1].copy_(
-                    torch.arange(
-                        0,
-                        bs * num_tokens_per_bs + 1,
-                        step=num_tokens_per_bs,
-                        dtype=torch.int32,
-                        device=seq_lens.device,
-                    )
-                )
+                pass
             else:
-                # V1: variable accept lengths per request
                 extend_lens = spec_info.num_accept_tokens[:bs]
                 if spec_info.num_accept_tokens_cpu:
                     metadata.max_seq_len_q = max(spec_info.num_accept_tokens_cpu)
@@ -535,9 +513,6 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
                     torch.cumsum(extend_lens, dim=0, dtype=torch.int32)
                 )
 
-            max_seq_pages = (
-                metadata.max_seq_len_k + self.page_size - 1
-            ) // self.page_size
             page_indices = self.req_to_token[
                 req_pool_indices[:, None],
                 self.draft_extend_metadata["strided_indices"][:max_seq_pages],
