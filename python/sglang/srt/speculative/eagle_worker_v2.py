@@ -1296,10 +1296,9 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 req_pool_indices, accepted_slots
             )
 
-            # 4. Update req.mamba_pool_idx for future free (single CPU transfer)
-            accepted_slots_cpu = accepted_slots.cpu()
+            # 4. Update req.mamba_pool_idx for future free
             for i, req in enumerate(batch.reqs[:bs]):
-                req.mamba_pool_idx = accepted_slots_cpu[i]
+                req.mamba_pool_idx = accepted_slots[i]
 
             # 5. Free old working slots
             self.req_to_token_pool.mamba_pool.free(old_working)
