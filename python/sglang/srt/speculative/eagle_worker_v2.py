@@ -1146,6 +1146,22 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 verify_input.retrieve_next_token.shape
             ).cpu()
 
+        # Allocate draft slots for mamba intermediate states (pointer-switch)
+        if (
+            self.target_worker.model_runner.hybrid_gdn_config is not None
+            or self.target_worker.model_runner.mamba2_config is not None
+            or self.target_worker.model_runner.hybrid_lightning_config is not None
+        ):
+            draft_slots = self.req_to_token_pool.mamba_pool.alloc(
+                bs * self.speculative_num_draft_tokens
+            )
+            assert (
+                draft_slots is not None
+            ), "Not enough mamba pool slots for draft intermediate states"
+            verify_forward_batch.draft_slot_indices = draft_slots.view(
+                bs, self.speculative_num_draft_tokens
+            )
+
         # Run target verify batch in the main compute stream (GPU compute).
         # Only skip metadata init when cuda-graph already ran replay_prepare;
         # the non-cuda-graph path needs forward_extend's init (post-pad).
@@ -1194,7 +1210,12 @@ class EAGLEWorkerV2(BaseSpecWorker):
             or self.target_worker.model_runner.hybrid_lightning_config is not None
         ):
             self._mamba_verify_update(
-                batch, verify_input, accept_lens, accept_index, bs
+                batch,
+                verify_input,
+                accept_lens,
+                accept_index,
+                bs,
+                verify_forward_batch,
             )
 
         if not batch.forward_mode.is_idle():
@@ -1240,25 +1261,56 @@ class EAGLEWorkerV2(BaseSpecWorker):
         accept_lens: torch.Tensor,
         accept_index: torch.Tensor,
         bs: int,
+        verify_forward_batch=None,
     ):
-        """Update mamba state for hybrid GDN models after verification."""
-        # `accept_lens` already includes the bonus token (drafts + 1 per req).
+        """Pointer-switch: update mamba mapping to accepted draft slots."""
         if not batch.forward_mode.is_idle() and accept_index.numel() > 0:
             if verify_input.topk != 1:
                 raise ValueError("Spec v2 currently only supports topk = 1.")
+
+            draft_slot_indices = verify_forward_batch.draft_slot_indices
+            assert draft_slot_indices is not None
+            dev = accept_lens.device
 
             accepted_indices_offset = torch.arange(
                 0,
                 bs * self.speculative_num_draft_tokens,
                 step=self.speculative_num_draft_tokens,
                 dtype=accept_lens.dtype,
-                device=accept_lens.device,
+                device=dev,
             )
             last_correct_step_indices = accept_lens - 1
+            req_idx = torch.arange(bs, dtype=torch.int64, device=dev)
 
+            # 1. Determine accepted draft slots
+            accepted_slots = draft_slot_indices[
+                req_idx, last_correct_step_indices.to(torch.int64)
+            ]
+
+            # 2. Get old working slots before switch
+            req_pool_indices = batch.req_pool_indices[:bs]
+            old_working = self.req_to_token_pool.get_mamba_indices(req_pool_indices)
+
+            # 3. Pointer-switch: update mapping
+            self.req_to_token_pool.switch_mamba_mapping(
+                req_pool_indices, accepted_slots
+            )
+
+            # 4. Update req.mamba_pool_idx for future free
+            for i, req in enumerate(batch.reqs[:bs]):
+                req.mamba_pool_idx = accepted_slots[i]
+
+            # 5. Free old working slots
+            self.req_to_token_pool.mamba_pool.free(old_working)
+
+            # 6. Free non-accepted draft slots
+            mask = torch.ones_like(draft_slot_indices, dtype=torch.bool)
+            mask[req_idx, last_correct_step_indices.to(torch.int64)] = False
+            non_accepted = draft_slot_indices[mask]
+            self.req_to_token_pool.mamba_pool.free(non_accepted)
+
+            # 7. Prefix cache tracking (small copy still needed)
             if batch.mamba_track_indices is not None:
-                # If after verify, the request's seq_lens has crossed a mamba track interval,
-                # we need to update the mamba state for the request at the crossing point.
                 seq_lens_pre_verify = batch.seq_lens
                 seq_lens_post_verify = batch.seq_lens + accept_lens
                 mamba_track_interval = self.server_args.mamba_track_interval
@@ -1272,11 +1324,6 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 to_track_ith = torch.clamp(
                     tracking_point - seq_lens_pre_verify - 1, min=0
                 ).to(torch.int64)
-                req_idx = torch.arange(
-                    bs,
-                    dtype=torch.int64,
-                    device=accept_lens.device,
-                )
                 candidate_track_steps = (
                     accept_index[req_idx, to_track_ith] - accepted_indices_offset
                 )
@@ -1285,15 +1332,14 @@ class EAGLEWorkerV2(BaseSpecWorker):
                     candidate_track_steps,
                     torch.full_like(candidate_track_steps, -1),
                 )
-            else:
-                mamba_steps_to_track = None
-
-            self.target_worker.model_runner.attn_backend.update_mamba_state_after_mtp_verify(
-                last_correct_step_indices=last_correct_step_indices,
-                mamba_track_indices=batch.mamba_track_indices,
-                mamba_steps_to_track=mamba_steps_to_track,
-                model=self.target_worker.model_runner.model,
-            )
+                valid = mamba_steps_to_track >= 0
+                if valid.any():
+                    src_slots = draft_slot_indices[
+                        req_idx, mamba_steps_to_track.clamp(min=0).to(torch.int64)
+                    ]
+                    self.req_to_token_pool.mamba_pool.copy_from(
+                        src_slots[valid], batch.mamba_track_indices[valid]
+                    )
 
     def move_accepted_tokens_to_target_kvcache(
         self,

@@ -98,7 +98,6 @@ class TestMamba(unittest.TestCase):
         req_to_token_pool = HybridReqToTokenPool(
             size=max_num_reqs,
             mamba_size=mamba_cache_size,
-            mamba_spec_state_size=max_num_reqs,
             max_context_len=max_context_len,
             device=device,
             enable_memory_saver=False,
@@ -448,7 +447,6 @@ class TestMamba(unittest.TestCase):
         req_to_token_pool = HybridReqToTokenPool(
             size=max_num_reqs,
             mamba_size=mamba_cache_size,
-            mamba_spec_state_size=max_num_reqs,
             max_context_len=max_context_len,
             device=device,
             enable_memory_saver=False,

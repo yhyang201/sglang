@@ -15,7 +15,6 @@ from sglang.srt.layers.attention.mamba.causal_conv1d_triton import (
     causal_conv1d_update,
 )
 from sglang.srt.layers.radix_linear_attention import RadixLinearAttention
-from sglang.srt.mem_cache.memory_pool import MambaPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.utils import is_cpu, is_cuda, is_npu
@@ -392,14 +391,7 @@ class GDNAttnBackend(MambaAttnBackendBase):
         mamba_cache_params = self.req_to_token_pool.mamba2_layer_cache(layer.layer_id)
         conv_states = mamba_cache_params.conv[0]
         ssm_states = mamba_cache_params.temporal
-        if is_target_verify:
-            assert isinstance(mamba_cache_params, MambaPool.SpeculativeState)
-            intermediate_state_cache = mamba_cache_params.intermediate_ssm
-            intermediate_conv_window_cache = (
-                mamba_cache_params.intermediate_conv_window[0]
-            )
-            intermediate_state_indices = self.verify_intermediate_state_indices
-        else:
+        if not is_target_verify:
             has_initial_states = forward_batch.extend_prefix_lens > 0
 
         if is_target_verify:
@@ -415,8 +407,7 @@ class GDNAttnBackend(MambaAttnBackendBase):
                 layer.bias,
                 layer.activation,
                 conv_state_indices=cache_indices[:batch_size],
-                intermediate_conv_window=intermediate_conv_window_cache,
-                intermediate_state_indices=intermediate_state_indices[:batch_size],
+                draft_slot_indices=forward_metadata.draft_slot_indices,
                 retrieve_next_token=retrieve_next_token,
                 retrieve_next_sibling=retrieve_next_sibling,
                 retrieve_parent_token=retrieve_parent_token,
@@ -467,9 +458,7 @@ class GDNAttnBackend(MambaAttnBackendBase):
                 ssm_states=ssm_states,
                 cache_indices=cache_indices,
                 query_start_loc=query_start_loc,
-                intermediate_states_buffer=intermediate_state_cache,
-                intermediate_state_indices=intermediate_state_indices,
-                cache_steps=forward_batch.spec_info.draft_token_num,
+                draft_slot_indices=forward_metadata.draft_slot_indices,
                 retrieve_parent_token=retrieve_parent_token,
             )
         else:

@@ -328,12 +328,11 @@ class LightningAttentionBackend(MambaAttnBackendBase):
                 cache_indices,
                 metadata,
                 layer,
-                temp_cache=(
-                    mamba_cache_params.intermediate_ssm
+                draft_slot_indices=(
+                    metadata.draft_slot_indices
                     if forward_batch.forward_mode.is_target_verify()
                     else None
                 ),
-                intermediate_state_indices=intermediate_state_indices,
             )
         else:
             raise ValueError(

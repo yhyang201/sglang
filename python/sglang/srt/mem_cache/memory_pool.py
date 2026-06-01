@@ -216,7 +216,7 @@ class MambaPool:
             for f in fields(self):
                 name = f.name
                 v = getattr(self, name)
-                if name in ("conv", "intermediate_conv_window"):
+                if name == "conv":
                     kwargs[name] = [conv[layer] for conv in v]
                 else:
                     kwargs[name] = v[layer]
@@ -229,16 +229,10 @@ class MambaPool:
                 for f in dataclasses.fields(self)
             )
 
-    @dataclass(frozen=True, kw_only=True)
-    class SpeculativeState(State):
-        intermediate_ssm: torch.Tensor
-        intermediate_conv_window: List[torch.Tensor]
-
     def __init__(
         self,
         *,
         size: int,
-        spec_state_size: int,
         cache_params: BaseLinearStateParams,
         mamba_layer_ids: List[int],
         device: str,
@@ -256,6 +250,7 @@ class MambaPool:
 
         self.size = size
         self.device = device
+        self.speculative_num_draft_tokens = speculative_num_draft_tokens
 
         # for disagg with nvlink
         self.enable_custom_mem_pool, self.custom_mem_pool, _ = (
@@ -299,76 +294,25 @@ class MambaPool:
                 dtype=ssm_dtype,
                 device=device,
             )
-            if speculative_num_draft_tokens is not None:
-                if _is_npu:
-                    temporal_state = temporal_state.transpose(-1, -2)
-                    temporal_state_shape = (
-                        *temporal_state_shape[:-2],
-                        temporal_state_shape[-1],
-                        temporal_state_shape[-2],
-                    )
-                # Cache intermediate SSM states per draft token during target verify
-                # Shape: [num_layers, size + 1, speculative_num_draft_tokens, HV, K, V]
-                intermediate_ssm_state_cache = torch.zeros(
-                    size=(
-                        num_mamba_layers,
-                        spec_state_size + 1,
-                        speculative_num_draft_tokens,
-                        temporal_state_shape[0],
-                        temporal_state_shape[1],
-                        temporal_state_shape[2],
-                    ),
-                    dtype=ssm_dtype,
-                    device="cuda",
-                )
-                # Cache intermediate conv windows (last K-1 inputs) per draft token during target verify
-                # Shape: [num_layers, size + 1, speculative_num_draft_tokens, dim, K-1]
-                intermediate_conv_window_cache = [
-                    torch.zeros(
-                        size=(
-                            num_mamba_layers,
-                            spec_state_size + 1,
-                            speculative_num_draft_tokens,
-                            conv_shape[0],
-                            conv_shape[1],
-                        ),
-                        dtype=conv_dtype,
-                        device="cuda",
-                    )
-                    for conv_shape in conv_state_shape
-                ]
-                self.mamba_cache = self.SpeculativeState(
-                    conv=conv_state,
-                    temporal=temporal_state,
-                    intermediate_ssm=intermediate_ssm_state_cache,
-                    intermediate_conv_window=intermediate_conv_window_cache,
-                )
-                logger.info(
-                    f"Mamba Cache is allocated. "
-                    f"max_mamba_cache_size: {size}, "
-                    f"conv_state size: {get_tensor_size_bytes(conv_state) / GB:.2f}GB, "
-                    f"ssm_state size: {get_tensor_size_bytes(temporal_state) / GB:.2f}GB "
-                    f"intermediate_ssm_state_cache size: {get_tensor_size_bytes(intermediate_ssm_state_cache) / GB:.2f}GB "
-                    f"intermediate_conv_window_cache size: {get_tensor_size_bytes(intermediate_conv_window_cache) / GB:.2f}GB "
-                )
-            else:
-                self.mamba_cache = self.State(conv=conv_state, temporal=temporal_state)
-                logger.info(
-                    f"Mamba Cache is allocated. "
-                    f"max_mamba_cache_size: {size}, "
-                    f"conv_state size: {get_tensor_size_bytes(conv_state) / GB:.2f}GB, "
-                    f"ssm_state size: {get_tensor_size_bytes(temporal_state) / GB:.2f}GB "
-                )
+            if speculative_num_draft_tokens is not None and _is_npu:
+                temporal_state = temporal_state.transpose(-1, -2)
+
+            # No separate intermediate buffer: draft intermediate states are
+            # allocated dynamically from this pool during target_verify and
+            # written directly to pool slots by the kernels.
+            self.mamba_cache = self.State(conv=conv_state, temporal=temporal_state)
+            logger.info(
+                f"Mamba Cache is allocated. "
+                f"max_mamba_cache_size: {size}, "
+                f"conv_state size: {get_tensor_size_bytes(conv_state) / GB:.2f}GB, "
+                f"ssm_state size: {get_tensor_size_bytes(temporal_state) / GB:.2f}GB "
+            )
             # The padded slot 0 is used for writing dummy outputs from padded tokens.
             self.free_slots = torch.arange(
                 1, self.size + 1, dtype=torch.int64, device=self.device
             )
             self.mem_usage = self.mamba_cache.mem_usage_bytes() / GB
             self.num_mamba_layers = num_mamba_layers
-
-    def get_speculative_mamba2_params_all_layers(self) -> SpeculativeState:
-        assert isinstance(self.mamba_cache, self.SpeculativeState)
-        return self.mamba_cache
 
     def mamba2_layer_cache(self, layer_id: int):
         return self.mamba_cache.at_layer_idx(layer_id)
@@ -443,15 +387,9 @@ class MambaPool:
     def get_contiguous_buf_infos(self):
         """
         Get buffer info for RDMA registration.
-        Only returns conv and temporal state buffers, excluding intermediate buffers
-        used for speculative decoding (intermediate_ssm, intermediate_conv_window).
         """
         state_tensors = []
         for field in vars(self.mamba_cache):
-            # Skip intermediate buffers used only for speculative decoding
-            # These buffers have different size (spec_state_size + 1) and should not be transferred
-            if field in ("intermediate_ssm", "intermediate_conv_window"):
-                continue
             value = getattr(self.mamba_cache, field)
             if isinstance(value, list):
                 state_tensors.extend(value)
@@ -505,7 +443,6 @@ class HybridReqToTokenPool(ReqToTokenPool):
         *,
         size: int,
         mamba_size: int,
-        mamba_spec_state_size: int,
         max_context_len: int,
         device: str,
         enable_memory_saver: bool,
@@ -530,7 +467,6 @@ class HybridReqToTokenPool(ReqToTokenPool):
         self.layer_transfer_counter = None
         self._init_mamba_pool(
             mamba_size=mamba_size,
-            mamba_spec_state_size=mamba_spec_state_size,
             cache_params=cache_params,
             mamba_layer_ids=mamba_layer_ids,
             device=device,
@@ -541,7 +477,6 @@ class HybridReqToTokenPool(ReqToTokenPool):
     def _init_mamba_pool(
         self,
         mamba_size: int,
-        mamba_spec_state_size: int,
         cache_params: BaseLinearStateParams,
         mamba_layer_ids: List[int],
         device: str,
@@ -550,7 +485,6 @@ class HybridReqToTokenPool(ReqToTokenPool):
     ):
         self.mamba_pool = MambaPool(
             size=mamba_size,
-            spec_state_size=mamba_spec_state_size,
             cache_params=cache_params,
             mamba_layer_ids=mamba_layer_ids,
             device=device,
@@ -633,8 +567,13 @@ class HybridReqToTokenPool(ReqToTokenPool):
             self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
         return self.mamba_pool.mamba2_layer_cache(self.mamba_map[layer_id])
 
-    def get_speculative_mamba2_params_all_layers(self) -> MambaPool.SpeculativeState:
-        return self.mamba_pool.get_speculative_mamba2_params_all_layers()
+    def switch_mamba_mapping(
+        self, req_pool_indices: torch.Tensor, new_mamba_indices: torch.Tensor
+    ):
+        """Update mapping to point to new pool slots (pointer-switch)."""
+        self.req_index_to_mamba_index_mapping[req_pool_indices] = new_mamba_indices.to(
+            torch.int32
+        )
 
     def get_state_buf_infos(self):
         return self.mamba_pool.get_contiguous_buf_infos()

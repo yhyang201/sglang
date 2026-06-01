@@ -196,7 +196,6 @@ def build_fixture(cfg: CacheConfig, *, enable_kv_cache_events: bool = False):
         req_to_token_pool = HybridReqToTokenPool(
             size=cfg.max_num_reqs,
             mamba_size=cfg.mamba_cache_size,
-            mamba_spec_state_size=cfg.max_num_reqs,
             max_context_len=cfg.max_context_len,
             device=device,
             enable_memory_saver=False,

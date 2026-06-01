@@ -43,6 +43,9 @@ class ForwardMetadata:
 
     is_target_verify: bool = False
     draft_token_num: int = 1
+    # Pool slot indices for draft intermediate states during target_verify.
+    # Shape: [bs, draft_tokens]. Kernels write intermediate states to these slots.
+    draft_slot_indices: Optional[torch.Tensor] = None
 
     has_mamba_track_mask: bool = False
     mamba_track_mask_indices: Optional[torch.Tensor] = None

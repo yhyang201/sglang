@@ -312,6 +312,8 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     mamba_cow_src_indices: Optional[torch.Tensor] = None
     mamba_cow_dst_indices: Optional[torch.Tensor] = None
     mamba_clear_indices: Optional[torch.Tensor] = None
+    # Pool slot indices for draft intermediate states during target_verify
+    draft_slot_indices: Optional[torch.Tensor] = None
 
     # For input embeddings
     input_embeds: Optional[torch.Tensor] = None

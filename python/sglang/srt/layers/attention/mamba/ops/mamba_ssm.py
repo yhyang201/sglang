@@ -43,23 +43,12 @@ else:
     {"BLOCK_SIZE_DSTATE": lambda args: triton.next_power_of_2(args["dstate"])}
 )
 @triton.heuristics(
-    {
-        "CACHE_INTERMEDIATE_STATES": lambda args: args["intermediate_states_buffer"]
-        is not None
-    }
+    {"HAS_DRAFT_SLOT_INDICES": lambda args: args["draft_slot_indices_ptr"] is not None}
 )
 @triton.heuristics(
     {
         "HAS_EAGLE_TREE_CUSTOM_ATTN_MASK": lambda args: args[
             "retrieve_parent_token_ptr"
-        ]
-        is not None
-    }
-)
-@triton.heuristics(
-    {
-        "HAS_INTERMEDIATE_STATE_INDICES": lambda args: args[
-            "intermediate_state_indices_ptr"
         ]
         is not None
     }
@@ -79,10 +68,8 @@ def _selective_scan_update_kernel(
     out_ptr,
     state_batch_indices_ptr,
     pad_slot_id,
-    intermediate_states_buffer,
-    cache_steps,
+    draft_slot_indices_ptr,
     retrieve_parent_token_ptr,
-    intermediate_state_indices_ptr,
     # Matrix dimensions
     batch,
     T,
@@ -137,9 +124,8 @@ def _selective_scan_update_kernel(
     HAS_Z: tl.constexpr,
     HAS_STATE_BATCH_INDICES: tl.constexpr,
     DISABLE_STATE_UPDATE: tl.constexpr,
-    CACHE_INTERMEDIATE_STATES: tl.constexpr,
+    HAS_DRAFT_SLOT_INDICES: tl.constexpr,
     HAS_EAGLE_TREE_CUSTOM_ATTN_MASK: tl.constexpr,
-    HAS_INTERMEDIATE_STATE_INDICES: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
@@ -152,8 +138,10 @@ def _selective_scan_update_kernel(
     if HAS_STATE_BATCH_INDICES:
         state_batch_indices_ptr += pid_b
         state_batch_idx = tl.load(state_batch_indices_ptr).to(tl.int64)
+        effective_batch_idx = state_batch_idx
         state_ptr += state_batch_idx * stride_state_batch + pid_h * stride_state_head
     else:
+        effective_batch_idx = pid_b
         state_ptr += pid_b * stride_state_batch + pid_h * stride_state_head
 
     x_ptr += pid_b * stride_x_batch + pid_h * stride_x_head
@@ -185,22 +173,10 @@ def _selective_scan_update_kernel(
         D_ptrs = D_ptr + offs_m * stride_D_dim
     A_ptrs = A_ptr + offs_m[:, None] * stride_A_dim + offs_n[None, :] * stride_A_dstate
 
-    cache_idx = -1
-    if CACHE_INTERMEDIATE_STATES:
-        if HAS_INTERMEDIATE_STATE_INDICES:
-            intermediate_state_idx = tl.load(intermediate_state_indices_ptr + pid_b).to(
-                tl.int64
-            )
-            cache_idx = intermediate_state_idx
-        elif HAS_STATE_BATCH_INDICES:
-            cache_idx = state_batch_idx
-        else:
-            cache_idx = pid_b
-
     current_step_idx = 0
     for _ in range(T):
         if HAS_EAGLE_TREE_CUSTOM_ATTN_MASK:
-            if current_step_idx != 0 and cache_idx >= 0:
+            if current_step_idx != 0 and HAS_DRAFT_SLOT_INDICES:
                 parent_ptr = (
                     retrieve_parent_token_ptr
                     + pid_b * stride_retrieve_parent_token_batch
@@ -209,16 +185,19 @@ def _selective_scan_update_kernel(
                 parent_step_idx = tl.load(parent_ptr).to(tl.int32)
 
                 if parent_step_idx >= 0 and parent_step_idx < T:
-                    step_offset = parent_step_idx * nheads * dim * dstate
-                    cache_ptr = (
-                        intermediate_states_buffer
-                        + cache_idx * cache_steps * nheads * dim * dstate
-                        + step_offset
-                        + pid_h * dim * dstate
-                        + offs_m[:, None] * dstate
-                        + offs_n[None, :]
+                    # Load parent's state from the draft slot in the main pool
+                    parent_draft_slot = tl.load(
+                        draft_slot_indices_ptr + pid_b * T + parent_step_idx
+                    ).to(tl.int64)
+                    parent_state_ptr = (
+                        state_ptr
+                        + (parent_draft_slot - effective_batch_idx) * stride_state_batch
                     )
-                    state = tl.load(cache_ptr, mask=mask, other=0.0).to(tl.float32)
+                    parent_ptrs = parent_state_ptr + (
+                        offs_m[:, None] * stride_state_dim
+                        + offs_n[None, :] * stride_state_dstate
+                    )
+                    state = tl.load(parent_ptrs, mask=mask, other=0.0).to(tl.float32)
 
         x_ptrs = x_ptr + offs_m * stride_x_dim
         dt_ptrs = dt_ptr + offs_m * stride_dt_dim
@@ -260,17 +239,20 @@ def _selective_scan_update_kernel(
         dB = B[None, :] * dt[:, None] if not TIE_HDIM else B * dt
         state = state * dA + dB * x[:, None]
 
-        if CACHE_INTERMEDIATE_STATES:
+        if HAS_DRAFT_SLOT_INDICES:
             if HAS_STATE_BATCH_INDICES:
                 if state_batch_idx != pad_slot_id:
-                    cache_ptr_base = (
-                        intermediate_states_buffer
-                        + cache_idx * cache_steps * nheads * dim * dstate
-                        + current_step_idx * nheads * dim * dstate
-                        + pid_h * dim * dstate
+                    # Write intermediate state to draft pool slot
+                    draft_slot = tl.load(
+                        draft_slot_indices_ptr + pid_b * T + current_step_idx
+                    ).to(tl.int64)
+                    draft_state_ptr = (
+                        state_ptr
+                        + (draft_slot - effective_batch_idx) * stride_state_batch
                     )
-                    cache_ptrs = cache_ptr_base + (
-                        offs_m[:, None] * dstate + offs_n[None, :]
+                    cache_ptrs = draft_state_ptr + (
+                        offs_m[:, None] * stride_state_dim
+                        + offs_n[None, :] * stride_state_dstate
                     )
                     tl.store(
                         cache_ptrs, state.to(cache_ptrs.dtype.element_ty), mask=mask
@@ -312,10 +294,8 @@ def selective_state_update(
     pad_slot_id=PAD_SLOT_ID,
     out=None,
     disable_state_update=False,
-    intermediate_states_buffer=None,
-    cache_steps=None,
+    draft_slot_indices=None,
     retrieve_parent_token=None,
-    intermediate_state_indices=None,
 ):
     """
     Argument:
@@ -329,19 +309,11 @@ def selective_state_update(
         z: (batch, dim) or (batch, nheads, dim)
         dt_bias: (dim,) or (nheads, dim)
         pad_slot_id: int
-            if cache_indices is passed, lets the kernel identify padded
-            entries that will not be processed,
-            for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id]
-            in this case, the kernel will not process entries at
-            indices 0 and 3
-        out: Preallocated ssm output tensor. Assume same shape as x.
-             In-place updated.
+        out: Preallocated ssm output tensor.
         disable_state_update: If True, don't write back to state (for speculative verify)
-        intermediate_states_buffer: Buffer to cache intermediate states
-        cache_steps: Total number of steps in the buffer
+        draft_slot_indices: (batch, T) tensor of pool slot indices for draft intermediate states.
+            When provided, intermediate states are written directly to state[:, slot, ...].
         retrieve_parent_token: (batch, T) tensor of parent token indices for EAGLE tree attention
-        intermediate_state_indices: (batch,) tensor of indices for intermediate_states_buffer operations.
-            If provided, uses these indices instead of state_batch_indices for the buffer.
     """
     if state.dim() == 3:
         state = state.unsqueeze(1)
@@ -441,10 +413,8 @@ def selective_state_update(
             out,
             state_batch_indices,
             pad_slot_id,
-            intermediate_states_buffer,
-            cache_steps if cache_steps is not None else 0,
+            draft_slot_indices,
             retrieve_parent_token,
-            intermediate_state_indices,
             batch,
             T,
             nheads,

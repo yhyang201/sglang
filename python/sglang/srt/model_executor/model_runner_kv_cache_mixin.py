@@ -90,7 +90,9 @@ class ModelRunnerKVCacheMixin:
             server_args.max_mamba_cache_size = server_args.max_mamba_cache_size // (
                 server_args.dp_size if server_args.enable_dp_attention else 1
             )
-            # Reserve intermediate memory based on capped max_num_reqs
+            # Add draft slots to the pool for speculative decoding.
+            # Draft intermediate states are allocated from the main pool
+            # instead of a separate static buffer.
             if has_spec_dec:
                 ratio = self._calculate_mamba_ratio()
                 capped_reqs = min(
@@ -98,12 +100,9 @@ class ModelRunnerKVCacheMixin:
                     // (self.dp_size if server_args.enable_dp_attention else 1),
                     server_args.max_mamba_cache_size // ratio,
                 )
-                intermediate_size = (
-                    config.mamba2_cache_params.mamba_cache_per_req
-                    * capped_reqs
-                    * server_args.speculative_num_draft_tokens
+                server_args.max_mamba_cache_size += (
+                    capped_reqs * server_args.speculative_num_draft_tokens
                 )
-                total_rest_memory = total_rest_memory - (intermediate_size / (1 << 30))
         elif (
             server_args.disable_radix_cache
             and server_args.max_running_requests is not None
@@ -112,14 +111,12 @@ class ModelRunnerKVCacheMixin:
             server_args.max_mamba_cache_size = server_args.max_running_requests // (
                 server_args.dp_size if server_args.enable_dp_attention else 1
             )
-            # Reserve intermediate memory based on capped max_num_reqs
+            # Add draft slots to the pool for speculative decoding
             if has_spec_dec:
-                intermediate_size = (
-                    config.mamba2_cache_params.mamba_cache_per_req
-                    * server_args.max_mamba_cache_size
+                server_args.max_mamba_cache_size += (
+                    server_args.max_mamba_cache_size
                     * server_args.speculative_num_draft_tokens
                 )
-                total_rest_memory = total_rest_memory - (intermediate_size / (1 << 30))
         else:
             # Use ratio-based calculation to auto-fit available memory
             assert config.mamba2_cache_params.mamba_cache_per_req > 0
@@ -140,19 +137,18 @@ class ModelRunnerKVCacheMixin:
             if has_spec_dec:
                 ratio = self._calculate_mamba_ratio()
                 D = server_args.speculative_num_draft_tokens
-                # Joint solve: main_state + intermediate = mamba_budget
+                # Joint solve: working_slots + draft_slots = mamba_budget
+                # working = mcc, draft = mcc/ratio * D, so total = mcc * (1 + D/ratio)
                 server_args.max_mamba_cache_size = int(
                     mamba_budget_bytes // (per_req * (1 + D / ratio))
                 )
-                # Intermediate memory is included in mamba_budget, subtract it
-                # so the return value only has main_state subtracted from total
+                # Add draft slots to the pool
                 capped_reqs = min(
                     server_args.max_running_requests
                     // (self.dp_size if server_args.enable_dp_attention else 1),
                     server_args.max_mamba_cache_size // ratio,
                 )
-                intermediate_size = per_req * capped_reqs * D
-                total_rest_memory = total_rest_memory - (intermediate_size / (1 << 30))
+                server_args.max_mamba_cache_size += capped_reqs * D
             else:
                 server_args.max_mamba_cache_size = int(mamba_budget_bytes // per_req)
 
@@ -338,7 +334,6 @@ class ModelRunnerKVCacheMixin:
                 self.req_to_token_pool = HybridReqToTokenPool(
                     size=max_num_reqs,
                     mamba_size=self.server_args.max_mamba_cache_size,
-                    mamba_spec_state_size=max_num_reqs,
                     max_context_len=self.model_config.context_len
                     + extra_max_context_len,
                     device=self.device,

@@ -12,9 +12,6 @@ from sglang.srt.layers.attention.mamba.mamba2_metadata import (
     ForwardMetadata,
     Mamba2Metadata,
 )
-from sglang.srt.layers.attention.mamba.mamba_state_scatter_triton import (
-    fused_mamba_state_scatter_with_mask,
-)
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.radix_linear_attention import RadixLinearAttention
 from sglang.srt.mem_cache.memory_pool import HybridReqToTokenPool
@@ -256,6 +253,7 @@ class MambaAttnBackendBase(AttentionBackend):
             track_ssm_final_src=track_ssm_final_src,
             track_ssm_final_dst=track_ssm_final_dst,
             has_mamba_track_mask=has_mamba_track_mask,
+            draft_slot_indices=forward_batch.draft_slot_indices,
         )
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
@@ -1045,67 +1043,10 @@ class HybridLinearAttnBackend(AttentionBackend):
                 **kwargs,
             )
 
-    def update_mamba_state_after_mtp_verify(
-        self,
-        last_correct_step_indices: torch.Tensor,
-        mamba_track_indices: Optional[torch.Tensor],
-        mamba_steps_to_track: Optional[torch.Tensor],
-        model,
-    ):
-        """
-        Update mamba states after MTP verify using fully fused Triton kernel.
-
-        This replaces the original advanced indexing operations with a single fused
-        gather-scatter kernel that also handles masking internally, avoiding:
-        - index_elementwise_kernel from tensor[bool_mask]
-        - index_select kernel launches
-        - nonzero kernel launches
-        """
-        request_number = last_correct_step_indices.shape[0]
-
-        state_indices_tensor = (
-            self.linear_attn_backend.forward_metadata.mamba_cache_indices[
-                :request_number
-            ]
+    def update_mamba_state_after_mtp_verify(self, **kwargs):
+        """Deprecated: pointer-switch in eagle_worker_v2._mamba_verify_update
+        handles state adoption by updating req_index_to_mamba_index_mapping."""
+        raise NotImplementedError(
+            "update_mamba_state_after_mtp_verify is replaced by pointer-switch. "
+            "Use _mamba_verify_update in eagle_worker_v2.py instead."
         )
-
-        mamba_caches = (
-            self.linear_attn_backend.req_to_token_pool.get_speculative_mamba2_params_all_layers()
-        )
-
-        conv_states = mamba_caches.conv[0]
-        ssm_states = mamba_caches.temporal
-        intermediate_state_cache = mamba_caches.intermediate_ssm
-        intermediate_conv_window_cache = mamba_caches.intermediate_conv_window[0]
-
-        # Use fully fused kernel that handles masking internally
-        # This avoids separate nonzero() and index_select() calls
-        fused_mamba_state_scatter_with_mask(
-            ssm_states,
-            intermediate_state_cache,
-            state_indices_tensor,
-            last_correct_step_indices,
-        )
-        fused_mamba_state_scatter_with_mask(
-            conv_states,
-            intermediate_conv_window_cache,
-            state_indices_tensor,
-            last_correct_step_indices,
-        )
-
-        # Track indices used for tracking mamba states for prefix cache
-        if mamba_track_indices is not None:
-            assert mamba_steps_to_track is not None
-            # Use fully fused kernel for track scatter operations
-            fused_mamba_state_scatter_with_mask(
-                ssm_states,
-                intermediate_state_cache,
-                mamba_track_indices,
-                mamba_steps_to_track,
-            )
-            fused_mamba_state_scatter_with_mask(
-                conv_states,
-                intermediate_conv_window_cache,
-                mamba_track_indices,
-                mamba_steps_to_track,
-            )
