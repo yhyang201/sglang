@@ -1296,18 +1296,24 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 req_pool_indices, accepted_slots
             )
 
-            # 4. Update req.mamba_pool_idx for future free
+            # 4. Update req.mamba_pool_idx for future free (single CPU transfer)
+            accepted_slots_cpu = accepted_slots.cpu()
             for i, req in enumerate(batch.reqs[:bs]):
-                req.mamba_pool_idx = accepted_slots[i]
+                req.mamba_pool_idx = accepted_slots_cpu[i]
 
             # 5. Free old working slots
             self.req_to_token_pool.mamba_pool.free(old_working)
 
-            # 6. Free non-accepted draft slots
-            mask = torch.ones_like(draft_slot_indices, dtype=torch.bool)
-            mask[req_idx, last_correct_step_indices.to(torch.int64)] = False
-            non_accepted = draft_slot_indices[mask]
-            self.req_to_token_pool.mamba_pool.free(non_accepted)
+            # 6. Free non-accepted draft slots using gather (no boolean indexing)
+            D = self.speculative_num_draft_tokens
+            if D > 1:
+                offsets = torch.arange(1, D, device=dev)
+                non_acc_cols = (
+                    last_correct_step_indices.unsqueeze(1).to(torch.int64)
+                    + offsets.unsqueeze(0)
+                ) % D
+                non_accepted = draft_slot_indices.gather(1, non_acc_cols)
+                self.req_to_token_pool.mamba_pool.free(non_accepted.flatten())
 
             # 7. Prefix cache tracking (small copy still needed)
             if batch.mamba_track_indices is not None:
