@@ -447,6 +447,17 @@ class GDNAttnBackend(MambaAttnBackendBase):
         value = value.view(1, actual_seq_len, layer.num_v_heads, layer.head_v_dim)
 
         if is_target_verify:
+            # Create contiguous views of the draft region as intermediate buffers.
+            # The GDN kernel writes to these views, which are backed by pool slots.
+            draft_base = forward_metadata.draft_base
+            mamba_pool = self.req_to_token_pool.mamba_pool
+            layer_idx = self.req_to_token_pool.mamba_map[layer.layer_id]
+            intermediate_ssm_view = mamba_pool.get_draft_ssm_view(
+                layer_idx, draft_base, batch_size
+            )
+            intermediate_state_indices = torch.arange(
+                batch_size, dtype=torch.int32, device=ssm_states.device
+            )
             core_attn_out = self.kernel_dispatcher.target_verify(
                 A_log=layer.A_log,
                 dt_bias=layer.dt_bias,
@@ -458,7 +469,9 @@ class GDNAttnBackend(MambaAttnBackendBase):
                 ssm_states=ssm_states,
                 cache_indices=cache_indices,
                 query_start_loc=query_start_loc,
-                draft_slot_indices=forward_metadata.draft_slot_indices,
+                intermediate_states_buffer=intermediate_ssm_view,
+                intermediate_state_indices=intermediate_state_indices,
+                cache_steps=draft_token_num,
                 retrieve_parent_token=retrieve_parent_token,
             )
         else:

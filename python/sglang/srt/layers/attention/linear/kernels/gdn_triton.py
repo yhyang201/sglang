@@ -170,8 +170,10 @@ class TritonGDNKernel(LinearAttnKernelBase):
         ssm_states: torch.Tensor,
         cache_indices: torch.Tensor,
         query_start_loc: torch.Tensor,
-        draft_slot_indices: torch.Tensor = None,
-        retrieve_parent_token: torch.Tensor = None,
+        intermediate_states_buffer: torch.Tensor,
+        intermediate_state_indices: torch.Tensor,
+        cache_steps: int,
+        retrieve_parent_token: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
         return fused_sigmoid_gating_delta_rule_update(
@@ -191,6 +193,8 @@ class TritonGDNKernel(LinearAttnKernelBase):
             is_kda=False,
             # target_verify specific parameters
             disable_state_update=True,
-            draft_slot_indices=draft_slot_indices,
+            intermediate_states_buffer=intermediate_states_buffer,
+            intermediate_state_indices=intermediate_state_indices,
+            cache_steps=cache_steps,
             retrieve_parent_token=retrieve_parent_token,
         )

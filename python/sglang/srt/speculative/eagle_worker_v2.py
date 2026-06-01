@@ -1146,21 +1146,17 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 verify_input.retrieve_next_token.shape
             ).cpu()
 
-        # Allocate draft slots for mamba intermediate states (pointer-switch)
+        # Get contiguous draft region for mamba intermediate states (pointer-switch)
         if (
             self.target_worker.model_runner.hybrid_gdn_config is not None
             or self.target_worker.model_runner.mamba2_config is not None
             or self.target_worker.model_runner.hybrid_lightning_config is not None
         ):
-            draft_slots = self.req_to_token_pool.mamba_pool.alloc(
-                bs * self.speculative_num_draft_tokens
+            draft_base, draft_slot_indices = (
+                self.req_to_token_pool.mamba_pool.get_draft_region(bs)
             )
-            assert (
-                draft_slots is not None
-            ), "Not enough mamba pool slots for draft intermediate states"
-            verify_forward_batch.draft_slot_indices = draft_slots.view(
-                bs, self.speculative_num_draft_tokens
-            )
+            verify_forward_batch.draft_slot_indices = draft_slot_indices
+            verify_forward_batch.draft_base = draft_base
 
         # Run target verify batch in the main compute stream (GPU compute).
         # Only skip metadata init when cuda-graph already ran replay_prepare;
@@ -1282,7 +1278,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
             last_correct_step_indices = accept_lens - 1
             req_idx = torch.arange(bs, dtype=torch.int64, device=dev)
 
-            # 1. Determine accepted draft slots
+            # 1. Determine accepted draft slots (in the reserved contiguous region)
             accepted_slots = draft_slot_indices[
                 req_idx, last_correct_step_indices.to(torch.int64)
             ]
@@ -1291,28 +1287,16 @@ class EAGLEWorkerV2(BaseSpecWorker):
             req_pool_indices = batch.req_pool_indices[:bs]
             old_working = self.req_to_token_pool.get_mamba_indices(req_pool_indices)
 
-            # 3. Pointer-switch: update mapping
+            # 3. Pointer-switch: update mapping to point to accepted draft slots
             self.req_to_token_pool.switch_mamba_mapping(
                 req_pool_indices, accepted_slots
             )
 
-            # 4. Update req.mamba_pool_idx for future free
+            # 4. Update req.mamba_pool_idx: free old working slots back to pool,
+            # accepted draft slots live in the reserved region (not alloc/freed).
             for i, req in enumerate(batch.reqs[:bs]):
                 req.mamba_pool_idx = accepted_slots[i]
-
-            # 5. Free old working slots
             self.req_to_token_pool.mamba_pool.free(old_working)
-
-            # 6. Free non-accepted draft slots using gather (no boolean indexing)
-            D = self.speculative_num_draft_tokens
-            if D > 1:
-                offsets = torch.arange(1, D, device=dev)
-                non_acc_cols = (
-                    last_correct_step_indices.unsqueeze(1).to(torch.int64)
-                    + offsets.unsqueeze(0)
-                ) % D
-                non_accepted = draft_slot_indices.gather(1, non_acc_cols)
-                self.req_to_token_pool.mamba_pool.free(non_accepted.flatten())
 
             # 7. Prefix cache tracking (small copy still needed)
             if batch.mamba_track_indices is not None:

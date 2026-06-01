@@ -297,22 +297,100 @@ class MambaPool:
             if speculative_num_draft_tokens is not None and _is_npu:
                 temporal_state = temporal_state.transpose(-1, -2)
 
-            # No separate intermediate buffer: draft intermediate states are
-            # allocated dynamically from this pool during target_verify and
-            # written directly to pool slots by the kernels.
             self.mamba_cache = self.State(conv=conv_state, temporal=temporal_state)
-            logger.info(
-                f"Mamba Cache is allocated. "
-                f"max_mamba_cache_size: {size}, "
-                f"conv_state size: {get_tensor_size_bytes(conv_state) / GB:.2f}GB, "
-                f"ssm_state size: {get_tensor_size_bytes(temporal_state) / GB:.2f}GB "
-            )
-            # The padded slot 0 is used for writing dummy outputs from padded tokens.
-            self.free_slots = torch.arange(
-                1, self.size + 1, dtype=torch.int64, device=self.device
-            )
+
+            # Reserve a contiguous draft region at the end of the pool for
+            # speculative verify intermediate states. Uses ping-pong (two halves)
+            # so the previous cycle's accepted slots aren't overwritten.
+            if speculative_num_draft_tokens is not None:
+                # Each half holds max_running_requests * draft_tokens slots.
+                # max_running_requests is bounded by size / ratio, but for safety
+                # we use size // (speculative_num_draft_tokens + 1) as upper bound.
+                max_draft_reqs = size // (speculative_num_draft_tokens + 1)
+                half_size = max_draft_reqs * speculative_num_draft_tokens
+                self.draft_half_size = half_size
+                self.draft_num_draft_tokens = speculative_num_draft_tokens
+                # Two halves at the end of the pool
+                self.draft_base_a = size + 1 - 2 * half_size
+                self.draft_base_b = size + 1 - half_size
+                self.draft_current_half = 0  # 0=A, 1=B
+                # Regular working slots: [1, draft_base_a)
+                self.free_slots = torch.arange(
+                    1, self.draft_base_a, dtype=torch.int64, device=self.device
+                )
+                logger.info(
+                    f"Mamba Cache (with draft region) is allocated. "
+                    f"pool_size: {size}, working_slots: {self.draft_base_a - 1}, "
+                    f"draft_half_size: {half_size}, "
+                    f"conv_state size: {get_tensor_size_bytes(conv_state) / GB:.2f}GB, "
+                    f"ssm_state size: {get_tensor_size_bytes(temporal_state) / GB:.2f}GB "
+                )
+            else:
+                self.draft_half_size = 0
+                self.draft_base_a = 0
+                self.draft_base_b = 0
+                self.draft_current_half = 0
+                self.draft_num_draft_tokens = 0
+                # The padded slot 0 is used for writing dummy outputs.
+                self.free_slots = torch.arange(
+                    1, self.size + 1, dtype=torch.int64, device=self.device
+                )
+                logger.info(
+                    f"Mamba Cache is allocated. "
+                    f"max_mamba_cache_size: {size}, "
+                    f"conv_state size: {get_tensor_size_bytes(conv_state) / GB:.2f}GB, "
+                    f"ssm_state size: {get_tensor_size_bytes(temporal_state) / GB:.2f}GB "
+                )
             self.mem_usage = self.mamba_cache.mem_usage_bytes() / GB
             self.num_mamba_layers = num_mamba_layers
+
+    def get_draft_region(self, bs: int):
+        """Get contiguous draft region for this verify cycle.
+
+        Returns (draft_base, draft_slot_indices) where:
+        - draft_base: start index in pool for this half
+        - draft_slot_indices: [bs, draft_tokens] pool indices
+
+        The intermediate buffers are views into pool[draft_base:...].
+        Alternates between two halves (ping-pong) so the previous cycle's
+        accepted slots are not overwritten.
+        """
+        D = self.draft_num_draft_tokens
+        assert bs * D <= self.draft_half_size, (
+            f"Batch size {bs} * draft_tokens {D} = {bs * D} exceeds "
+            f"draft_half_size {self.draft_half_size}"
+        )
+        if self.draft_current_half == 0:
+            base = self.draft_base_a
+        else:
+            base = self.draft_base_b
+        self.draft_current_half = 1 - self.draft_current_half
+
+        # draft_slot_indices[req, step] = base + req * D + step
+        slot_indices = torch.arange(
+            base, base + bs * D, dtype=torch.int64, device=self.device
+        ).view(bs, D)
+        return base, slot_indices
+
+    def get_draft_ssm_view(self, layer_id: int, base: int, bs: int):
+        """Get a view of the temporal pool as a contiguous intermediate SSM buffer.
+
+        Returns a tensor of shape [bs, D, *state_shape] that is a view into
+        pool.temporal[layer_id, base : base + bs*D].
+        """
+        D = self.draft_num_draft_tokens
+        t = self.mamba_cache.temporal[layer_id]  # [pool_size+1, *state_shape]
+        return t[base : base + bs * D].view(bs, D, *t.shape[1:])
+
+    def get_draft_conv_view(self, layer_id: int, base: int, bs: int, conv_idx: int = 0):
+        """Get a view of the conv pool as a contiguous intermediate conv buffer.
+
+        Returns a tensor of shape [bs, D, *conv_shape] that is a view into
+        pool.conv[conv_idx][layer_id, base : base + bs*D].
+        """
+        D = self.draft_num_draft_tokens
+        c = self.mamba_cache.conv[conv_idx][layer_id]  # [pool_size+1, *conv_shape]
+        return c[base : base + bs * D].view(bs, D, *c.shape[1:])
 
     def mamba2_layer_cache(self, layer_id: int):
         return self.mamba_cache.at_layer_idx(layer_id)

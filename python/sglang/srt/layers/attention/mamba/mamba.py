@@ -599,6 +599,25 @@ class MambaMixer2(torch.nn.Module):
                     use_triton_causal_conv
                 ), "Speculative decoding requires use_triton_causal_conv=True for intermediate state support"
                 draft_token_num = metadata.draft_token_num
+                self.intermediate_state_indices = torch.arange(
+                    num_decodes, dtype=torch.int32, device=state_indices_tensor_d.device
+                )
+
+                # Create contiguous views of the draft region as intermediate buffers.
+                # These views are backed by pool slots, enabling pointer-switch after verify.
+                from sglang.srt.layers.attention.base_attn_backend import (
+                    get_req_to_token_pool,
+                )
+
+                mamba_pool = get_req_to_token_pool().mamba_pool
+                draft_base = metadata.draft_base
+                layer_idx = get_req_to_token_pool().mamba_map[self.layer_idx]
+                intermediate_conv_view = mamba_pool.get_draft_conv_view(
+                    layer_idx, draft_base, num_decodes
+                )
+                intermediate_ssm_view = mamba_pool.get_draft_ssm_view(
+                    layer_idx, draft_base, num_decodes
+                )
 
                 # Reshape for batch processing
                 hidden_states_B_C_d_reshaped = hidden_states_B_C_d.view(
@@ -612,7 +631,8 @@ class MambaMixer2(torch.nn.Module):
                     self.conv1d.bias,
                     self.activation,
                     conv_state_indices=state_indices_tensor_d[:num_decodes],
-                    draft_slot_indices=metadata.draft_slot_indices,
+                    intermediate_conv_window=intermediate_conv_view,
+                    intermediate_state_indices=self.intermediate_state_indices,
                     retrieve_next_token=metadata.retrieve_next_token,
                     retrieve_next_sibling=metadata.retrieve_next_sibling,
                     retrieve_parent_token=metadata.retrieve_parent_token,
@@ -683,8 +703,10 @@ class MambaMixer2(torch.nn.Module):
                         self.head_dim,
                     ),
                     disable_state_update=True,
-                    draft_slot_indices=metadata.draft_slot_indices,
+                    intermediate_states_buffer=intermediate_ssm_view,
+                    cache_steps=draft_token_num,
                     retrieve_parent_token=metadata.retrieve_parent_token,
+                    intermediate_state_indices=self.intermediate_state_indices,
                 )
             else:
                 selective_state_update(

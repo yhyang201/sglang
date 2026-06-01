@@ -46,6 +46,8 @@ class ForwardMetadata:
     # Pool slot indices for draft intermediate states during target_verify.
     # Shape: [bs, draft_tokens]. Kernels write intermediate states to these slots.
     draft_slot_indices: Optional[torch.Tensor] = None
+    # Start index of the draft region in the pool (for creating views).
+    draft_base: int = 0
 
     has_mamba_track_mask: bool = False
     mamba_track_mask_indices: Optional[torch.Tensor] = None

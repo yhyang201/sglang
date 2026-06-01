@@ -254,6 +254,7 @@ class MambaAttnBackendBase(AttentionBackend):
             track_ssm_final_dst=track_ssm_final_dst,
             has_mamba_track_mask=has_mamba_track_mask,
             draft_slot_indices=forward_batch.draft_slot_indices,
+            draft_base=forward_batch.draft_base,
         )
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
