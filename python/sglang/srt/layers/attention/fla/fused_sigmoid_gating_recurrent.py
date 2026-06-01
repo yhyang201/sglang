@@ -21,9 +21,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     h0_indices,
     cu_seqlens,
     # Parameters for target_verify support (unused for decode)
-    intermediate_states_buffer,
-    intermediate_state_indices,
-    cache_steps,
+    draft_slot_indices_ptr,
     retrieve_parent_token_ptr,
     stride_retrieve_parent_token_seq: tl.constexpr,
     stride_retrieve_parent_token_token: tl.constexpr,
@@ -49,7 +47,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     IS_KDA: tl.constexpr,
     # Optional flags for target_verify support (default False for decode)
     DISABLE_STATE_UPDATE: tl.constexpr = False,
-    CACHE_INTERMEDIATE_STATES: tl.constexpr = False,
+    HAS_DRAFT_SLOT_INDICES: tl.constexpr = False,
     HAS_EAGLE_TREE_CUSTOM_ATTN_MASK: tl.constexpr = False,
 ):
     """
@@ -93,8 +91,10 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     mask_h = mask_k[:, None] & mask_v[None, :]
 
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
+    effective_idx = tl.int64(0)
     if USE_INITIAL_STATE:
         idx = tl.load(h0_indices + i_n)
+        effective_idx = idx.to(tl.int64)
         if idx >= 0:
             p_h0 = (
                 h0_source
@@ -118,25 +118,21 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
             retrieve_parent_token_base, mask=mask_retrieve, other=0
         )
 
-    # Prepare intermediate state cache index if enabled
-    cache_idx = -1
-    if CACHE_INTERMEDIATE_STATES:
-        cache_idx = tl.load(intermediate_state_indices + i_n)
-
     step_idx = 0
     for _ in range(0, T):
-        # Tree attention: load parent's cached state
+        # Tree attention: load parent's cached state from draft pool slot
         if HAS_EAGLE_TREE_CUSTOM_ATTN_MASK:
             # step_idx == 0 uses b_h from USE_INITIAL_STATE
-            if step_idx != 0 and cache_idx >= 0:
+            if step_idx != 0 and HAS_DRAFT_SLOT_INDICES:
                 parent_step_idx = tl.sum(
                     tl.where(token_indices == step_idx, parent_idx_tokens, 0)
                 )
-                step_offset = parent_step_idx * HV * K * V
+                parent_draft_slot = tl.load(
+                    draft_slot_indices_ptr + i_n * T + parent_step_idx
+                ).to(tl.int64)
                 cache_ptr = (
-                    intermediate_states_buffer
-                    + cache_idx * cache_steps * HV * K * V
-                    + step_offset
+                    h0_source
+                    + parent_draft_slot * HV * K * V
                     + i_hv * K * V
                     + o_v[None, :] * K
                     + o_k[:, None]
@@ -199,19 +195,19 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         b_o = tl.sum(b_h * b_q[:, None], 0)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
-        # Cache intermediate states if enabled
-        if CACHE_INTERMEDIATE_STATES:
-            if cache_idx >= 0:
-                step_offset = step_idx * HV * K * V
-                cache_ptr = (
-                    intermediate_states_buffer
-                    + cache_idx * cache_steps * HV * K * V
-                    + step_offset
-                    + i_hv * K * V
-                    + o_v[None, :] * K
-                    + o_k[:, None]
-                )
-                tl.store(cache_ptr, b_h.to(cache_ptr.dtype.element_ty), mask=mask_h)
+        # Cache intermediate states to draft pool slots
+        if HAS_DRAFT_SLOT_INDICES:
+            draft_slot = tl.load(draft_slot_indices_ptr + i_n * T + step_idx).to(
+                tl.int64
+            )
+            cache_ptr = (
+                h0_source
+                + draft_slot * HV * K * V
+                + i_hv * K * V
+                + o_v[None, :] * K
+                + o_k[:, None]
+            )
+            tl.store(cache_ptr, b_h.to(cache_ptr.dtype.element_ty), mask=mask_h)
 
         step_idx += 1
 
@@ -256,11 +252,7 @@ def fused_sigmoid_gating_delta_rule_update(
     is_kda: bool = False,
     # Optional parameters for target_verify support
     disable_state_update: bool = False,
-    intermediate_states_buffer: Optional[torch.Tensor] = None,
-    intermediate_state_indices: Optional[torch.Tensor] = None,
-    cache_steps: Optional[
-        int
-    ] = None,  # kept for API compat; stride is derived from ``intermediate_states_buffer.shape[1]``
+    draft_slot_indices: Optional[torch.Tensor] = None,
     retrieve_parent_token: Optional[torch.Tensor] = None,
 ):
     """
@@ -309,14 +301,6 @@ def fused_sigmoid_gating_delta_rule_update(
 
     grid = (NK, NV, N * HV)
 
-    # Per-req stride must match the buffer's allocated dim, not runtime steps
-    # (they can differ under --speculative-adaptive).
-    cache_stride_steps = (
-        intermediate_states_buffer.shape[1]
-        if intermediate_states_buffer is not None
-        else 0
-    )
-
     fused_sigmoid_gating_delta_rule_update_kernel[grid](
         A_log=A_log,
         a=a,
@@ -331,9 +315,7 @@ def fused_sigmoid_gating_delta_rule_update(
         h0_source=initial_state_source,
         h0_indices=initial_state_indices,
         cu_seqlens=cu_seqlens,
-        intermediate_states_buffer=intermediate_states_buffer,
-        intermediate_state_indices=intermediate_state_indices,
-        cache_steps=cache_stride_steps,
+        draft_slot_indices_ptr=draft_slot_indices,
         retrieve_parent_token_ptr=retrieve_parent_token,
         stride_retrieve_parent_token_seq=stride_retrieve_parent_token_seq,
         stride_retrieve_parent_token_token=stride_retrieve_parent_token_token,
@@ -357,7 +339,7 @@ def fused_sigmoid_gating_delta_rule_update(
         IS_VARLEN=cu_seqlens is not None,
         IS_KDA=is_kda,
         DISABLE_STATE_UPDATE=disable_state_update,
-        CACHE_INTERMEDIATE_STATES=intermediate_states_buffer is not None,
+        HAS_DRAFT_SLOT_INDICES=draft_slot_indices is not None,
         HAS_EAGLE_TREE_CUSTOM_ATTN_MASK=retrieve_parent_token is not None,
         num_warps=num_warps,
         num_stages=num_stages,
