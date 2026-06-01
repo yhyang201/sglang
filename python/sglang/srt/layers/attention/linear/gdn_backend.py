@@ -397,6 +397,15 @@ class GDNAttnBackend(MambaAttnBackendBase):
         if is_target_verify:
             batch_size = seq_len // forward_batch.spec_info.draft_token_num
             draft_token_num = forward_batch.spec_info.draft_token_num
+            draft_base = forward_metadata.draft_base
+            mamba_pool = self.req_to_token_pool.mamba_pool
+            layer_idx = self.req_to_token_pool.mamba_map[layer.layer_id]
+            intermediate_conv_view = mamba_pool.get_draft_conv_view(
+                layer_idx, draft_base, batch_size
+            )
+            intermediate_state_indices = torch.arange(
+                batch_size, dtype=torch.int32, device=conv_states.device
+            )
             mixed_qkv_reshaped = mixed_qkv.view(
                 batch_size, draft_token_num, -1
             ).transpose(1, 2)
@@ -407,7 +416,8 @@ class GDNAttnBackend(MambaAttnBackendBase):
                 layer.bias,
                 layer.activation,
                 conv_state_indices=cache_indices[:batch_size],
-                draft_slot_indices=forward_metadata.draft_slot_indices,
+                intermediate_conv_window=intermediate_conv_view,
+                intermediate_state_indices=intermediate_state_indices,
                 retrieve_next_token=retrieve_next_token,
                 retrieve_next_sibling=retrieve_next_sibling,
                 retrieve_parent_token=retrieve_parent_token,
