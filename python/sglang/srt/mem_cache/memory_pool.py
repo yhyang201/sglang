@@ -238,6 +238,7 @@ class MambaPool:
         device: str,
         enable_memory_saver: bool = False,
         speculative_num_draft_tokens: Optional[int] = None,
+        max_draft_reqs: int = 0,
     ):
         conv_state_shape = cache_params.shape.conv
         temporal_state_shape = cache_params.shape.temporal
@@ -302,12 +303,9 @@ class MambaPool:
             # Reserve a contiguous draft region at the end of the pool for
             # speculative verify intermediate states. Uses ping-pong (two halves)
             # so the previous cycle's accepted slots aren't overwritten.
-            if speculative_num_draft_tokens is not None:
-                # Each half holds max_running_requests * draft_tokens slots.
-                # max_running_requests is bounded by size / ratio, but for safety
-                # we use size // (speculative_num_draft_tokens + 1) as upper bound.
-                max_draft_reqs = size // (speculative_num_draft_tokens + 1)
-                half_size = max_draft_reqs * speculative_num_draft_tokens
+            if speculative_num_draft_tokens is not None and max_draft_reqs > 0:
+                D = speculative_num_draft_tokens
+                half_size = max_draft_reqs * D
                 self.draft_half_size = half_size
                 self.draft_num_draft_tokens = speculative_num_draft_tokens
                 # Two halves at the end of the pool
@@ -528,6 +526,7 @@ class HybridReqToTokenPool(ReqToTokenPool):
         mamba_layer_ids: List[int],
         enable_mamba_extra_buffer: bool,
         speculative_num_draft_tokens: int = None,
+        max_draft_reqs: int = 0,
         enable_overlap_schedule: bool = True,
         start_layer: Optional[int] = None,
     ):
@@ -550,6 +549,7 @@ class HybridReqToTokenPool(ReqToTokenPool):
             device=device,
             enable_mamba_extra_buffer=enable_mamba_extra_buffer,
             speculative_num_draft_tokens=speculative_num_draft_tokens,
+            max_draft_reqs=max_draft_reqs,
         )
 
     def _init_mamba_pool(
@@ -560,6 +560,7 @@ class HybridReqToTokenPool(ReqToTokenPool):
         device: str,
         enable_mamba_extra_buffer: bool,
         speculative_num_draft_tokens: int = None,
+        max_draft_reqs: int = 0,
     ):
         self.mamba_pool = MambaPool(
             size=mamba_size,
@@ -568,6 +569,7 @@ class HybridReqToTokenPool(ReqToTokenPool):
             device=device,
             enable_memory_saver=self.enable_memory_saver,
             speculative_num_draft_tokens=speculative_num_draft_tokens,
+            max_draft_reqs=max_draft_reqs,
         )
         self.mamba_map = {layer_id: i for i, layer_id in enumerate(mamba_layer_ids)}
 

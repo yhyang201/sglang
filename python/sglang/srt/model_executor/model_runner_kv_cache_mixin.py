@@ -100,8 +100,9 @@ class ModelRunnerKVCacheMixin:
                     // (self.dp_size if server_args.enable_dp_attention else 1),
                     server_args.max_mamba_cache_size // ratio,
                 )
+                # 2x for ping-pong: previous cycle's accepted slots stay safe
                 server_args.max_mamba_cache_size += (
-                    capped_reqs * server_args.speculative_num_draft_tokens
+                    2 * capped_reqs * server_args.speculative_num_draft_tokens
                 )
         elif (
             server_args.disable_radix_cache
@@ -111,10 +112,11 @@ class ModelRunnerKVCacheMixin:
             server_args.max_mamba_cache_size = server_args.max_running_requests // (
                 server_args.dp_size if server_args.enable_dp_attention else 1
             )
-            # Add draft slots to the pool for speculative decoding
+            # Add draft slots to the pool for speculative decoding (2x for ping-pong)
             if has_spec_dec:
                 server_args.max_mamba_cache_size += (
-                    server_args.max_mamba_cache_size
+                    2
+                    * server_args.max_mamba_cache_size
                     * server_args.speculative_num_draft_tokens
                 )
         else:
@@ -138,9 +140,10 @@ class ModelRunnerKVCacheMixin:
                 ratio = self._calculate_mamba_ratio()
                 D = server_args.speculative_num_draft_tokens
                 # Joint solve: working_slots + draft_slots = mamba_budget
-                # working = mcc, draft = mcc/ratio * D, so total = mcc * (1 + D/ratio)
+                # working = mcc, draft = 2 * mcc/ratio * D (ping-pong)
+                # total = mcc * (1 + 2*D/ratio)
                 server_args.max_mamba_cache_size = int(
-                    mamba_budget_bytes // (per_req * (1 + D / ratio))
+                    mamba_budget_bytes // (per_req * (1 + 2 * D / ratio))
                 )
                 # Add draft slots to the pool
                 capped_reqs = min(
@@ -148,7 +151,8 @@ class ModelRunnerKVCacheMixin:
                     // (self.dp_size if server_args.enable_dp_attention else 1),
                     server_args.max_mamba_cache_size // ratio,
                 )
-                server_args.max_mamba_cache_size += capped_reqs * D
+                # 2x for ping-pong: previous cycle's accepted slots stay safe
+                server_args.max_mamba_cache_size += 2 * capped_reqs * D
             else:
                 server_args.max_mamba_cache_size = int(mamba_budget_bytes // per_req)
 
@@ -348,6 +352,7 @@ class ModelRunnerKVCacheMixin:
                     ),
                     enable_mamba_extra_buffer=self.server_args.enable_mamba_extra_buffer(),
                     speculative_num_draft_tokens=max_spec_draft_tokens,
+                    max_draft_reqs=max_num_reqs,
                     enable_overlap_schedule=not self.server_args.disable_overlap_schedule,
                     start_layer=self.start_layer,
                 )
