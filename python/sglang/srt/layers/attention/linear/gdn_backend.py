@@ -447,6 +447,22 @@ class GDNAttnBackend(MambaAttnBackendBase):
         value = value.view(1, actual_seq_len, layer.num_v_heads, layer.head_v_dim)
 
         if is_target_verify:
+            # GDN kernel still uses a contiguous intermediate buffer internally.
+            # Create a temporary buffer, run the kernel, then scatter accepted
+            # states to draft pool slots for the pointer-switch.
+            draft_slot_indices = forward_metadata.draft_slot_indices
+            draft_token_num = forward_batch.spec_info.draft_token_num
+            # ssm_states shape: [pool_size, HV, K, V]
+            tmp_intermediate = torch.zeros(
+                batch_size,
+                draft_token_num,
+                *ssm_states.shape[1:],
+                dtype=ssm_states.dtype,
+                device=ssm_states.device,
+            )
+            tmp_indices = torch.arange(
+                batch_size, dtype=torch.int32, device=ssm_states.device
+            )
             core_attn_out = self.kernel_dispatcher.target_verify(
                 A_log=layer.A_log,
                 dt_bias=layer.dt_bias,
@@ -458,9 +474,16 @@ class GDNAttnBackend(MambaAttnBackendBase):
                 ssm_states=ssm_states,
                 cache_indices=cache_indices,
                 query_start_loc=query_start_loc,
-                draft_slot_indices=forward_metadata.draft_slot_indices,
+                intermediate_states_buffer=tmp_intermediate,
+                intermediate_state_indices=tmp_indices,
+                cache_steps=draft_token_num,
                 retrieve_parent_token=retrieve_parent_token,
             )
+            # Copy each step's intermediate state to the corresponding draft pool slot
+            if draft_slot_indices is not None:
+                for step in range(draft_token_num):
+                    slots = draft_slot_indices[:, step]  # [batch_size]
+                    ssm_states[slots] = tmp_intermediate[:, step]
         else:
             g, beta = fused_gdn_gating(layer.A_log, a, b, layer.dt_bias)
             core_attn_out, last_recurrent_state, h = self.kernel_dispatcher.extend(
