@@ -91,10 +91,8 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     mask_h = mask_k[:, None] & mask_v[None, :]
 
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
-    effective_idx = tl.int64(0)
     if USE_INITIAL_STATE:
         idx = tl.load(h0_indices + i_n)
-        effective_idx = idx.to(tl.int64)
         if idx >= 0:
             p_h0 = (
                 h0_source
