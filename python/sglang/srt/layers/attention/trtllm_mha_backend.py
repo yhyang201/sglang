@@ -125,6 +125,7 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
         self.speculative_num_draft_tokens = (
             model_runner.server_args.speculative_num_draft_tokens
         )
+        self.cuda_graph_custom_mask = None
 
         # SWA hybrid models split the KV cache into full and SWA pools with
         # separate index spaces; SWA layers need a translated page_table. Resolve
@@ -314,6 +315,16 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
                     0, self.max_context_len, self.page_size, device=self.device
                 ),
             }
+
+            # Pre-allocate tree mask buffer for build_tree_kernel_efficient to
+            # write in-place, avoiding per-iter alloc and seq_lens_sum D2H sync.
+            if not self.skip_prefill:
+                self.cuda_graph_custom_mask = torch.zeros(
+                    max_num_tokens
+                    * (self.max_context_len + self.speculative_num_draft_tokens),
+                    dtype=torch.bool,
+                    device=self.device,
+                )
 
     def _build_cuda_graph_metadata(
         self,
@@ -523,6 +534,9 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
             metadata.page_table[:, :max_seq_pages].copy_(page_indices // self.page_size)
             self._copy_swa_page_table(metadata, page_indices, max_seq_pages)
         self.forward_metadata = metadata
+
+    def get_verify_buffers_to_fill_after_draft(self):
+        return [self.cuda_graph_custom_mask, None]
 
     def update_verify_buffers_to_fill_after_draft(
         self, spec_info: SpecInput, cuda_graph_bs: Optional[int]
