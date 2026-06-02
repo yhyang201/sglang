@@ -737,6 +737,10 @@ class Envs:
     SGLANG_OPT_USE_FUSED_STORE_CACHE = EnvBool(True)
     SGLANG_OPT_USE_JIT_NORM = EnvBool(True)
     SGLANG_OPT_USE_MULTI_STREAM_OVERLAP = EnvBool(True)
+    # Qwen3.5 attention-side dual-stream overlap (in_proj qkvz||ba, q||k norm).
+    # Off recovers HBM bandwidth at bs=1 decode where the split skinny gemms
+    # only contend instead of adding useful parallelism.
+    SGLANG_OPT_ATTN_DUAL_STREAM = EnvBool(True)
 
     # CUDA graph
     SGLANG_PREP_IN_CUDA_GRAPH = EnvBool(True)
