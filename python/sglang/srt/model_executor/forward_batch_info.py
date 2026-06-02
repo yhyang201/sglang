@@ -696,11 +696,32 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             elif ret.seq_lens_cpu is not None:
                 ret._compute_mrope_positions(model_runner, batch)
             else:
-                # gpu_only path (seq_lens_cpu is None): text-only mrope is just
-                # positions repeated 3x. This avoids the CPU-based
-                # _compute_mrope_positions which requires seq_lens_cpu.
+                # gpu_only path (seq_lens_cpu is None). Compute mrope positions
+                # on GPU without per-request CPU loops.
                 if ret.positions is not None:
-                    ret.mrope_positions = ret.positions.unsqueeze(0).expand(3, -1)
+                    mm_inputs = batch.multimodal_inputs
+                    if all(mm is None for mm in mm_inputs):
+                        # Pure text: mrope 3 dims are identical
+                        ret.mrope_positions = ret.positions.unsqueeze(0).expand(3, -1)
+                    else:
+                        # Multimodal: apply per-request mrope_position_delta
+                        bs = ret.seq_lens.shape[0]
+                        device = ret.positions.device
+                        mrope_deltas = []
+                        extend_lens = []
+                        for i in range(bs):
+                            extend_lens.append(batch.extend_lens[i])
+                            delta = (
+                                torch.zeros(1, dtype=torch.int64)
+                                if mm_inputs[i] is None
+                                else mm_inputs[i].mrope_position_delta.squeeze(0)
+                            )
+                            mrope_deltas.append(delta.to(device=device))
+                        chunks = torch.split(ret.positions, extend_lens)
+                        mrope_list = [c + d for c, d in zip(chunks, mrope_deltas)]
+                        ret.mrope_positions = (
+                            torch.cat(mrope_list, dim=0).unsqueeze(0).expand(3, -1)
+                        )
 
         # Init lora information
         if model_runner.server_args.enable_lora:
