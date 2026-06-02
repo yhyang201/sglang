@@ -448,6 +448,16 @@ class DecodeInputBuffers(ForwardInputBuffers):
             if bs != raw_bs:
                 self.seq_lens_cpu.fill_(seq_len_fill_value)
             self.seq_lens_cpu[:raw_bs].copy_(forward_batch.seq_lens_cpu)
+        else:
+            # needs_cpu_seq_lens=False: real seq lens are not materialized on CPU
+            # (we skipped the D2H). Some backends (e.g. mamba _replay_metadata)
+            # still need to know which graph slots are padding, derived from
+            # seq_lens_cpu == seq_len_fill_value. Reconstruct that marker cheaply
+            # from raw_bs/bs without any device sync: real slots get a non-fill
+            # sentinel, padding slots get the fill value.
+            self.seq_lens_cpu[:bs].fill_(seq_len_fill_value + 1)
+            if bs != raw_bs:
+                self.seq_lens_cpu[raw_bs:bs].fill_(seq_len_fill_value)
 
 
 # Detect whether the current forward pass is in capture mode
