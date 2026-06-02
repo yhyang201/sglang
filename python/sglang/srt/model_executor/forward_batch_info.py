@@ -693,8 +693,14 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
                 and getattr(ret.spec_info, "positions", None) is not None
             ):
                 ret.compute_spec_mrope_positions(model_runner, batch)
-            else:
+            elif ret.seq_lens_cpu is not None:
                 ret._compute_mrope_positions(model_runner, batch)
+            else:
+                # gpu_only path (seq_lens_cpu is None): text-only mrope is just
+                # positions repeated 3x. This avoids the CPU-based
+                # _compute_mrope_positions which requires seq_lens_cpu.
+                if ret.positions is not None:
+                    ret.mrope_positions = ret.positions.unsqueeze(0).expand(3, -1)
 
         # Init lora information
         if model_runner.server_args.enable_lora:

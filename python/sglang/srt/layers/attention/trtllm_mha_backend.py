@@ -434,7 +434,7 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
         Public entry: :py:meth:`init_forward_metadata_out_graph`.
         """
         seq_lens = seq_lens[:bs]
-        seq_lens_cpu = seq_lens_cpu[:bs]
+        seq_lens_cpu = seq_lens_cpu[:bs] if seq_lens_cpu is not None else None
         req_pool_indices = req_pool_indices[:bs]
         metadata = None
         if forward_mode.is_decode_or_idle():
