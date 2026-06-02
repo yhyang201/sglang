@@ -880,7 +880,16 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
 
         page_table = self._get_layer_page_table(layer, forward_batch)
 
-        if forward_batch.forward_mode.is_target_verify():
+        # Both target-verify and draft-extend-v2 present a uniform q_len_per_req
+        # (verify: num_draft_tokens; draft-extend-v2: num_steps+1), so route both
+        # through the decode kernel (MultiCtasKv, KV-split) instead of the
+        # under-occupied context kernel. draft-extend-v1 has variable accept
+        # lengths and must stay on the context path.
+        use_decode = (
+            forward_batch.forward_mode.is_target_verify()
+            or forward_batch.forward_mode.is_draft_extend_v2()
+        )
+        if use_decode:
             o = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
                 query=q,
                 kv_cache=kv_cache,
