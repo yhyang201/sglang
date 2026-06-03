@@ -742,6 +742,10 @@ class Envs:
     # only contend instead of adding useful parallelism.
     SGLANG_OPT_ATTN_DUAL_STREAM = EnvBool(True)
 
+    # Qwen3.5: merge in_proj_qkvz and in_proj_ba into a single in_proj_qkvzba
+    # GEMM.  Saves one kernel launch when dual-stream is not used.
+    SGLANG_OPT_MERGE_QKVZBA = EnvBool(True)
+
     # CUDA graph
     SGLANG_PREP_IN_CUDA_GRAPH = EnvBool(True)
 

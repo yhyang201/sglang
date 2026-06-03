@@ -166,8 +166,8 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
         # projection of the input hidden states
-        # When dual-stream is disabled, merge qkvz and ba into a single GEMM.
-        self._use_merged_proj = not envs.SGLANG_OPT_ATTN_DUAL_STREAM.get()
+        # When SGLANG_OPT_MERGE_QKVZBA is on, merge qkvz and ba into a single GEMM.
+        self._use_merged_proj = envs.SGLANG_OPT_MERGE_QKVZBA.get()
         self._qkvz_dim_tp = (self.key_dim * 2 + self.value_dim * 2) // self.attn_tp_size
         self._ba_dim_tp = (self.num_v_heads * 2) // self.attn_tp_size
 
@@ -1252,7 +1252,7 @@ class Qwen3_5ForCausalLM(nn.Module):
             ("qkv_proj", "v_proj", "v"),
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
-            # GDN — merged qkvzba when dual-stream is off
+            # GDN — merged qkvzba when SGLANG_OPT_MERGE_QKVZBA is on
             *(
                 [
                     ("in_proj_qkvzba.", "in_proj_qkv.", (0, 1, 2)),
@@ -1260,7 +1260,7 @@ class Qwen3_5ForCausalLM(nn.Module):
                     ("in_proj_qkvzba.", "in_proj_b.", 4),
                     ("in_proj_qkvzba.", "in_proj_a.", 5),
                 ]
-                if not envs.SGLANG_OPT_ATTN_DUAL_STREAM.get()
+                if envs.SGLANG_OPT_MERGE_QKVZBA.get()
                 else [
                     ("in_proj_qkvz.", "in_proj_qkv.", (0, 1, 2)),
                     ("in_proj_qkvz.", "in_proj_z.", 3),
@@ -1351,7 +1351,7 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLM):
             ("qkv_proj", "v_proj", "v"),
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
-            # GDN — merged qkvzba when dual-stream is off
+            # GDN — merged qkvzba when SGLANG_OPT_MERGE_QKVZBA is on
             *(
                 [
                     ("in_proj_qkvzba.", "in_proj_qkv.", (0, 1, 2)),
@@ -1359,7 +1359,7 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLM):
                     ("in_proj_qkvzba.", "in_proj_b.", 4),
                     ("in_proj_qkvzba.", "in_proj_a.", 5),
                 ]
-                if not envs.SGLANG_OPT_ATTN_DUAL_STREAM.get()
+                if envs.SGLANG_OPT_MERGE_QKVZBA.get()
                 else [
                     ("in_proj_qkvz.", "in_proj_qkv.", (0, 1, 2)),
                     ("in_proj_qkvz.", "in_proj_z.", 3),
@@ -1620,7 +1620,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
             ("qkv_proj", "v_proj", "v"),
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
-            # GDN — merged qkvzba when dual-stream is off
+            # GDN — merged qkvzba when SGLANG_OPT_MERGE_QKVZBA is on
             *(
                 [
                     ("in_proj_qkvzba.", "in_proj_qkv.", (0, 1, 2)),
@@ -1628,7 +1628,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
                     ("in_proj_qkvzba.", "in_proj_b.", 4),
                     ("in_proj_qkvzba.", "in_proj_a.", 5),
                 ]
-                if not envs.SGLANG_OPT_ATTN_DUAL_STREAM.get()
+                if envs.SGLANG_OPT_MERGE_QKVZBA.get()
                 else [
                     ("in_proj_qkvz.", "in_proj_qkv.", (0, 1, 2)),
                     ("in_proj_qkvz.", "in_proj_z.", 3),
@@ -1786,7 +1786,7 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             ("qkv_proj", "v_proj", "v"),
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
-            # GDN — merged qkvzba when dual-stream is off
+            # GDN — merged qkvzba when SGLANG_OPT_MERGE_QKVZBA is on
             *(
                 [
                     ("in_proj_qkvzba.", "in_proj_qkv.", (0, 1, 2)),
@@ -1794,7 +1794,7 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                     ("in_proj_qkvzba.", "in_proj_b.", 4),
                     ("in_proj_qkvzba.", "in_proj_a.", 5),
                 ]
-                if not envs.SGLANG_OPT_ATTN_DUAL_STREAM.get()
+                if envs.SGLANG_OPT_MERGE_QKVZBA.get()
                 else [
                     ("in_proj_qkvz.", "in_proj_qkv.", (0, 1, 2)),
                     ("in_proj_qkvz.", "in_proj_z.", 3),
