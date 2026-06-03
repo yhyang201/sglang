@@ -46,7 +46,6 @@ from sglang.srt.layers.communicator import LayerCommunicator, LayerScatterModes
 from sglang.srt.layers.dp_attention import (
     get_attention_tp_rank,
     get_attention_tp_size,
-    is_dp_attention_enabled,
 )
 from sglang.srt.layers.elementwise import fused_sigmoid_mul
 
@@ -167,30 +166,52 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
         # projection of the input hidden states
-        self.in_proj_qkvz = self.create_qkvz_proj(
-            hidden_size=self.hidden_size,
-            key_dim=self.key_dim,
-            value_dim=self.value_dim,
-            quant_config=quant_config,
-            prefix=add_prefix("in_proj_qkvz", prefix),
-            tp_rank=self.attn_tp_rank,
-            tp_size=self.attn_tp_size,
-        )
+        # When dual-stream is disabled, merge qkvz and ba into a single GEMM.
+        self._use_merged_proj = not envs.SGLANG_OPT_ATTN_DUAL_STREAM.get()
+        self._qkvz_dim_tp = (self.key_dim * 2 + self.value_dim * 2) // self.attn_tp_size
+        self._ba_dim_tp = (self.num_v_heads * 2) // self.attn_tp_size
 
-        self.in_proj_ba = self.create_ba_proj(
-            hidden_size=self.hidden_size,
-            num_v_heads=self.num_v_heads,
-            quant_config=quant_config,
-            prefix=add_prefix("in_proj_ba", prefix),
-            tp_rank=self.attn_tp_rank,
-            tp_size=self.attn_tp_size,
-        )
-
-        # Override weight loaders for packed checkpoint format.
-        # Important: for FP8, this must cover not only `.weight` but also
-        # `weight_scale_inv` / `weight_scale` / `input_scale` if present.
-        self._bind_packed_weight_loaders(self.in_proj_qkvz)
-        self._bind_packed_weight_loaders(self.in_proj_ba)
+        if self._use_merged_proj:
+            self.in_proj_qkvzba = MergedColumnParallelLinear(
+                input_size=self.hidden_size,
+                output_sizes=[
+                    self.key_dim,
+                    self.key_dim,
+                    self.value_dim,
+                    self.value_dim,
+                    self.num_v_heads,
+                    self.num_v_heads,
+                ],
+                bias=False,
+                quant_config=quant_config,
+                tp_rank=self.attn_tp_rank,
+                tp_size=self.attn_tp_size,
+                prefix=add_prefix("in_proj_qkvzba", prefix),
+            )
+            self._bind_packed_weight_loaders(self.in_proj_qkvzba)
+        else:
+            self.in_proj_qkvz = self.create_qkvz_proj(
+                hidden_size=self.hidden_size,
+                key_dim=self.key_dim,
+                value_dim=self.value_dim,
+                quant_config=quant_config,
+                prefix=add_prefix("in_proj_qkvz", prefix),
+                tp_rank=self.attn_tp_rank,
+                tp_size=self.attn_tp_size,
+            )
+            self.in_proj_ba = self.create_ba_proj(
+                hidden_size=self.hidden_size,
+                num_v_heads=self.num_v_heads,
+                quant_config=quant_config,
+                prefix=add_prefix("in_proj_ba", prefix),
+                tp_rank=self.attn_tp_rank,
+                tp_size=self.attn_tp_size,
+            )
+            # Override weight loaders for packed checkpoint format.
+            # Important: for FP8, this must cover not only `.weight` but also
+            # `weight_scale_inv` / `weight_scale` / `input_scale` if present.
+            self._bind_packed_weight_loaders(self.in_proj_qkvz)
+            self._bind_packed_weight_loaders(self.in_proj_ba)
 
         # Conv1d weight loader setup
         query_key_settings = (self.key_dim, 0, False)
@@ -320,8 +341,9 @@ class Qwen3_5GatedDeltaNet(nn.Module):
     @classmethod
     def _make_packed_weight_loader(cls, module, original_weight_loader):
         """Wrap the param's original loader so split checkpoints:
-          - in_proj_qkv + in_proj_z -> merged in_proj_qkvz
-          - in_proj_b + in_proj_a   -> merged in_proj_ba
+          - in_proj_qkv + in_proj_z + in_proj_b + in_proj_a -> merged in_proj_qkvzba
+          - in_proj_qkv + in_proj_z -> merged in_proj_qkvz (dual-stream mode)
+          - in_proj_b + in_proj_a   -> merged in_proj_ba   (dual-stream mode)
         can load correctly for both normal and FP8 params.
         """
 
@@ -433,6 +455,13 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         return query, key, value, z, b, a
 
     def _forward_input_proj(self, hidden_states: torch.Tensor):
+        if self._use_merged_proj:
+            projected_all, _ = self.in_proj_qkvzba(hidden_states)
+            projected_states_qkvz, projected_states_ba = projected_all.split(
+                [self._qkvz_dim_tp, self._ba_dim_tp], dim=-1
+            )
+            return projected_states_qkvz, projected_states_ba
+
         if (
             _is_cpu
             or _is_npu
@@ -445,7 +474,6 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         seq_len, _ = hidden_states.shape
         if (
             self.alt_stream is not None
-            and envs.SGLANG_OPT_ATTN_DUAL_STREAM.get()
             and get_is_capture_mode()
             and seq_len < DUAL_STREAM_TOKEN_THRESHOLD
         ):
@@ -1001,6 +1029,7 @@ class Qwen3_5ForCausalLM(nn.Module):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
+        "in_proj_qkvzba": ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"],
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
@@ -1009,6 +1038,7 @@ class Qwen3_5ForCausalLM(nn.Module):
         "qkv_proj",
         "o_proj",
         "out_proj",
+        "in_proj_qkvzba",
         "in_proj_qkvz",
         "gate_up_proj",
         "down_proj",
@@ -1031,10 +1061,13 @@ class Qwen3_5ForCausalLM(nn.Module):
         elif module_name == "out_proj":
             value_dim = config.linear_value_head_dim * config.linear_num_value_heads
             return value_dim, config.hidden_size
-        elif module_name == "in_proj_qkvz":
+        elif module_name in ("in_proj_qkvz", "in_proj_qkvzba"):
             key_dim = config.linear_key_head_dim * config.linear_num_key_heads
             value_dim = config.linear_value_head_dim * config.linear_num_value_heads
-            return config.hidden_size, key_dim * 2 + value_dim * 2
+            out = key_dim * 2 + value_dim * 2
+            if module_name == "in_proj_qkvzba":
+                out += config.linear_num_value_heads * 2
+            return config.hidden_size, out
         elif module_name == "gate_up_proj":
             # MoE: shared expert uses shared_expert_intermediate_size
             # Dense: regular MLP uses intermediate_size
@@ -1084,7 +1117,7 @@ class Qwen3_5ForCausalLM(nn.Module):
                 config.vocab_size,
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
-                enable_tp=not is_dp_attention_enabled(),
+                enable_tp=False,
             )
         else:
             self.embed_tokens = PPMissingLayer()
@@ -1219,11 +1252,22 @@ class Qwen3_5ForCausalLM(nn.Module):
             ("qkv_proj", "v_proj", "v"),
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
-            # GDN
-            ("in_proj_qkvz.", "in_proj_qkv.", (0, 1, 2)),
-            ("in_proj_qkvz.", "in_proj_z.", 3),
-            ("in_proj_ba.", "in_proj_b.", 0),
-            ("in_proj_ba.", "in_proj_a.", 1),
+            # GDN — merged qkvzba when dual-stream is off
+            *(
+                [
+                    ("in_proj_qkvzba.", "in_proj_qkv.", (0, 1, 2)),
+                    ("in_proj_qkvzba.", "in_proj_z.", 3),
+                    ("in_proj_qkvzba.", "in_proj_b.", 4),
+                    ("in_proj_qkvzba.", "in_proj_a.", 5),
+                ]
+                if not envs.SGLANG_OPT_ATTN_DUAL_STREAM.get()
+                else [
+                    ("in_proj_qkvz.", "in_proj_qkv.", (0, 1, 2)),
+                    ("in_proj_qkvz.", "in_proj_z.", 3),
+                    ("in_proj_ba.", "in_proj_b.", 0),
+                    ("in_proj_ba.", "in_proj_a.", 1),
+                ]
+            ),
         ]
 
         loaded_params: Set[str] = set()
@@ -1307,11 +1351,22 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLM):
             ("qkv_proj", "v_proj", "v"),
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
-            # GDN
-            ("in_proj_qkvz.", "in_proj_qkv.", (0, 1, 2)),
-            ("in_proj_qkvz.", "in_proj_z.", 3),
-            ("in_proj_ba.", "in_proj_b.", 0),
-            ("in_proj_ba.", "in_proj_a.", 1),
+            # GDN — merged qkvzba when dual-stream is off
+            *(
+                [
+                    ("in_proj_qkvzba.", "in_proj_qkv.", (0, 1, 2)),
+                    ("in_proj_qkvzba.", "in_proj_z.", 3),
+                    ("in_proj_qkvzba.", "in_proj_b.", 4),
+                    ("in_proj_qkvzba.", "in_proj_a.", 5),
+                ]
+                if not envs.SGLANG_OPT_ATTN_DUAL_STREAM.get()
+                else [
+                    ("in_proj_qkvz.", "in_proj_qkv.", (0, 1, 2)),
+                    ("in_proj_qkvz.", "in_proj_z.", 3),
+                    ("in_proj_ba.", "in_proj_b.", 0),
+                    ("in_proj_ba.", "in_proj_a.", 1),
+                ]
+            ),
         ]
 
         # Params for weights, fp8 weight scales, fp8 activation scales
@@ -1565,11 +1620,22 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
             ("qkv_proj", "v_proj", "v"),
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
-            # GDN fused projections
-            ("in_proj_qkvz.", "in_proj_qkv.", (0, 1, 2)),
-            ("in_proj_qkvz.", "in_proj_z.", 3),
-            ("in_proj_ba.", "in_proj_b.", 0),
-            ("in_proj_ba.", "in_proj_a.", 1),
+            # GDN — merged qkvzba when dual-stream is off
+            *(
+                [
+                    ("in_proj_qkvzba.", "in_proj_qkv.", (0, 1, 2)),
+                    ("in_proj_qkvzba.", "in_proj_z.", 3),
+                    ("in_proj_qkvzba.", "in_proj_b.", 4),
+                    ("in_proj_qkvzba.", "in_proj_a.", 5),
+                ]
+                if not envs.SGLANG_OPT_ATTN_DUAL_STREAM.get()
+                else [
+                    ("in_proj_qkvz.", "in_proj_qkv.", (0, 1, 2)),
+                    ("in_proj_qkvz.", "in_proj_z.", 3),
+                    ("in_proj_ba.", "in_proj_b.", 0),
+                    ("in_proj_ba.", "in_proj_a.", 1),
+                ]
+            ),
         ]
 
         loaded_params: Set[str] = set()
@@ -1720,11 +1786,22 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             ("qkv_proj", "v_proj", "v"),
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
-            # GDN fused projections
-            ("in_proj_qkvz.", "in_proj_qkv.", (0, 1, 2)),
-            ("in_proj_qkvz.", "in_proj_z.", 3),
-            ("in_proj_ba.", "in_proj_b.", 0),
-            ("in_proj_ba.", "in_proj_a.", 1),
+            # GDN — merged qkvzba when dual-stream is off
+            *(
+                [
+                    ("in_proj_qkvzba.", "in_proj_qkv.", (0, 1, 2)),
+                    ("in_proj_qkvzba.", "in_proj_z.", 3),
+                    ("in_proj_qkvzba.", "in_proj_b.", 4),
+                    ("in_proj_qkvzba.", "in_proj_a.", 5),
+                ]
+                if not envs.SGLANG_OPT_ATTN_DUAL_STREAM.get()
+                else [
+                    ("in_proj_qkvz.", "in_proj_qkv.", (0, 1, 2)),
+                    ("in_proj_qkvz.", "in_proj_z.", 3),
+                    ("in_proj_ba.", "in_proj_b.", 0),
+                    ("in_proj_ba.", "in_proj_a.", 1),
+                ]
+            ),
         ]
 
         num_experts = self.config.num_experts
