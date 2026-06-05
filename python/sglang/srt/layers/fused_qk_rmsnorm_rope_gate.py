@@ -18,6 +18,20 @@ import torch
 import triton
 import triton.language as tl
 
+# Persistent (graph-safe) output buffers. Per-call torch.empty here gets captured into
+# the EAGLE draft cuda graphs; dynamic allocs alias across the ~35 captured graphs
+# (shared mempool) -> graph-replay memory corruption -> IMA on sm_100 (GB200).
+# Reusing a buffer per (shape,dtype,device) keeps capture allocation-free.
+_QK_OUT_CACHE = {}
+def _qk_buf(shape, dtype, device):
+    k = (tuple(shape), dtype, device)
+    b = _QK_OUT_CACHE.get(k)
+    if b is None:
+        b = torch.empty(shape, dtype=dtype, device=device)
+        _QK_OUT_CACHE[k] = b
+    return b
+
+
 # ---------------------------------------------------------------------------
 # v2 kernel — bf16 round-trip, full HEAD_BLOCK load, reload rotary for RoPE
 # ---------------------------------------------------------------------------
@@ -325,13 +339,11 @@ def fused_qk_gemma_rmsnorm_rope_gate_v2(
     q_size = num_q_heads * head_dim
     kv_size = num_kv_heads * head_dim
 
-    q_out = torch.empty(T, q_size, dtype=q_gate.dtype, device=q_gate.device)
-    k_out = torch.empty(T, kv_size, dtype=k.dtype, device=k.device)
+    q_out = _qk_buf((T, q_size), q_gate.dtype, q_gate.device)
+    k_out = _qk_buf((T, kv_size), k.dtype, k.device)
 
     if has_gate:
-        gate_out = torch.empty(
-            T, num_q_heads, head_dim, dtype=q_gate.dtype, device=q_gate.device
-        )
+        gate_out = _qk_buf((T, num_q_heads, head_dim), q_gate.dtype, q_gate.device)
     else:
         gate_out = q_out  # dummy
 
@@ -401,13 +413,11 @@ def fused_qk_gemma_rmsnorm_rope_gate(
     HAS_NOPE = NOPE_DIM > 0
     NOPE_BLOCK = triton.next_power_of_2(NOPE_DIM) if NOPE_DIM > 0 else 1
 
-    q_out = torch.empty(T, q_size, dtype=q_gate.dtype, device=q_gate.device)
-    k_out = torch.empty(T, kv_size, dtype=k.dtype, device=k.device)
+    q_out = _qk_buf((T, q_size), q_gate.dtype, q_gate.device)
+    k_out = _qk_buf((T, kv_size), k.dtype, k.device)
 
     if has_gate:
-        gate_out = torch.empty(
-            T, num_q_heads, head_dim, dtype=q_gate.dtype, device=q_gate.device
-        )
+        gate_out = _qk_buf((T, num_q_heads, head_dim), q_gate.dtype, q_gate.device)
     else:
         gate_out = q_out
 
