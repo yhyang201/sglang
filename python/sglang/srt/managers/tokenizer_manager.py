@@ -780,9 +780,15 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             if not input_text and self.mm_processor and obj.contains_mm_input():
                 # Use empty placeholder - multimodal processor will override
                 input_ids = []
+                print(
+                    f"[MM_TRACE] _tokenize_one_request: text empty + has mm_input → using empty input_ids placeholder"
+                )
             else:
                 input_ids, token_type_ids = await self._tokenize_texts(
                     input_text, is_cross_encoder_request
+                )
+                print(
+                    f"[MM_TRACE] _tokenize_one_request: tokenized text → input_ids len={len(input_ids)}"
                 )
 
         contains_mm_input = obj.contains_mm_input()
@@ -792,6 +798,9 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         )
         should_run_mm_processor = self.mm_processor is not None and (
             contains_mm_input or is_mossvl
+        )
+        print(
+            f"[MM_TRACE] _tokenize_one_request: contains_mm_input={contains_mm_input}, should_run_mm_processor={should_run_mm_processor}, processor={type(self.mm_processor).__name__ if self.mm_processor else None}"
         )
 
         if should_run_mm_processor:
@@ -823,6 +832,9 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                             "Encoder embedding not available, "
                             "falling back to local mm processing"
                         )
+                    print(
+                        f"[MM_TRACE] _tokenize_one_request: calling process_mm_data_async (local processing), images={len(obj.image_data) if obj.image_data else 0}, videos={len(obj.video_data) if obj.video_data else 0}, audios={len(obj.audio_data) if obj.audio_data else 0}, input_type={'text' if input_text else 'ids'}"
+                    )
                     mm_inputs = await self.mm_processor.process_mm_data_async(
                         image_data=obj.image_data,
                         audio_data=obj.audio_data,
@@ -846,6 +858,15 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                     max_req_input_len=self.max_req_input_len,
                 )
 
+            if mm_inputs:
+                _mm_items = mm_inputs.mm_items if mm_inputs.mm_items else []
+                print(
+                    f"[MM_TRACE] _tokenize_one_request: mm_inputs returned, input_ids_len={len(mm_inputs.input_ids) if mm_inputs.input_ids else 'None'}, mm_items={len(_mm_items)}, modalities={[item.modality.name for item in _mm_items if hasattr(item, 'modality')]}, im_token_id={mm_inputs.im_token_id}, video_token_id={getattr(mm_inputs, 'video_token_id', None)}"
+                )
+                for i, item in enumerate(_mm_items):
+                    print(
+                        f"[MM_TRACE]   mm_item[{i}]: modality={item.modality.name}, offsets={item.offsets}, feature_shape={item.feature.shape if hasattr(item.feature, 'shape') else type(item.feature).__name__}"
+                    )
             if mm_inputs and mm_inputs.input_ids is not None:
                 input_ids = mm_inputs.input_ids
             if mm_inputs and mm_inputs.token_type_ids is not None:
@@ -895,6 +916,9 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             mm_inputs = None
 
         self._validate_one_request(obj, input_ids)
+        print(
+            f"[MM_TRACE] _tokenize_one_request: final → input_ids len={len(input_ids) if input_ids else 0}, has_mm_inputs={mm_inputs is not None}, has_token_type_ids={token_type_ids is not None}, has_input_embeds={input_embeds is not None}"
+        )
         return self._create_tokenized_object(
             obj, input_text, input_ids, input_embeds, mm_inputs, token_type_ids
         )

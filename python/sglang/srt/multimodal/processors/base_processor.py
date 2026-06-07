@@ -783,6 +783,9 @@ class BaseMultimodalProcessor(ABC):
         discard_alpha_channel: bool = True,
         audio_sample_rate: Optional[int] = None,
     ) -> BaseMultiModalProcessorOutput:
+        print(
+            f"[MM_TRACE] load_mm_data: images={len(image_data) if image_data else 0}, videos={len(video_data) if video_data else 0}, audios={len(audio_data) if audio_data else 0}, prompt_type={type(prompt).__name__}, prompt_len={len(prompt) if isinstance(prompt, (str, list)) else 'N/A'}"
+        )
 
         BaseMultimodalProcessor.validate_mm_data(image_data, video_data, audio_data)
 
@@ -791,6 +794,7 @@ class BaseMultimodalProcessor(ABC):
             image_data, video_data, audio_data
         ):
             # fast path for preprocessed data: early return
+            print(f"[MM_TRACE] load_mm_data: → preprocessed fast return")
             return BaseMultiModalProcessorOutput(
                 input_text="",
                 input_ids=input_ids,
@@ -820,6 +824,9 @@ class BaseMultimodalProcessor(ABC):
         n_video = len(video_data) if video_data else 0
         n_audio = len(audio_data) if audio_data else 0
 
+        print(
+            f"[MM_TRACE] load_mm_data: placeholder counts: image={cnt[Modality.IMAGE]}, video={cnt[Modality.VIDEO]}, audio={cnt[Modality.AUDIO]} vs data counts: image={n_image}, video={n_video}, audio={n_audio}"
+        )
         # For MiniCPMO and MiniCPMV or multimodal_tokens not totally align, legacy show path
         if (
             self.server_args.skip_tokenizer_init
@@ -828,6 +835,7 @@ class BaseMultimodalProcessor(ABC):
             or cnt[Modality.AUDIO] != n_audio
             or getattr(self, "support_dynamic_frame_expansion", False)
         ):
+            print(f"[MM_TRACE] load_mm_data: → legacy_load_mm_data path")
             return await self.legacy_load_mm_data(
                 prompt=prompt,
                 multimodal_tokens=multimodal_tokens,
@@ -841,6 +849,7 @@ class BaseMultimodalProcessor(ABC):
             )
         # For models other than MiniCPMO and MiniCPMV,
         # totally align multimodal_tokens, fast path
+        print(f"[MM_TRACE] load_mm_data: → fast_load_mm_data path")
         return await self.fast_load_mm_data(
             prompt=prompt,
             multimodal_tokens=multimodal_tokens,
@@ -1295,6 +1304,9 @@ class BaseMultimodalProcessor(ABC):
         """
         # Collect all items and categorize them
         all_loaded_data = base_output.organize_results()
+        print(
+            f"[MM_TRACE] process_and_combine_mm_data: all_loaded_data count={len(all_loaded_data)}"
+        )
         # Handle text-only case
         if not all_loaded_data:
             input_ids = self._tokenizer(
@@ -1302,6 +1314,9 @@ class BaseMultimodalProcessor(ABC):
                 return_tensors="pt",
                 add_special_tokens=True,
             ).input_ids.flatten()
+            print(
+                f"[MM_TRACE] process_and_combine_mm_data: text-only → input_ids len={len(input_ids)}"
+            )
             return [], input_ids, {}
 
         dict_items, raw_images, raw_audios, raw_videos = [], [], [], []
@@ -1316,6 +1331,9 @@ class BaseMultimodalProcessor(ABC):
                 raw_videos.append(item)
             else:
                 raise ValueError(f"Unknown multimodal item type: {type(item)}")
+        print(
+            f"[MM_TRACE] process_and_combine_mm_data: dict_items={len(dict_items)}, raw_images={len(raw_images)}, raw_audios={len(raw_audios)}, raw_videos={len(raw_videos)}"
+        )
         # Process items and get input_ids
         all_collected_items: list[MultimodalDataItem] = []
         input_ids = None
@@ -1329,6 +1347,9 @@ class BaseMultimodalProcessor(ABC):
                 **kwargs,
             )
             all_collected_items = collected_items
+            print(
+                f"[MM_TRACE] process_and_combine_mm_data: after _process_and_collect → collected_items={len(collected_items)}, input_ids shape={input_ids.shape if hasattr(input_ids, 'shape') else len(input_ids)}"
+            )
 
             # When SGLANG_MM_AVOID_RETOKENIZE is on, keep the user's exact tokens to avoid retokenize drift.
             # Drift happens when Retokenization is not identity: Decode(X) => String => Re-tokenize => Y, X != Y.
@@ -1458,4 +1479,11 @@ class BaseMultimodalProcessor(ABC):
                         item.precomputed_embeddings
                     )
 
+        print(
+            f"[MM_TRACE] process_and_combine_mm_data: final → mm_items={len(all_collected_items)}, input_ids len={input_ids.numel() if hasattr(input_ids, 'numel') else len(input_ids)}"
+        )
+        for i, item in enumerate(all_collected_items):
+            print(
+                f"[MM_TRACE]   combined_item[{i}]: modality={item.modality.name}, offsets={item.offsets}, feature_shape={item.feature.shape if hasattr(item.feature, 'shape') else 'N/A'}"
+            )
         return all_collected_items, input_ids, ret

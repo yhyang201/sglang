@@ -678,6 +678,9 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         **kwargs,
     ):
         entry_time = time.perf_counter()
+        print(
+            f"[MM_TRACE] QwenVLImageProcessor.process_mm_data_async: ENTER, model_type={self.model_type}, images={len(image_data) if image_data else 0}, videos={len(request_obj.video_data) if request_obj.video_data else 0}, audios={len(request_obj.audio_data) if request_obj.audio_data else 0}"
+        )
         base_output = await self.load_mm_data(
             prompt=input_text,
             image_data=image_data,
@@ -687,6 +690,9 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         )
         load_time = time.perf_counter()
         rid = getattr(request_obj, "rid", "anonymous_rid")
+        print(
+            f"[MM_TRACE] QwenVLImageProcessor: load_mm_data done ({(load_time - entry_time)*1000:.1f}ms), images={len(base_output.images)}, videos={len(base_output.videos)}, audios={len(base_output.audios)}, input_text_len={len(base_output.input_text)}"
+        )
 
         video_metadata = None
         if base_output.videos and not isinstance(base_output.videos[0], dict):
@@ -706,6 +712,9 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             "qwen3_5_moe",
             "intern_s2_preview",
         ):
+            print(
+                f"[MM_TRACE] QwenVLImageProcessor: process_and_combine_mm_data (qwen3+ path, do_sample_frames=False)"
+            )
             mm_items, input_ids, ret = self.process_and_combine_mm_data(
                 base_output,
                 self.mm_tokens,
@@ -713,9 +722,15 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
                 do_sample_frames=False,
             )
         else:
+            print(
+                f"[MM_TRACE] QwenVLImageProcessor: process_and_combine_mm_data (default path)"
+            )
             mm_items, input_ids, ret = self.process_and_combine_mm_data(
                 base_output, self.mm_tokens
             )
+        print(
+            f"[MM_TRACE] QwenVLImageProcessor: process_and_combine done, mm_items={len(mm_items)}, input_ids len={input_ids.numel() if hasattr(input_ids, 'numel') else len(input_ids)}"
+        )
 
         audio_feature_lengths = None
 
@@ -769,12 +784,19 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         )
 
         mrope_result = self._get_precomputed_mrope_from_output(ret)
+        if mrope_result is not None:
+            print(
+                f"[MM_TRACE] QwenVLImageProcessor: mRoPE path = precomputed from processor output"
+            )
         if mrope_result is None:
             if (
                 video_grid_thw is None
                 and second_per_grid_ts is None
                 and audio_feature_lengths is None
             ):
+                print(
+                    f"[MM_TRACE] QwenVLImageProcessor: mRoPE path = image-only optimized (from offsets)"
+                )
                 mrope_result = self._compute_image_only_mrope_positions_from_offsets(
                     input_len=input_ids.numel(),
                     mm_items=mm_items,
@@ -782,6 +804,9 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
                     device=input_ids.device,
                 )
         if mrope_result is None:
+            print(
+                f"[MM_TRACE] QwenVLImageProcessor: mRoPE path = general MRotaryEmbedding.get_rope_index"
+            )
             mrope_result = MRotaryEmbedding.get_rope_index(
                 spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
                 image_token_id=self.mm_tokens.image_token_id,
@@ -818,6 +843,9 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             f"total_time: {(get_rope_index_time - entry_time) * 1000:.2f} ms"
         )
 
+        print(
+            f"[MM_TRACE] QwenVLImageProcessor.process_mm_data_async: EXIT, input_ids_len={len(input_ids_list)}, mm_items={len(mm_items)}, has_mrope={mrope_positions is not None}, mrope_shape={mrope_positions.shape if mrope_positions is not None else 'N/A'}, total_time={((time.perf_counter() - entry_time)*1000):.1f}ms"
+        )
         return MultimodalProcessorOutput(
             input_ids=input_ids_list,
             padded_input_ids=padded_input_ids,

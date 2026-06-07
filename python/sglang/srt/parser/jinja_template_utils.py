@@ -168,6 +168,9 @@ def process_content_for_template_format(
                             max_dynamic_patch=mdp,
                         )
                     )
+                    print(
+                        f"[MM_TRACE] process_content_for_template_format: extracted image_url (total images={len(image_data)}), detail={image_obj.get('detail', 'auto')}, mdp={mdp}"
+                    )
 
                     if chunk.get("modalities"):
                         modalities.append(chunk.get("modalities"))
@@ -186,12 +189,18 @@ def process_content_for_template_format(
                                 "max_dynamic_patch": mdp,
                             }
                         )
+                    print(
+                        f"[MM_TRACE] process_content_for_template_format: extracted video_url (total videos={len(video_data)}), mdp={mdp}"
+                    )
                     if chunk.get("modalities"):
                         modalities.append(chunk.get("modalities"))
                     # Normalize to simple 'video' type for template compatibility
                     processed_content_parts.append({"type": "video"})
                 elif chunk_type == "audio_url":
                     audio_data.append(chunk["audio_url"]["url"])
+                    print(
+                        f"[MM_TRACE] process_content_for_template_format: extracted audio_url (total audios={len(audio_data)})"
+                    )
                     # Normalize to simple 'audio' type
                     processed_content_parts.append({"type": "audio"})
                 elif chunk_type == "text":

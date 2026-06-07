@@ -503,6 +503,9 @@ class OpenAIServingChat(OpenAIServingBase):
                 prompt_kwargs = {"text": processed_messages.prompt_ids}
             else:
                 prompt_kwargs = {"input_ids": processed_messages.prompt_ids}
+        print(
+            f"[MM_TRACE] _convert_to_internal_request: is_multimodal={is_multimodal}, prompt_kwargs_key={list(prompt_kwargs.keys())}, image_data={len(processed_messages.image_data) if processed_messages.image_data else 0}, video_data={len(processed_messages.video_data) if processed_messages.video_data else 0}, audio_data={len(processed_messages.audio_data) if processed_messages.audio_data else 0}"
+        )
 
         # Extract custom labels from raw request headers
         custom_labels = self.extract_custom_labels(raw_request)
@@ -844,6 +847,13 @@ class OpenAIServingChat(OpenAIServingBase):
         audio_data = audio_data if audio_data else None
         video_data = video_data if video_data else None
         modalities = modalities if modalities else []
+        print(
+            f"[MM_TRACE] _apply_jinja_template: template_content_format={template_content_format}, images={len(image_data) if image_data else 0}, videos={len(video_data) if video_data else 0}, audios={len(audio_data) if audio_data else 0}, prompt_ids_len={len(prompt_ids) if prompt_ids else 0}, prompt_len={len(prompt) if prompt else 0}"
+        )
+        if is_multimodal and prompt:
+            print(
+                f"[MM_TRACE] _apply_jinja_template: decoded prompt (first 300 chars): {prompt[:300]!r}"
+            )
         return MessageProcessingResult(
             prompt=prompt,
             prompt_ids=prompt_ids,
