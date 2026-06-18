@@ -691,10 +691,28 @@ class HybridLinearAttnBackend(AttentionBackend):
         forward_batch: ForwardBatch,
         in_capture: bool = False,
     ):
-        for attn_backend in self.attn_backend_list:
-            attn_backend.init_forward_metadata_out_graph(
-                forward_batch, in_capture=in_capture
+        # Only prepare full-attn metadata here (safe on plan stream).
+        # Mamba metadata is deferred to init_forward_metadata_out_graph_deferred()
+        # which runs on the main stream after wait_stream, avoiding race conditions
+        # between plan stream mamba writes and main stream mamba reads.
+        self.full_attn_backend.init_forward_metadata_out_graph(
+            forward_batch, in_capture=in_capture
+        )
+        self._deferred_mamba_forward_batch = forward_batch
+        self._deferred_mamba_in_capture = in_capture
+
+    def init_forward_metadata_out_graph_deferred(self):
+        """Prepare mamba metadata on the main stream after plan stream sync.
+
+        Called by the CUDA graph runner after wait_stream to avoid cross-stream
+        races on shared mamba state buffers.
+        """
+        fb = getattr(self, "_deferred_mamba_forward_batch", None)
+        if fb is not None:
+            self.linear_attn_backend.init_forward_metadata_out_graph(
+                fb, in_capture=self._deferred_mamba_in_capture
             )
+            self._deferred_mamba_forward_batch = None
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         if forward_batch.forward_mode.is_draft_extend_v2():

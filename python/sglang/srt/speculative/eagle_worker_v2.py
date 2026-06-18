@@ -763,6 +763,10 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             torch.get_device_module(self.device).current_stream().wait_stream(
                 self.plan_stream
             )
+            # Complete deferred mamba metadata on main stream (avoids plan-stream race).
+            draft_attn = self.draft_runner.attn_backend
+            if hasattr(draft_attn, "init_forward_metadata_out_graph_deferred"):
+                draft_attn.init_forward_metadata_out_graph_deferred()
 
         # Run draft extend batch in the main compute stream
         can_cuda_graph = (
@@ -1345,6 +1349,10 @@ class EAGLEWorkerV2(BaseSpecWorker):
             torch.get_device_module(self.device).current_stream().wait_stream(
                 self.plan_stream
             )
+            # Complete deferred mamba metadata on main stream (avoids plan-stream race).
+            attn_backend = self.target_worker.model_runner.attn_backend
+            if hasattr(attn_backend, "init_forward_metadata_out_graph_deferred"):
+                attn_backend.init_forward_metadata_out_graph_deferred()
             if (
                 _is_npu
                 and self._target_worker.model_runner.model_is_mrope
