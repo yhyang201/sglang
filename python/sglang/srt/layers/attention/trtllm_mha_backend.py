@@ -151,8 +151,7 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
 
         # Fixed BS_UPPER for the fused page-table kernel (avoids recompilation
         # per bs). The cumsum kernel uses a per-bs BS_UPPER instead.
-        cg_config = model_runner.server_args.cuda_graph_config
-        max_cg_bs = (cg_config.decode.max_bs if cg_config is not None else None) or 512
+        max_cg_bs = 512
         self._fused_bs_upper = 1
         while self._fused_bs_upper < max_cg_bs:
             self._fused_bs_upper *= 2
