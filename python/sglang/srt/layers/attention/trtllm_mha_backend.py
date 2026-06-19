@@ -149,8 +149,10 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
             self.max_context_len + self.page_size - 1
         ) // self.page_size
 
-        # Fixed BS_UPPER for fused metadata kernel (avoids recompilation per bs)
-        max_cg_bs = model_runner.server_args.cuda_graph_max_bs or 512
+        # Fixed BS_UPPER for the fused page-table kernel (avoids recompilation
+        # per bs). The cumsum kernel uses a per-bs BS_UPPER instead.
+        cg_config = model_runner.server_args.cuda_graph_config
+        max_cg_bs = (cg_config.decode.max_bs if cg_config is not None else None) or 512
         self._fused_bs_upper = 1
         while self._fused_bs_upper < max_cg_bs:
             self._fused_bs_upper *= 2
@@ -252,11 +254,17 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
         )
         # Kernel 2: vectorized cumsum in a single program (no unrolled loop)
         # Grid axis-1 encodes bs so the kernel knows how many elements are valid.
+        # Use next_power_of_2(bs) instead of the global _fused_bs_upper to avoid
+        # oversized vectors (e.g., 512-wide for bs=1) that cause register spill
+        # and throughput instability.
+        bs_upper_cumsum = 1
+        while bs_upper_cumsum < bs:
+            bs_upper_cumsum *= 2
         _cumsum_kernel[(1, bs)](
             seq_lens,
             metadata.cu_seqlens_k,
             seq_len_offset,
-            BS_UPPER=self._fused_bs_upper,
+            BS_UPPER=bs_upper_cumsum,
         )
 
     def _fill_page_table_device(
