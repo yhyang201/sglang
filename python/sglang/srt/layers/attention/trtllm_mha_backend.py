@@ -21,6 +21,7 @@ from sglang.srt.layers.attention.triton_ops.trtllm_fp8_kv_kernel import (
 )
 from sglang.srt.layers.attention.triton_ops.trtllm_mha_page_table import (
     create_trtllm_mha_kv_indices_triton,
+    fused_trtllm_verify_metadata,
     get_num_mha_kv_index_blocks,
 )
 from sglang.srt.layers.attention.utils import canonicalize_stride
@@ -203,6 +204,40 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
         if self._swa_kv_pool is None:
             return None
         return torch.zeros(max_bs, max_num_pages, dtype=torch.int32, device=self.device)
+
+    def _fused_fill_metadata(
+        self,
+        metadata: TRTLLMMHAMetadata,
+        req_pool_indices: torch.Tensor,
+        seq_lens: torch.Tensor,
+        seq_len_offset: int,
+    ):
+        """Fused: compute cache_seqlens + cumsum + page table in one kernel launch."""
+        page_table = metadata.page_table
+        bs = page_table.shape[0]
+        has_swa = self._swa_kv_pool is not None
+        # BS_UPPER must be a power of 2 for tl.constexpr loop bound
+        bs_upper = 1
+        while bs_upper < bs:
+            bs_upper *= 2
+        fused_trtllm_verify_metadata[
+            (bs, get_num_mha_kv_index_blocks(page_table.shape[1], self.page_size))
+        ](
+            self.req_to_token,
+            req_pool_indices,
+            seq_lens,
+            self._swa_kv_pool.full_to_swa_index_mapping if has_swa else None,
+            metadata.cache_seqlens_int32,
+            metadata.cu_seqlens_k,
+            page_table,
+            metadata.swa_page_table if has_swa else None,
+            self.req_to_token.stride(0),
+            page_table.stride(0),
+            PAGE_SIZE=self.page_size,
+            HAS_SWA=has_swa,
+            seq_len_offset=seq_len_offset,
+            BS_UPPER=bs_upper,
+        )
 
     def _fill_page_table_device(
         self,
@@ -486,44 +521,31 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
                 metadata.cache_seqlens_int32 = self.decode_cuda_graph_metadata[
                     "cache_seqlens"
                 ][:bs]
-                metadata.cache_seqlens_int32.copy_(
-                    seq_lens + self.speculative_step_id + 1
-                )
+                offset = self.speculative_step_id + 1
             else:
                 # Normal Decode
                 metadata = self.decode_cuda_graph_metadata[bs]
-                metadata.cache_seqlens_int32.copy_(seq_lens)
+                offset = 0
 
             metadata.max_seq_len_k = self.max_context_len
-            metadata.cu_seqlens_k[1:].copy_(
-                torch.cumsum(metadata.cache_seqlens_int32, dim=0, dtype=torch.int32)
-            )
-            self._fill_page_table_device(
-                metadata, req_pool_indices, metadata.cache_seqlens_int32
-            )
+            # Fused: cache_seqlens + cumsum + page table in one kernel launch
+            self._fused_fill_metadata(metadata, req_pool_indices, seq_lens, offset)
         elif forward_mode.is_target_verify():
             # Here we only support topk = 1 for now.
             metadata = self.target_verify_metadata[bs]
-            metadata.cache_seqlens_int32.copy_(seq_lens + metadata.max_seq_len_q)
             metadata.max_seq_len_k = self.max_context_len
-            metadata.cu_seqlens_k[1:].copy_(
-                torch.cumsum(metadata.cache_seqlens_int32, dim=0, dtype=torch.int32)
-            )
-            self._fill_page_table_device(
-                metadata, req_pool_indices, metadata.cache_seqlens_int32
+            # Fused: cache_seqlens + cumsum + page table in one kernel launch
+            self._fused_fill_metadata(
+                metadata, req_pool_indices, seq_lens, metadata.max_seq_len_q
             )
         elif forward_mode.is_draft_extend_v2():
             metadata = self.draft_extend_metadata[bs]
-            metadata.cache_seqlens_int32.copy_(seq_lens)
             metadata.max_seq_len_k = self.max_context_len
-            metadata.cu_seqlens_k[1:].copy_(
-                torch.cumsum(metadata.cache_seqlens_int32, dim=0, dtype=torch.int32)
-            )
+            # Fused: cache_seqlens (offset=0) + cumsum + page table
+            self._fused_fill_metadata(metadata, req_pool_indices, seq_lens, 0)
             if forward_mode.is_draft_extend_v2():
                 num_tokens_per_bs = spec_info.num_tokens_per_req
                 if num_tokens_per_bs <= 0:
-                    # Capture uses a synthetic EagleDraftExtendInput; infer the
-                    # fixed V2 stride from the capture buffer when it is unset.
                     num_tokens_per_bs = int(
                         spec_info.num_accept_tokens[:bs].max().item()
                     )
@@ -547,10 +569,6 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
                 metadata.cu_seqlens_q[1:].copy_(
                     torch.cumsum(extend_lens, dim=0, dtype=torch.int32)
                 )
-
-            self._fill_page_table_device(
-                metadata, req_pool_indices, metadata.cache_seqlens_int32
-            )
         self.forward_metadata = metadata
 
     def update_verify_buffers_to_fill_after_draft(
