@@ -33,6 +33,35 @@ def get_num_mha_kv_index_blocks(num_pages: int, page_size: int) -> int:
 
 
 @triton.jit
+def _cumsum_kernel(
+    seq_lens_ptr,  # [bs] int64
+    cu_seqlens_k_ptr,  # [bs+1] int32 output
+    seq_len_offset,  # runtime int
+    BS_UPPER: tl.constexpr,  # next_power_of_2(max_bs), block size
+):
+    """Single-program vectorized cumsum: cu_seqlens_k = [0, cumsum(seq_lens + offset)].
+
+    Launched with grid=(1,). Loads all bs elements at once using tl.arange,
+    applies tl.cumsum, and stores the result. No unrolled loops, no inter-program
+    races. BS_UPPER is the power-of-2 upper bound on batch size (used as the
+    Triton block size); elements past the real bs are masked to zero.
+    """
+    # axis-0 of the grid tells us the actual bs (grid launched as (1,) but we
+    # receive bs via num_programs on axis 1 — see launch site).
+    bs = tl.num_programs(1)
+    idx = tl.arange(0, BS_UPPER)
+    mask = idx < bs
+    raw = tl.load(seq_lens_ptr + idx, mask=mask, other=0)
+    cache_sl = (raw + seq_len_offset).to(tl.int32)
+    # Zero out masked lanes so they don't pollute the cumsum
+    cache_sl = tl.where(mask, cache_sl, tl.zeros_like(cache_sl))
+    prefix = tl.cumsum(cache_sl, axis=0)
+    # cu_seqlens_k[0] = 0, cu_seqlens_k[1:bs+1] = cumsum
+    tl.store(cu_seqlens_k_ptr, tl.zeros([], dtype=tl.int32))
+    tl.store(cu_seqlens_k_ptr + 1 + idx, prefix, mask=mask)
+
+
+@triton.jit
 def fused_trtllm_verify_metadata(
     req_to_token_ptr,  # [max_reqs, max_context_len]
     req_pool_indices_ptr,  # [bs]
@@ -47,14 +76,17 @@ def fused_trtllm_verify_metadata(
     PAGE_SIZE: tl.constexpr,
     HAS_SWA: tl.constexpr,
     seq_len_offset,  # max_seq_len_q for verify, 0 for decode (runtime, NOT constexpr)
-    BS_UPPER: tl.constexpr,  # fixed to next_power_of_2(max_cuda_graph_bs)
+    BS_UPPER: tl.constexpr,  # next_power_of_2(max_cuda_graph_bs)
 ):
-    """Fused kernel: compute cache_seqlens, cumsum, and page table in one launch.
+    """Fused kernel: compute cache_seqlens and page table in one launch.
 
-    Replaces three separate operations:
+    The cumsum (cu_seqlens_k) is computed by the companion _cumsum_kernel,
+    launched separately with grid=(1,) to avoid the O(BS_UPPER) unrolled loop
+    that was causing compilation bloat and runtime regression.
+
+    This kernel handles:
       1. cache_seqlens_int32 = (seq_lens + seq_len_offset).to(int32)
-      2. cu_seqlens_k[1:] = cumsum(cache_seqlens_int32)
-      3. page_table = build_from_req_to_token(cache_seqlens)
+      2. page_table = build_from_req_to_token(cache_seqlens)
 
     Grid: (bs, num_page_blocks)
     """
@@ -70,18 +102,7 @@ def fused_trtllm_verify_metadata(
         # Write cache_seqlens_int32
         tl.store(cache_seqlens_ptr + pid_req, cache_seq_len)
 
-        # Step 2: Compute cu_seqlens_k via naive prefix sum (O(bs) per thread)
-        # bs is small (1-32 typically), so this is fine
-        prefix = tl.zeros([], dtype=tl.int32)
-        for j in range(BS_UPPER):
-            if j < pid_req + 1:
-                sl_j = tl.load(seq_lens_ptr + j)
-                prefix += (sl_j + seq_len_offset).to(tl.int32)
-        tl.store(cu_seqlens_k_ptr + pid_req + 1, prefix)
-        if pid_req == 0:
-            tl.store(cu_seqlens_k_ptr, tl.zeros([], dtype=tl.int32))
-
-    # Step 3: Build page table (same as create_trtllm_mha_kv_indices_triton)
+    # Step 2: Build page table (same as create_trtllm_mha_kv_indices_triton)
     num_pages = tl.cdiv(cache_seq_len, PAGE_SIZE)
     num_page_blocks = tl.cdiv(cache_seq_len.to(tl.int32), _MHA_KV_INDEX_BLOCK_TOKENS_TL)
     if pid_blk >= num_page_blocks:

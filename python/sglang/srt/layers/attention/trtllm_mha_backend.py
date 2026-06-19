@@ -20,6 +20,7 @@ from sglang.srt.layers.attention.triton_ops.trtllm_fp8_kv_kernel import (
     fused_fp8_set_kv_buffer,
 )
 from sglang.srt.layers.attention.triton_ops.trtllm_mha_page_table import (
+    _cumsum_kernel,
     create_trtllm_mha_kv_indices_triton,
     fused_trtllm_verify_metadata,
     get_num_mha_kv_index_blocks,
@@ -218,10 +219,19 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
         seq_lens: torch.Tensor,
         seq_len_offset: int,
     ):
-        """Fused: compute cache_seqlens + cumsum + page table in one kernel launch."""
+        """Fused: compute cache_seqlens + page table + cumsum in two kernel launches.
+
+        1. fused_trtllm_verify_metadata: cache_seqlens + page table (grid=(bs, blocks))
+        2. _cumsum_kernel: vectorized cumsum in a single program (grid=(1, bs))
+
+        The cumsum kernel is split out to avoid the O(BS_UPPER) unrolled loop that
+        caused compilation bloat and throughput regression. The single-program
+        vectorized tl.cumsum is both faster and compiles to much smaller PTX.
+        """
         page_table = metadata.page_table
         bs = page_table.shape[0]
         has_swa = self._swa_kv_pool is not None
+        # Kernel 1: cache_seqlens + page table (parallel over requests & page blocks)
         fused_trtllm_verify_metadata[
             (bs, get_num_mha_kv_index_blocks(page_table.shape[1], self.page_size))
         ](
@@ -238,6 +248,14 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
             PAGE_SIZE=self.page_size,
             HAS_SWA=has_swa,
             seq_len_offset=seq_len_offset,
+            BS_UPPER=self._fused_bs_upper,
+        )
+        # Kernel 2: vectorized cumsum in a single program (no unrolled loop)
+        # Grid axis-1 encodes bs so the kernel knows how many elements are valid.
+        _cumsum_kernel[(1, bs)](
+            seq_lens,
+            metadata.cu_seqlens_k,
+            seq_len_offset,
             BS_UPPER=self._fused_bs_upper,
         )
 
