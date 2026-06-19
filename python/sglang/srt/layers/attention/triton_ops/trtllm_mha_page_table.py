@@ -46,8 +46,8 @@ def fused_trtllm_verify_metadata(
     page_table_stride: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     HAS_SWA: tl.constexpr,
-    seq_len_offset: tl.constexpr,  # max_seq_len_q for verify, 0 for decode
-    BS_UPPER: tl.constexpr,  # next_power_of_2(bs), for cumsum
+    seq_len_offset,  # max_seq_len_q for verify, 0 for decode (runtime, NOT constexpr)
+    BS_UPPER: tl.constexpr,  # fixed to next_power_of_2(max_cuda_graph_bs)
 ):
     """Fused kernel: compute cache_seqlens, cumsum, and page table in one launch.
 

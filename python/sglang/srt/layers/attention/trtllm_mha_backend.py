@@ -148,6 +148,12 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
             self.max_context_len + self.page_size - 1
         ) // self.page_size
 
+        # Fixed BS_UPPER for fused metadata kernel (avoids recompilation per bs)
+        max_cg_bs = model_runner.server_args.cuda_graph_max_bs or 512
+        self._fused_bs_upper = 1
+        while self._fused_bs_upper < max_cg_bs:
+            self._fused_bs_upper *= 2
+
         # Forward metadata
         self.forward_metadata: Optional[TRTLLMMHAMetadata] = None
 
@@ -216,10 +222,6 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
         page_table = metadata.page_table
         bs = page_table.shape[0]
         has_swa = self._swa_kv_pool is not None
-        # BS_UPPER must be a power of 2 for tl.constexpr loop bound
-        bs_upper = 1
-        while bs_upper < bs:
-            bs_upper *= 2
         fused_trtllm_verify_metadata[
             (bs, get_num_mha_kv_index_blocks(page_table.shape[1], self.page_size))
         ](
@@ -236,7 +238,7 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
             PAGE_SIZE=self.page_size,
             HAS_SWA=has_swa,
             seq_len_offset=seq_len_offset,
-            BS_UPPER=bs_upper,
+            BS_UPPER=self._fused_bs_upper,
         )
 
     def _fill_page_table_device(
