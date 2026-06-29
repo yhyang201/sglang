@@ -257,10 +257,52 @@ class GptOssSparseMoeBlock(nn.Module):
         forward_batch: Optional[ForwardBatch] = None,
         should_allreduce_fusion: bool = False,
     ) -> torch.Tensor:
+        # DWDP: weight prefetch path
+        if get_global_server_args().dwdp_size > 1:
+            return self.forward_dwdp(hidden_states)
+
         if not get_moe_a2a_backend().is_deepep():
             return self.forward_normal(hidden_states, should_allreduce_fusion)
         else:
             raise Exception("forward_deepep branch not implemented yet")
+
+    def forward_dwdp(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """DWDP forward: all tokens stay on-rank, use VA-mapped weights."""
+        from sglang.srt.layers.moe.dwdp import get_global_dwdp_manager
+
+        dwdp_manager = get_global_dwdp_manager()
+
+        # Wait for prefetch
+        dwdp_manager.wait_prefetch(self.layer_id)
+
+        num_tokens = hidden_states.shape[0]
+        hidden_dim_unpadded = self.hidden_size
+        is_prepadded = hidden_states.shape[-1] != hidden_dim_unpadded
+
+        if num_tokens > 0:
+            router_input = (
+                hidden_states[..., :hidden_dim_unpadded]
+                if is_prepadded
+                else hidden_states
+            )
+            router_logits, _ = self.router(router_input)
+            topk_output = self.topk(router_input, router_logits)
+            final_hidden_states = self.experts(hidden_states, topk_output)
+        else:
+            final_hidden_states = hidden_states
+
+        # Signal compute done + trigger next prefetch
+        dwdp_manager.record_compute_and_prefetch_next(self.layer_id)
+
+        if is_prepadded:
+            ans = final_hidden_states[..., :hidden_dim_unpadded].contiguous()
+            ans = ans.view(num_tokens, hidden_dim_unpadded)
+        else:
+            ans = final_hidden_states.view(num_tokens, hidden_dim_unpadded)
+        return ans
 
     def get_moe_weights(self):
         return [
