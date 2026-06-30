@@ -491,6 +491,10 @@ class ModelRunner:
             moe_ep_size=self.ps.moe_ep_size,
             moe_ep_rank=self.ps.moe_ep_rank,
         )
+
+        if self.server_args.dwdp_size > 1:
+            self._setup_dwdp()
+
         # Must run before backend/graph init so no draft graph records a
         # routed-experts capture-write kernel.
         if self.is_draft_worker:
@@ -922,6 +926,18 @@ class ModelRunner:
             tp_rank=self.ps.tp_rank,
         )
 
+    def _setup_dwdp(self):
+        """Set up DWDP after weight loading."""
+        from sglang.srt.layers.moe.dwdp import (
+            DwdpManager,
+            set_global_dwdp_manager,
+        )
+
+        manager = DwdpManager(self.server_args)
+        set_global_dwdp_manager(manager)
+        manager.setup(self.model)
+        logger.info("[ModelRunner] DWDP setup complete.")
+
     def init_lora_manager(self):
         self.lora_manager = LoRAManager(
             base_model=self.model,
@@ -1332,6 +1348,17 @@ class ModelRunner:
             # Deferred mamba COW/clear on the forward stream, before the extend
             # dispatch below reads the pool.
             self._maybe_execute_deferred_mamba_cow_and_clear(forward_batch)
+
+            # DWDP: trigger first-layer weight prefetch for extend batches
+            if (
+                self.server_args.dwdp_size > 1
+                and forward_batch.forward_mode.is_extend()
+            ):
+                from sglang.srt.layers.moe.dwdp import get_global_dwdp_manager
+
+                dwdp_mgr = get_global_dwdp_manager()
+                if dwdp_mgr is not None:
+                    dwdp_mgr.prefetch_first_layers()
 
             if forward_batch.forward_mode.is_split_prefill():
                 # Layer-split mode; stays on ModelRunner, not the eager runner.
