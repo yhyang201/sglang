@@ -101,18 +101,11 @@ class _DpGatheredBufferWrapper:
     slots value-guard into the recompile limit (one recompile per distinct
     size)."""
 
-    # Real defaults (not bare annotations): the sizing quartet is overwritten
-    # per-forward by set_dp_buffer_len, but callers that run before the first
-    # forward — notably the load-time mhc_pre prewarm, which has no ForwardBatch
-    # yet — read _dp_max_padding via is_allocation_symmetric(). A bare
-    # annotation creates no class attribute, so those reads raised
-    # AttributeError. Defaulting _dp_max_padding to False (non-symmetric) is
-    # safe for prewarm: it only JIT-compiles kernels and never enters a real
-    # all-reduce, so the symmetric pool is not needed there.
     _global_dp_buffer_len: int = 0
     _local_dp_buffer_len: int = 0
     _dp_max_padding: bool = False
     _global_num_tokens: Optional[List[int]] = None
+    _is_extend_in_batch: bool = False
 
     @classmethod
     def set_metadata(cls, hidden_size: int, dtype: torch.dtype, device: torch.device):
