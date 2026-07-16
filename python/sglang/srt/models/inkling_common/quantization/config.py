@@ -42,11 +42,25 @@ def _get_raw_quant_config(
     model_name_or_path = model_config.model_path
 
     quant_config_file = os.path.join(model_name_or_path, "hf_quant_config.json")
-    if not os.path.exists(quant_config_file):
-        return None
-    with open(quant_config_file) as f:
-        config = json.load(f)
-        return config
+    if os.path.exists(quant_config_file):
+        with open(quant_config_file) as f:
+            return json.load(f)
+
+    if not os.path.isdir(model_name_or_path):
+        try:
+            from huggingface_hub import hf_hub_download
+
+            quant_config_file = hf_hub_download(
+                repo_id=model_name_or_path,
+                filename="hf_quant_config.json",
+                revision=model_config.revision,
+            )
+            with open(quant_config_file) as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    return None
 
 
 def _map_exclude_modules(exclude_modules: list[str]) -> list[str]:
