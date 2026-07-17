@@ -27,6 +27,7 @@ from sglang.srt.layers.moe.topk import StandardTopKOutput, TopKOutput, TopKOutpu
 from sglang.srt.layers.moe.utils import (
     get_moe_a2a_backend,
     get_moe_runner_backend,
+    should_use_dp_reduce_scatterv,
     should_use_flashinfer_cutlass_moe_fp4_allgather,
 )
 from sglang.srt.runtime_context import get_parallel
@@ -166,6 +167,18 @@ class StandardDispatcher(BaseDispatcher):
                 topk_ids=topk_ids,
                 router_logits=topk_output.router_logits,  # never tested
             )
+        elif should_use_dp_reduce_scatterv():
+            topk_weights, topk_ids = topk_output.topk_weights, topk_output.topk_ids
+            topk_weights, topk_ids, hidden_states = get_tp_group().all_gatherv(
+                [topk_weights, topk_ids, hidden_states],
+                sizes=get_dp_global_num_tokens(),
+            )
+            topk_output = StandardTopKOutput(
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                router_logits=topk_output.router_logits,
+            )
+            hidden_states_scale = None
         else:
             hidden_states = hidden_states
             hidden_states_scale = None
@@ -226,6 +239,16 @@ class StandardDispatcher(BaseDispatcher):
     def combine(self, combine_input: StandardCombineInput) -> torch.Tensor:
         (hidden_states,) = combine_input
         if should_use_flashinfer_cutlass_moe_fp4_allgather():
+            hidden_states, global_hidden_states = (
+                get_local_dp_buffer(get_tp_group()),
+                hidden_states,
+            )
+            get_tp_group().reduce_scatterv(
+                global_hidden_states,
+                output=hidden_states,
+                sizes=get_dp_global_num_tokens(),
+            )
+        elif should_use_dp_reduce_scatterv():
             hidden_states, global_hidden_states = (
                 get_local_dp_buffer(get_tp_group()),
                 hidden_states,
