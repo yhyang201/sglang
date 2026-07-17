@@ -510,9 +510,10 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
         if self.ragged_verify_mode and forward_batch.forward_mode.is_target_verify():
             return False
 
-        if self.require_mlp_tp_gather:
-            # Raw sync values are per-rank request counts on decode-family
-            # rounds -- no width division, no per-algorithm enumeration.
+        if (
+            self.require_mlp_tp_gather
+            and forward_batch.original_global_num_tokens_cpu is not None
+        ):
             cuda_graph_bs = max(forward_batch.original_global_num_tokens_cpu)
         else:
             cuda_graph_bs = forward_batch.batch_size
