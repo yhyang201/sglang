@@ -438,7 +438,7 @@ def enable_moe_dense_fully_dp():
 
 
 def enable_dwdp():
-    return get_global_server_args().dwdp_size > 1
+    return get_server_args().dwdp_size > 1
 
 
 class LayerCommunicator:

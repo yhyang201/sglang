@@ -4505,7 +4505,7 @@ class ServerArgs:
                 )
                 if (
                     expected_attn_tp_size is not None
-                    and effective_attn_tp_size != expected_attn_tp_size
+                    and expected_attn_tp_size % effective_attn_tp_size != 0
                 ):
                     raise ValueError(
                         "MiMoV2ForCausalLM requires effective attention TP "
