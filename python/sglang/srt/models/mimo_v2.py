@@ -147,11 +147,49 @@ def load_mimo_v2_qkv_proj_weight(
         default_weight_loader(param, merged)
 
 
+def _get_ckpt_qkv_shard_sizes(config, layer_name, ckpt_tp):
+    import re
+
+    m = re.search(r"layers\.(\d+)\.", layer_name)
+    if m is None:
+        return None
+    layer_id = int(m.group(1))
+
+    pattern = getattr(config, "hybrid_layer_pattern", None)
+    is_swa = pattern is not None and pattern[layer_id] == 1
+
+    if is_swa:
+        nh = config.swa_num_attention_heads
+        nkv = config.swa_num_key_value_heads
+        hd = config.swa_head_dim
+        vhd = getattr(config, "swa_v_head_dim", hd)
+    else:
+        nh = config.num_attention_heads
+        nkv = config.num_key_value_heads
+        hd = config.head_dim
+        vhd = getattr(config, "v_head_dim", hd)
+
+    q_per_shard = (nh // ckpt_tp) * hd
+    k_per_shard = max(1, nkv // ckpt_tp) * hd
+    v_per_shard = max(1, nkv // ckpt_tp) * vhd
+    return (q_per_shard, k_per_shard, v_per_shard)
+
+
+def _deinterleave_qkv_shards(shards, q_per_shard, k_per_shard, v_per_shard):
+    all_q, all_k, all_v = [], [], []
+    for s in shards:
+        all_q.append(s[:q_per_shard])
+        all_k.append(s[q_per_shard : q_per_shard + k_per_shard])
+        all_v.append(s[q_per_shard + k_per_shard :])
+    return torch.cat(all_q + all_k + all_v, dim=0)
+
+
 def _resolve_deferred_qkv_scale_inv(
     params_dict: Dict[str, torch.nn.Parameter],
     deferred_scale_inv: Dict[str, torch.Tensor],
     expected_fused_tp_size: int,
     block_size: int = 128,
+    config=None,
 ):
     import math
 
@@ -198,7 +236,15 @@ def _resolve_deferred_qkv_scale_inv(
                 (shard_weight.to(torch.float32) * scale_expanded).to(torch.bfloat16)
             )
 
-        merged_bf16 = torch.cat(dequant_shards, dim=0)
+        qkv_sizes = (
+            _get_ckpt_qkv_shard_sizes(config, scale_name, ckpt_tp)
+            if config is not None
+            else None
+        )
+        if qkv_sizes is not None and shards_per_rank > 1:
+            merged_bf16 = _deinterleave_qkv_shards(dequant_shards, *qkv_sizes)
+        else:
+            merged_bf16 = torch.cat(dequant_shards, dim=0)
 
         n, k = merged_bf16.shape
         from sglang.srt.utils import ceil_align
@@ -235,6 +281,7 @@ def _resolve_deferred_qkv_scale_inv(
             f"Resolved deferred qkv scale_inv {scale_name}: "
             f"dequant {shards_per_rank} shards -> requant "
             f"({n_scale}, {k_scale})"
+            + (f", de-interleaved QKV {qkv_sizes}" if qkv_sizes else "")
         )
 
 
@@ -1577,6 +1624,7 @@ class MiMoV2ForCausalLM(nn.Module, AudioEncoderMixin):
                 params_dict,
                 deferred_qkv_scale_inv,
                 expected_fused_tp_size,
+                config=self.config,
             )
 
     def get_embed_and_head(self):
