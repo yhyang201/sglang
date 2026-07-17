@@ -5354,15 +5354,12 @@ class ServerArgs:
         self.moe_dp_size = 1
         self.moe_a2a_backend = "none"
 
-        # Skip scheduler allgather across DP ranks (each rank runs independently)
-        envs.SGLANG_SCHEDULER_SKIP_ALL_GATHER.set(True)
-
         logger.info(
             f"DWDP enabled: dwdp_size={self.dwdp_size}, "
             f"auto-forced dp_size={self.dp_size}, moe_ep_size={self.moe_ep_size}, "
             f"moe_dense_tp_size=1, moe_a2a_backend=none, "
             f"dp_attention_local_control_broadcast=True, "
-            f"enable_dp_lm_head=True, SCHEDULER_SKIP_ALL_GATHER=True"
+            f"enable_dp_lm_head=True"
         )
 
     def _handle_data_parallelism(self):
