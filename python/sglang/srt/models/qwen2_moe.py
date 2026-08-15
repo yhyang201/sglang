@@ -239,9 +239,7 @@ class Qwen2MoeMLP(nn.Module):
         # rounding ties for M in 64..8192).
         y_fp4 = y_fp4.squeeze(-1).view(torch.uint8)
         m_padded = y_sf.shape[2] * y_sf.shape[0] * y_sf.shape[3]  # m_blocks*32*4
-        y_sf = (
-            y_sf.view(torch.uint8).permute(2, 4, 0, 1, 3, 5).reshape(m_padded, -1)
-        )
+        y_sf = y_sf.view(torch.uint8).permute(2, 4, 0, 1, 3, 5).reshape(m_padded, -1)
         return y_fp4, y_sf
 
     def forward(
