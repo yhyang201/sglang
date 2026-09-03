@@ -1267,6 +1267,10 @@ class Envs:
     # For pre-tokenized (list[int]) multimodal prompts,
     # preserve the user's original tokens to avoid retokenization drift.
     SGLANG_MM_AVOID_RETOKENIZE = EnvBool(True)
+    # Replace MiniMax M3's HF image processor with the Rust sglang-mm pipeline
+    # (decode → smart_resize → antialias bicubic → normalize → patchify).
+    # Bit-exact against the torchvision path; opt-in.
+    SGLANG_MINIMAX_M3_RS_MM_PREPROCESS = EnvBool(False)
 
     # ===================================================================
     # Multimodal CUDA IPC transport

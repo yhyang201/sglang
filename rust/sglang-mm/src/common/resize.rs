@@ -188,26 +188,90 @@ fn resample_horizontal(src: &[u8], h: usize, w: usize, out_w: usize, c: &Coeffs)
     out
 }
 
+/// One output row of the vertical pass. Shared by [`resample_vertical`] and
+/// [`RowProducer::row`] so the fused pipeline cannot drift from the unfused
+/// one: same fixed-point weights, accumulation order, and rounding.
+#[inline]
+fn vertical_row(src: &[u8], w: usize, yy: usize, c: &Coeffs, row: &mut [u8]) {
+    let (ymin, count) = c.bounds[yy];
+    let k = &c.kk[yy * c.ksize..yy * c.ksize + count];
+    for x in 0..w {
+        let mut s = [1i32 << (c.prec - 1); 3];
+        for (y, &coef) in k.iter().enumerate() {
+            let p = ((ymin + y) * w + x) * 3;
+            s[0] += src[p] as i32 * coef;
+            s[1] += src[p + 1] as i32 * coef;
+            s[2] += src[p + 2] as i32 * coef;
+        }
+        let o = x * 3;
+        row[o] = clip8(s[0], c.prec);
+        row[o + 1] = clip8(s[1], c.prec);
+        row[o + 2] = clip8(s[2], c.prec);
+    }
+}
+
 fn resample_vertical(src: &[u8], w: usize, out_h: usize, c: &Coeffs) -> Vec<u8> {
     let mut out = vec![0u8; out_h * w * 3];
-    par::for_chunks_mut(&mut out, w * 3, |yy, row| {
-        let (ymin, count) = c.bounds[yy];
-        let k = &c.kk[yy * c.ksize..yy * c.ksize + count];
-        for x in 0..w {
-            let mut s = [1i32 << (c.prec - 1); 3];
-            for (y, &coef) in k.iter().enumerate() {
-                let p = ((ymin + y) * w + x) * 3;
-                s[0] += src[p] as i32 * coef;
-                s[1] += src[p + 1] as i32 * coef;
-                s[2] += src[p + 2] as i32 * coef;
-            }
-            let o = x * 3;
-            row[o] = clip8(s[0], c.prec);
-            row[o + 1] = clip8(s[1], c.prec);
-            row[o + 2] = clip8(s[2], c.prec);
-        }
-    });
+    par::for_chunks_mut(&mut out, w * 3, |yy, row| vertical_row(src, w, yy, c, row));
     out
+}
+
+/// A separable resize with the horizontal pass already applied, exposing the
+/// vertical pass row-by-row so a consumer can fuse it with downstream
+/// per-pixel work (normalize + patch scatter) without materializing the
+/// resized u8 image.
+///
+/// [`RowProducer::row`] emits exactly the bytes [`resize_rgb`] would produce
+/// for that output row — both go through [`vertical_row`] — so anything fused
+/// behind it stays bit-exact against the unfused pipeline.
+pub struct RowProducer<'a> {
+    /// Vertical-pass input rows: the horizontal-pass output when the width
+    /// changes, otherwise the source itself (zero-copy).
+    rows: std::borrow::Cow<'a, [u8]>,
+    /// Width of `rows` in pixels (`out_w` once the horizontal pass ran).
+    vertical_w: usize,
+    /// Vertical coefficients; `None` when the height is unchanged.
+    ycoeffs: Option<Coeffs>,
+}
+
+impl<'a> RowProducer<'a> {
+    /// Plan `src` (h×w) → (out_h×out_w) and run the horizontal pass. Enters
+    /// the fan-out pool for that pass; callers fusing a parallel stage behind
+    /// should wrap the whole sequence in [`par::in_pool`], as [`resize_rgb`]
+    /// does for its two passes.
+    pub fn new(
+        src: &'a [u8],
+        h: usize,
+        w: usize,
+        out_h: usize,
+        out_w: usize,
+        resample: Resample,
+    ) -> Self {
+        let (rows, vertical_w) = if out_w != w {
+            let tmp = resample_horizontal(src, h, w, out_w, &precompute_coeffs(w, out_w, resample));
+            (std::borrow::Cow::Owned(tmp), out_w)
+        } else {
+            (std::borrow::Cow::Borrowed(src), w)
+        };
+        let ycoeffs = (out_h != h).then(|| precompute_coeffs(h, out_h, resample));
+        Self {
+            rows,
+            vertical_w,
+            ycoeffs,
+        }
+    }
+
+    /// Write output row `yy` (`out_w * 3` bytes) into `out`.
+    #[inline]
+    pub fn row(&self, yy: usize, out: &mut [u8]) {
+        match &self.ycoeffs {
+            Some(c) => vertical_row(&self.rows, self.vertical_w, yy, c, out),
+            None => {
+                let s = yy * self.vertical_w * 3;
+                out.copy_from_slice(&self.rows[s..s + self.vertical_w * 3]);
+            }
+        }
+    }
 }
 
 /// Separable resize of a flat HWC RGB buffer, bit-exact against `resample`.
@@ -269,4 +333,61 @@ pub fn scaled_dims(w: usize, h: usize, frac: Option<f64>, cap: Option<i64>) -> (
     }
     let scale = |v: usize| ((v as f64 * ratio + 0.5).floor() as i64).max(1) as usize;
     (scale(w), scale(h))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Deterministic xorshift so failures reproduce.
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// `RowProducer` rows must be byte-identical to the corresponding rows of
+    /// `resize_rgb`'s output — that identity is what makes fusing downstream
+    /// work behind it bit-exact.
+    #[test]
+    fn row_producer_matches_resize_rgb_rows() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let resamples = [
+            Resample::Pil(Filter::Lanczos),
+            Resample::Pil(Filter::Bicubic),
+            Resample::AtenU8,
+        ];
+        // both-axes, h-only, w-only, neither, upscale, 1-pixel source.
+        let cases = [
+            (37usize, 53usize, 8usize, 12usize),
+            (53, 37, 8, 8),
+            (8, 12, 16, 12),
+            (8, 12, 8, 24),
+            (8, 12, 8, 12),
+            (8, 12, 16, 24),
+            (1, 1, 4, 4),
+            (100, 173, 24, 40),
+            (5, 500, 3, 124),
+        ];
+        for resample in resamples {
+            for (h, w, th, tw) in cases {
+                let rgb: Vec<u8> = (0..h * w * 3)
+                    .map(|_| (xorshift(&mut state) % 256) as u8)
+                    .collect();
+                let expect = resize_rgb(&rgb, h, w, th, tw, resample);
+                let producer = RowProducer::new(&rgb, h, w, th, tw, resample);
+                let mut row = vec![0u8; tw * 3];
+                for yy in 0..th {
+                    row.fill(0);
+                    producer.row(yy, &mut row);
+                    assert_eq!(
+                        row,
+                        expect[yy * tw * 3..(yy + 1) * tw * 3],
+                        "row {yy} of {h}x{w}->{th}x{tw} under {resample:?}"
+                    );
+                }
+            }
+        }
+    }
 }

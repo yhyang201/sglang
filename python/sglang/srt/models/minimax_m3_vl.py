@@ -46,6 +46,7 @@ from sglang.srt.models.minimax_vl_common import (
     merge_vit_qkv_weights,
 )
 from sglang.srt.models.utils import WeightsMapper
+from sglang.srt.multimodal.encoder_preprocessing import EncoderMediaProcessorConfig
 from sglang.srt.runtime_context import get_mm, get_parallel
 from sglang.srt.utils import add_prefix, get_device_sm, is_cuda, log_info_on_rank0
 from sglang.srt.utils.hf_transformers_utils import get_rope_config
@@ -66,6 +67,13 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module):
         "index_qkv_proj": ["index_q_proj", "index_k_proj", "index_v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
+
+    # EPD encoder mode: with SGLANG_ENCODER_IMAGE_PROCESSOR_USE_GPU on, decode
+    # JPEGs with the high-fidelity nvJPEG path (PIL fallback) and run the HF
+    # fast image processor on the encoder GPU.
+    encoder_media_processor_config = EncoderMediaProcessorConfig(
+        image_decode_mode="nvjpeg_fancy",
+    )
 
     def __init__(
         self,

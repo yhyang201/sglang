@@ -3,6 +3,8 @@ pub mod par;
 pub mod resize;
 pub mod token_layout;
 pub mod transforms;
+#[cfg(feature = "turbo-jpeg")]
+pub mod turbo;
 
 #[cfg(feature = "parallel")]
 use std::sync::OnceLock;
@@ -150,6 +152,37 @@ mod python {
         py.detach(move || super::content_hash_u64(&data))
     }
 
+    /// Full-resolution libjpeg-turbo decode — the tolerance-mode backend;
+    /// exposed for decode-parity measurement against `image_decode_rgb` (and
+    /// PIL, driven from Python).
+    #[cfg(feature = "turbo-jpeg")]
+    #[pyfunction]
+    fn turbo_decode_rgb<'py>(
+        py: Python<'py>,
+        data: Vec<u8>,
+    ) -> PyResult<(usize, usize, Bound<'py, PyArray1<u8>>)> {
+        let (rgb, h, w) = py
+            .detach(move || super::turbo::decode_rgb(&data))
+            .map_err(PyValueError::new_err)?;
+        Ok((h, w, rgb.into_pyarray(py)))
+    }
+
+    /// Scaled-iDCT libjpeg-turbo decode covering `(min_h, min_w)`; returns
+    /// the *scaled* dims (≥ the requested minimums).
+    #[cfg(feature = "turbo-jpeg")]
+    #[pyfunction]
+    fn turbo_decode_rgb_scaled<'py>(
+        py: Python<'py>,
+        data: Vec<u8>,
+        min_h: usize,
+        min_w: usize,
+    ) -> PyResult<(usize, usize, Bound<'py, PyArray1<u8>>)> {
+        let (rgb, h, w) = py
+            .detach(move || super::turbo::decode_rgb_scaled(&data, min_h, min_w))
+            .map_err(PyValueError::new_err)?;
+        Ok((h, w, rgb.into_pyarray(py)))
+    }
+
     #[pyfunction]
     pub fn fetch_bytes<'py>(py: Python<'py>, source: String) -> PyResult<Bound<'py, PyBytes>> {
         let data = py
@@ -182,6 +215,11 @@ mod python {
         m.add_function(wrap_pyfunction!(content_hash, &m)?)?;
         m.add_function(wrap_pyfunction!(fetch_bytes, &m)?)?;
         m.add_function(wrap_pyfunction!(base64_decode, &m)?)?;
+        #[cfg(feature = "turbo-jpeg")]
+        {
+            m.add_function(wrap_pyfunction!(turbo_decode_rgb, &m)?)?;
+            m.add_function(wrap_pyfunction!(turbo_decode_rgb_scaled, &m)?)?;
+        }
         parent.add_submodule(&m)?;
         Ok(())
     }

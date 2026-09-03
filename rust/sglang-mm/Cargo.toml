@@ -41,6 +41,12 @@ python = ["dep:pyo3", "dep:numpy"]
 # budget, so preprocessing runs inline on the calling thread and rayon is not
 # linked at all. Orthogonal to `python` so both shapes stay testable.
 parallel = ["dep:rayon"]
+# libjpeg-turbo decode backend (`common::turbo`): scaled-iDCT JPEG decode via
+# the system libjpeg-turbo. Off by default — it adds a native dependency
+# (build needs the lib discoverable, e.g. PKG_CONFIG_PATH pointing at a brew
+# jpeg-turbo on macOS) and its output is not bit-identical to the pure-Rust
+# `image` decoder, so parity-critical paths keep the default backend.
+turbo-jpeg = ["dep:turbojpeg", "dep:turbojpeg-sys"]
 
 [dependencies]
 pyo3 = { workspace = true, optional = true }
@@ -58,6 +64,11 @@ image = { version = "0.25", default-features = false, features = [
     "bmp",
 ] }
 rayon = { version = "1.10", optional = true }
+# `pkg-config` locates the system libjpeg-turbo (brew keg-only on macOS: set
+# PKG_CONFIG_PATH=/opt/homebrew/opt/jpeg-turbo/lib/pkgconfig). turbojpeg-sys is
+# the raw FFI used for tj3SetCroppingRegion (RST-strip parallel decode).
+turbojpeg = { version = "1.4", features = ["pkg-config"], optional = true }
+turbojpeg-sys = { version = "1.2", features = ["pkg-config"], optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # Native media fetch (stage 1 of the server MM pipeline); rustls so the

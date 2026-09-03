@@ -75,6 +75,7 @@ pub fn default_registry() -> ProcessorRegistry {
 #[serde(tag = "family", rename_all = "snake_case")]
 pub enum PipelineSpec {
     QwenVl(crate::qwen_vl::QwenVlSpec),
+    MiniMaxM3(crate::minimax_m3::MiniMaxM3Spec),
 }
 
 /// Build a family processor from a typed spec. `Err` when the family
@@ -84,6 +85,9 @@ pub fn build_pipeline(
 ) -> Result<Box<dyn crate::pipeline::MmFamilyProcessor>, String> {
     match spec {
         PipelineSpec::QwenVl(spec) => Ok(Box::new(crate::qwen_vl::QwenVlProcessor::new(spec)?)),
+        PipelineSpec::MiniMaxM3(spec) => {
+            Ok(Box::new(crate::minimax_m3::MiniMaxM3Processor::new(spec)?))
+        }
     }
 }
 

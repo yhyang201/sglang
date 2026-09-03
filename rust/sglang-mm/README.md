@@ -101,8 +101,10 @@ feature/aux tensors to model kwargs. The carriers grow by need, not
 speculation: `DecodedMedia` gains a variant per modality (video/audio),
 `Geometry` per family style (tile sets), `TensorData` per dtype.
 
-Supported families: `qwen_vl` (Qwen2-VL / 2.5-VL / 3-VL / 3.5; images only).
-Adding one = a `MmFamilyProcessor` impl in `src/<model>/mod.rs` plus a
+Supported families: `qwen_vl` (Qwen2-VL / 2.5-VL / 3-VL / 3.5; images only)
+and `minimax_m3` (MiniMax-M3; images only — smart_resize + torchvision uint8
+antialias bicubic + fused normalize, wrapped start/end token layout, 1-D
+RoPE). Adding one = a `MmFamilyProcessor` impl in `src/<model>/mod.rs` plus a
 `family` arm in `pipeline_from_spec`.
 
 `common::fetch` matches the Python `get_image_bytes` semantics
@@ -130,6 +132,9 @@ inkling.preprocess_images(list[bytes], ps, frac, cap)  # -> [(h, w, bits, hash),
 inkling.decode_patchify(bytes, ps, frac, cap)
 inkling.decode_patchify_batch(list[bytes], ps, frac, cap)
 inkling.patchify_rgb(arr, patch_size)
+minimax_m3.preprocess(bytes, spec_json)          # -> (pixel_values, (t, h, w))
+minimax_m3.preprocess_arrays(list[hwc_u8], spec_json)
+minimax_m3.smart_resize_py(h, w, factor, min_px, max_px)
 ```
 
 ## Adding a new model
@@ -208,6 +213,21 @@ impl ImageProcessorSpec for MyModelProcessor {
   implementations.
 - `common::content_hash_u64` is blake3, *not* Python's SHA-256
   `mm_utils.data_hash`. Hashes are consistent within one path only.
+- Qwen-VL post-decode is a fused single pass: `resize::RowProducer` produces
+  resized u8 rows with the exact two-pass fixed-point math, and
+  `qwen_vl::patchify_fused` scatters each row through the normalize LUT
+  straight into the patch layout, never materializing the resized u8 image.
+  Bitwise identical to the unfused `resize_rgb` + `patchify` chain
+  (`qwen_vl::tests::fused_matches_unfused_bitwise`); `SGL_MM_RS_FUSED=0`
+  forces the unfused chain for A/B debugging.
+- Optional `turbo-jpeg` feature (off by default): `common::turbo` decodes
+  JPEG via libjpeg-turbo (vendored 3.1.0 built by `turbojpeg-sys`; needs
+  `nasm`+`cmake` on x86_64, or a system libjpeg-turbo ≥ 3.x via
+  `TURBOJPEG_SOURCE=pkg-config`). Full-resolution output is bit-exact vs PIL
+  (same libjpeg); `decode_rgb_scaled` picks the smallest M/8 iDCT fraction
+  covering a target size — faster, but tolerance-mode (it changes the resize
+  input). Non-JPEG input falls back to the pure-Rust decoder. Measured in
+  `bench/bench_spike.py` (4-way A/B + parity; see that script's header).
 
 ## Build
 

@@ -62,6 +62,16 @@ pub enum TokenPattern {
     /// An explicit id sequence — tile markers, row separators, wrapper
     /// tokens (minicpm/internvl-style structured expansions).
     Explicit(Vec<i32>),
+    /// `[start_id, id × n, end_id]` (MiniMax-style wrapped span). Unlike
+    /// `Explicit`, the item's offsets cover only the inner run — the Python
+    /// `get_mm_items_offset` convention, where the wrapper tokens are
+    /// separate special tokens outside the item span.
+    Wrapped {
+        start_id: i32,
+        end_id: i32,
+        id: i32,
+        n: usize,
+    },
 }
 
 /// One span of the expanded prompt.

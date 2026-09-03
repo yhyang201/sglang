@@ -7,13 +7,24 @@
 //! copies duplicated for stills) — plus the image-only M-RoPE fast path.
 //! All parameters come from the runtime spec; nothing is hardcoded per model.
 
-use crate::common::{par, resize, token_layout};
+use crate::common::{par, resize, token_layout, transforms};
 use crate::pipeline::{
     DecodedMedia, Geometry, MmFamilyProcessor, PositionOutput, ProcessedItem, Tensor, TensorData,
     TokenLayout,
 };
 
-const MAX_RATIO: f64 = 200.0;
+// The dynamic-resize geometry is shared with the other VL families
+// (`common::transforms`); re-exported so existing users keep resolving it here.
+pub use crate::common::transforms::smart_resize;
+
+/// The fused resize+normalize+patchify path is bitwise identical to the
+/// unfused chain (see [`QwenVlProcessor::patchify_fused`]), so it is the
+/// default. `SGL_MM_RS_FUSED=0` forces the unfused chain, kept for A/B
+/// benches and debugging.
+fn fused_enabled() -> bool {
+    static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ONCE.get_or_init(|| !matches!(std::env::var("SGL_MM_RS_FUSED"), Ok(v) if v == "0"))
+}
 
 /// One media item's placement for M-RoPE: inclusive token range + patch grid.
 pub struct MropeItem {
@@ -105,42 +116,69 @@ impl QwenVlProcessor {
     /// HF flatten: patches ordered `(gh/m, gw/m, m, m)`, features `(C, tps,
     /// ps, ps)`; parallel over merged-block rows.
     fn patchify(&self, rgb: &[u8], h: usize, w: usize) -> Vec<f32> {
+        transforms::patchify_merged_blocks(
+            rgb,
+            h,
+            w,
+            self.spec.patch_size,
+            self.spec.merge_size,
+            self.spec.temporal_patch_size,
+            &self.lut,
+        )
+    }
+
+    /// Fused resize + normalize + patchify: a [`resize::RowProducer`] yields
+    /// the resized u8 rows one at a time and each is scattered straight into
+    /// the patch layout through the LUT — the full resized u8 image is never
+    /// materialized. Bitwise identical to `resize::resize_rgb` followed by
+    /// [`Self::patchify`] (the row producer shares its fixed-point math with
+    /// the two-pass resize; test `fused_matches_unfused_bitwise`).
+    fn patchify_fused(&self, rgb: &[u8], h: usize, w: usize, th: usize, tw: usize) -> Vec<f32> {
         let (ps, m, tps) = (
             self.spec.patch_size,
             self.spec.merge_size,
             self.spec.temporal_patch_size,
         );
-        let (gh, gw) = (h / ps, w / ps);
+        let (gh, gw) = (th / ps, tw / ps);
         let dim = 3 * tps * ps * ps;
         let block_row = gw * m * dim; // one merged-block row of patches
         let mut out = vec![0.0f32; gh * gw * dim];
 
-        par::for_chunks_mut(&mut out, block_row, |i, chunk| {
-            let mut p = 0;
-            for j in 0..gw / m {
+        par::in_pool(|| {
+            let producer = resize::RowProducer::new(rgb, h, w, th, tw, self.spec.resample.into());
+            par::for_chunks_mut(&mut out, block_row, |i, chunk| {
+                let mut rowbuf = vec![0u8; tw * 3];
                 for mh in 0..m {
-                    for mw in 0..m {
-                        let y0 = (i * m + mh) * ps;
-                        let x0 = (j * m + mw) * ps;
-                        let patch = &mut chunk[p * dim..(p + 1) * dim];
-                        for c in 0..3 {
-                            let ch = &mut patch[c * tps * ps * ps..];
-                            for py in 0..ps {
-                                let src = ((y0 + py) * w + x0) * 3 + c;
-                                for px in 0..ps {
-                                    ch[py * ps + px] = self.lut[c][rgb[src + px * 3] as usize];
+                    for py in 0..ps {
+                        let yy = (i * m + mh) * ps + py;
+                        producer.row(yy, &mut rowbuf);
+                        for j in 0..gw / m {
+                            for mw in 0..m {
+                                let x0 = (j * m + mw) * ps;
+                                let p = j * m * m + mh * m + mw;
+                                let patch = &mut chunk[p * dim..(p + 1) * dim];
+                                for c in 0..3 {
+                                    let lut = &self.lut[c];
+                                    let (t0, rest) = patch
+                                        [c * tps * ps * ps..(c + 1) * tps * ps * ps]
+                                        .split_at_mut(ps * ps);
+                                    let src = x0 * 3 + c;
+                                    for px in 0..ps {
+                                        let v = lut[rowbuf[src + px * 3] as usize];
+                                        t0[py * ps + px] = v;
+                                        // Temporal copies of a still are
+                                        // duplicates: store every slot while
+                                        // the value is at hand.
+                                        for t in 1..tps {
+                                            rest[(t - 1) * ps * ps + py * ps + px] = v;
+                                        }
+                                    }
                                 }
                             }
-                            // Temporal copies of a still are duplicates.
-                            let (t0, rest) = ch.split_at_mut(ps * ps);
-                            for t in 0..tps - 1 {
-                                rest[t * ps * ps..(t + 1) * ps * ps].copy_from_slice(t0);
-                            }
                         }
-                        p += 1;
                     }
                 }
-            }
+            });
         });
         out
     }
@@ -150,6 +188,141 @@ impl QwenVlProcessor {
     fn tokens_per_image(&self, grid: &[u32; 3]) -> usize {
         (grid[0] as usize * grid[1] as usize * grid[2] as usize)
             / (self.spec.merge_size * self.spec.merge_size)
+    }
+}
+
+/// Spike-bench output: the processed item plus stage timings and the dims the
+/// decode backend actually produced (`decoded_*` differs from the header dims
+/// under scaled iDCT).
+pub struct TimedProcess {
+    pub item: ProcessedItem,
+    pub decode_ns: u64,
+    pub post_ns: u64,
+    pub decoded_h: usize,
+    pub decoded_w: usize,
+}
+
+impl QwenVlProcessor {
+    /// `process_item` from encoded bytes with a selectable decode backend and
+    /// post-decode structure — the spike bench's A/B driver. `backend`:
+    /// * `"baseline"`: `image`-crate decode, unfused resize → patchify
+    ///   (the pre-spike chain);
+    /// * `"fused"`: `image`-crate decode, fused resize+normalize+patchify —
+    ///   bitwise identical to `"baseline"`;
+    /// * `"turbo"` / `"turbo_fused"`: libjpeg-turbo scaled-iDCT decode with
+    ///   the same post-decode split. **Tolerance mode**: the scaled iDCT
+    ///   changes the resize input, and even full-resolution libjpeg output is
+    ///   not bit-identical to the pure-Rust decoder.
+    pub fn preprocess_timed(&self, data: &[u8], backend: &str) -> Result<TimedProcess, String> {
+        let (turbo, fused) = match backend {
+            "baseline" => (false, false),
+            "fused" => (false, true),
+            "turbo" => (true, false),
+            "turbo_fused" => (true, true),
+            other => {
+                return Err(format!(
+                    "unknown backend {other:?}; expected \"baseline\", \"fused\", \
+                     \"turbo\" or \"turbo_fused\""
+                ));
+            }
+        };
+        let t0 = std::time::Instant::now();
+        let (rgb, dh, dw, th, tw) = if turbo {
+            self.turbo_decode_scaled(data)?
+        } else {
+            let (rgb, h, w) = crate::common::decode_rgb(data)?;
+            let (th, tw) = smart_resize(
+                h,
+                w,
+                self.factor(),
+                self.spec.min_pixels,
+                self.spec.max_pixels,
+            )?;
+            (rgb, h, w, th, tw)
+        };
+        let decode_ns = t0.elapsed().as_nanos() as u64;
+
+        let t1 = std::time::Instant::now();
+        let (gh, gw) = (th / self.spec.patch_size, tw / self.spec.patch_size);
+        if gh == 0 || gw == 0 || gh % self.spec.merge_size != 0 || gw % self.spec.merge_size != 0 {
+            return Err(format!(
+                "qwen_vl: patch grid {gh}x{gw} is empty or not a multiple of \
+                 merge_size {}",
+                self.spec.merge_size
+            ));
+        }
+        let pixel_values = if (th, tw) == (dh, dw) {
+            self.patchify(&rgb, th, tw)
+        } else if fused {
+            self.patchify_fused(&rgb, dh, dw, th, tw)
+        } else {
+            let resized = resize::resize_rgb(&rgb, dh, dw, th, tw, self.spec.resample.into());
+            self.patchify(&resized, th, tw)
+        };
+        let post_ns = t1.elapsed().as_nanos() as u64;
+
+        let dim = pixel_values.len() / (gh * gw);
+        Ok(TimedProcess {
+            item: ProcessedItem {
+                feature: Tensor {
+                    shape: vec![gh * gw, dim],
+                    data: TensorData::F32(pixel_values),
+                },
+                aux: vec![(
+                    "image_grid_thw".to_string(),
+                    Tensor {
+                        shape: vec![3],
+                        data: TensorData::I64(vec![1, gh as i64, gw as i64]),
+                    },
+                )],
+                geometry: Geometry::Grid([1, gh as u32, gw as u32]),
+            },
+            decode_ns,
+            post_ns,
+            decoded_h: dh,
+            decoded_w: dw,
+        })
+    }
+
+    /// Decode via the turbo backend: header → `smart_resize` target →
+    /// scaled-iDCT decode covering the target. Non-JPEG input (scaled iDCT is
+    /// JPEG-only) and anything libjpeg-turbo rejects decode at full
+    /// resolution through the usual path.
+    #[cfg(feature = "turbo-jpeg")]
+    fn turbo_decode_scaled(
+        &self,
+        data: &[u8],
+    ) -> Result<(Vec<u8>, usize, usize, usize, usize), String> {
+        if crate::common::turbo::is_jpeg(data) {
+            let (oh, ow) = crate::common::turbo::header(data)?;
+            let (th, tw) = smart_resize(
+                oh,
+                ow,
+                self.factor(),
+                self.spec.min_pixels,
+                self.spec.max_pixels,
+            )?;
+            let (rgb, dh, dw) = crate::common::turbo::decode_rgb_scaled(data, th, tw)?;
+            Ok((rgb, dh, dw, th, tw))
+        } else {
+            let (rgb, h, w) = crate::common::decode_rgb(data)?;
+            let (th, tw) = smart_resize(
+                h,
+                w,
+                self.factor(),
+                self.spec.min_pixels,
+                self.spec.max_pixels,
+            )?;
+            Ok((rgb, h, w, th, tw))
+        }
+    }
+
+    #[cfg(not(feature = "turbo-jpeg"))]
+    fn turbo_decode_scaled(
+        &self,
+        _data: &[u8],
+    ) -> Result<(Vec<u8>, usize, usize, usize, usize), String> {
+        Err("turbo-jpeg feature not built; re-run with --features turbo-jpeg".into())
     }
 }
 
@@ -164,13 +337,6 @@ impl MmFamilyProcessor for QwenVlProcessor {
             self.spec.min_pixels,
             self.spec.max_pixels,
         )?;
-        let resized;
-        let data = if (th, tw) != (h, w) {
-            resized = resize::resize_rgb(rgb, h, w, th, tw, self.spec.resample.into());
-            &resized
-        } else {
-            rgb.as_slice()
-        };
         let (gh, gw) = (th / self.spec.patch_size, tw / self.spec.patch_size);
         // `smart_resize` guarantees both: dims are positive and divisible by
         // `patch_size * merge_size`. `patchify` indexes on that (and the `dim`
@@ -183,7 +349,14 @@ impl MmFamilyProcessor for QwenVlProcessor {
                 self.spec.merge_size
             ));
         }
-        let pixel_values = self.patchify(data, th, tw);
+        let pixel_values = if (th, tw) == (h, w) {
+            self.patchify(rgb, th, tw)
+        } else if fused_enabled() {
+            self.patchify_fused(rgb, h, w, th, tw)
+        } else {
+            let resized = resize::resize_rgb(rgb, h, w, th, tw, self.spec.resample.into());
+            self.patchify(&resized, th, tw)
+        };
         let dim = pixel_values.len() / (gh * gw);
         Ok(ProcessedItem {
             feature: Tensor {
@@ -227,60 +400,6 @@ impl MmFamilyProcessor for QwenVlProcessor {
         let (positions, delta) = mrope_image_only(input_len, &mrope_items, self.spec.merge_size)?;
         Ok(PositionOutput::MRope { positions, delta })
     }
-}
-
-/// Python-`round()` (round-half-to-even), which `round_by_factor` relies on.
-fn round_half_even(x: f64) -> f64 {
-    if (x - x.trunc()).abs() == 0.5 {
-        (x / 2.0).round() * 2.0
-    } else {
-        x.round()
-    }
-}
-
-/// The Qwen `smart_resize`: dims divisible by `factor`, total pixels within
-/// `[min_pixels, max_pixels]`, aspect ratio preserved as closely as possible.
-pub fn smart_resize(
-    height: usize,
-    width: usize,
-    factor: usize,
-    min_pixels: usize,
-    max_pixels: usize,
-) -> Result<(usize, usize), String> {
-    let (h, w) = (height as f64, width as f64);
-    if height == 0 || width == 0 {
-        return Err("empty image".into());
-    }
-    let ratio = h.max(w) / h.min(w);
-    if ratio > MAX_RATIO {
-        return Err(format!(
-            "absolute aspect ratio must be smaller than {MAX_RATIO}, got {ratio}"
-        ));
-    }
-    let f = factor as f64;
-    let mut h_bar = ((round_half_even(h / f) * f) as usize).max(factor);
-    let mut w_bar = ((round_half_even(w / f) * f) as usize).max(factor);
-    if h_bar * w_bar > max_pixels {
-        let beta = (h * w / max_pixels as f64).sqrt();
-        h_bar = ((h / beta / f).floor() * f) as usize;
-        w_bar = ((w / beta / f).floor() * f) as usize;
-    } else if h_bar * w_bar < min_pixels {
-        let beta = (min_pixels as f64 / (h * w)).sqrt();
-        h_bar = ((h * beta / f).ceil() * f) as usize;
-        w_bar = ((w * beta / f).ceil() * f) as usize;
-    }
-    // The downscale branch floors without a lower clamp (as Python does), so a
-    // very thin image against a small `max_pixels` can floor a side to 0.
-    // Python then fails inside PIL's resize; here it would reach the resize
-    // coefficient math (overflow panic in debug, garbage in release) and the
-    // `dim = len / (gh * gw)` division, so reject it as a request error.
-    if h_bar == 0 || w_bar == 0 {
-        return Err(format!(
-            "smart_resize: {height}x{width} degenerates to {h_bar}x{w_bar} at \
-             max_pixels={max_pixels}; image is too thin for this pixel budget"
-        ));
-    }
-    Ok((h_bar, w_bar))
 }
 
 /// Image-only M-RoPE fast path (the image branch of
@@ -524,9 +643,48 @@ mod python {
         ))
     }
 
+    /// Spike-bench entry: `(pixel_values, (t,h,w), decode_ns, post_ns,
+    /// decoded_h, decoded_w)` for one image under `backend` ∈ {"baseline",
+    /// "fused", "turbo", "turbo_fused"}; see
+    /// [`QwenVlProcessor::preprocess_timed`].
+    type PreprocessTimedOut<'py> = (
+        Bound<'py, PyArray1<f32>>,
+        (u32, u32, u32),
+        u64,
+        u64,
+        usize,
+        usize,
+    );
+
+    #[pyfunction]
+    fn preprocess_timed<'py>(
+        py: Python<'py>,
+        data: Vec<u8>,
+        spec_json: &str,
+        backend: &str,
+    ) -> PyResult<PreprocessTimedOut<'py>> {
+        let proc = QwenVlProcessor::from_spec_json(spec_json).map_err(PyValueError::new_err)?;
+        let out = py
+            .detach(move || proc.preprocess_timed(&data, backend))
+            .map_err(PyValueError::new_err)?;
+        let Geometry::Grid([t, h, w]) = out.item.geometry;
+        let TensorData::F32(pixel_values) = out.item.feature.data else {
+            return Err(PyValueError::new_err("qwen_vl: expected f32 feature"));
+        };
+        Ok((
+            pixel_values.into_pyarray(py),
+            (t, h, w),
+            out.decode_ns,
+            out.post_ns,
+            out.decoded_h,
+            out.decoded_w,
+        ))
+    }
+
     pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
         let m = PyModule::new(parent.py(), "qwen_vl")?;
         m.add_function(wrap_pyfunction!(preprocess, &m)?)?;
+        m.add_function(wrap_pyfunction!(preprocess_timed, &m)?)?;
         m.add_function(wrap_pyfunction!(smart_resize_py, &m)?)?;
         m.add_function(wrap_pyfunction!(mrope_image_only_py, &m)?)?;
         m.add_function(wrap_pyfunction!(process_mm, &m)?)?;
@@ -696,5 +854,63 @@ mod tests {
         assert_eq!((pos[10], pos[len + 10], pos[2 * len + 10]), (7, 7, 7));
         // delta = max + 1 - len = 7 + 1 - 11.
         assert_eq!(delta, -3);
+    }
+
+    /// The fused resize+normalize+patchify must be bitwise identical to
+    /// `resize_rgb` followed by `patchify` — f32 `Vec` equality is a bit
+    /// comparison. Covers both resamplers, both-axes / h-only / w-only /
+    /// upscale / 1-px cases, plus a random sweep, and the no-resize case
+    /// against `patchify` directly.
+    #[test]
+    fn fused_matches_unfused_bitwise() {
+        let mut state = 0x243f_6a88_85a3_08d3u64;
+        let mut rand = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for resampler in [Resampler::AtenU8, Resampler::Pil] {
+            let mut spec = spec();
+            spec.resample = resampler;
+            let proc = QwenVlProcessor::new(spec).unwrap();
+            let cases = [
+                (37usize, 53usize, 8usize, 12usize),
+                (53, 37, 8, 8),
+                (16, 16, 8, 12), // vertical only
+                (8, 12, 8, 24),  // horizontal only
+                (8, 12, 16, 16), // upscale
+                (4, 4, 8, 8),    // upscale both axes
+                (100, 173, 24, 40),
+                (1, 1, 4, 4),
+                (5, 500, 4, 124),
+            ];
+            for (h, w, th, tw) in cases {
+                let rgb: Vec<u8> = (0..h * w * 3).map(|_| (rand() % 256) as u8).collect();
+                let resized = resize::resize_rgb(&rgb, h, w, th, tw, resampler.into());
+                let expect = proc.patchify(&resized, th, tw);
+                let got = proc.patchify_fused(&rgb, h, w, th, tw);
+                assert_eq!(expect, got, "{h}x{w}->{th}x{tw} under {resampler:?}");
+            }
+            // No-resize: fused against `patchify` on the raw buffer.
+            let rgb: Vec<u8> = (0..8 * 12 * 3).map(|_| (rand() % 256) as u8).collect();
+            assert_eq!(
+                proc.patchify(&rgb, 8, 12),
+                proc.patchify_fused(&rgb, 8, 12, 8, 12)
+            );
+            // Random sweep: targets stay multiples of patch*merge (=4).
+            for _ in 0..40 {
+                let (h, w) = ((rand() % 96 + 1) as usize, (rand() % 96 + 1) as usize);
+                let (th, tw) = (
+                    (rand() % 24 + 1) as usize * 4,
+                    (rand() % 24 + 1) as usize * 4,
+                );
+                let rgb: Vec<u8> = (0..h * w * 3).map(|_| (rand() % 256) as u8).collect();
+                let resized = resize::resize_rgb(&rgb, h, w, th, tw, resampler.into());
+                let expect = proc.patchify(&resized, th, tw);
+                let got = proc.patchify_fused(&rgb, h, w, th, tw);
+                assert_eq!(expect, got, "{h}x{w}->{th}x{tw} under {resampler:?}");
+            }
+        }
     }
 }

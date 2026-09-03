@@ -67,6 +67,29 @@ pub fn apply_layout(
                         out.extend_from_slice(ids);
                         ids.len()
                     }
+                    TokenPattern::Wrapped {
+                        start_id,
+                        end_id,
+                        id,
+                        n,
+                    } => {
+                        // Offsets cover the inner run only; see the variant doc.
+                        out.push(*start_id);
+                        out.resize(out.len() + n, *id);
+                        out.push(*end_id);
+                        let slot = offsets
+                            .get_mut(*item)
+                            .ok_or_else(|| format!("layout: media item {item} out of range"))?;
+                        if *n == 0 {
+                            return Err(format!(
+                                "layout: media item {item} expands to zero tokens"
+                            ));
+                        }
+                        if slot.replace((start + 1, start + *n as u32)).is_some() {
+                            return Err(format!("layout: media item {item} placed twice"));
+                        }
+                        continue;
+                    }
                 };
                 if n == 0 {
                     return Err(format!("layout: media item {item} expands to zero tokens"));
@@ -137,6 +160,50 @@ pub fn layout_by_placeholder(
     Ok(TokenLayout { segments })
 }
 
+/// The wrapped counterpart of [`layout_by_placeholder`]: each occurrence of
+/// `placeholder_id` becomes `[start_id, placeholder_id × counts[i], end_id]`
+/// (MiniMax-style). Errs when the occurrence count and `counts` disagree.
+pub fn layout_by_placeholder_wrapped(
+    ids: &[i32],
+    placeholder_id: i32,
+    start_id: i32,
+    end_id: i32,
+    counts: &[usize],
+) -> Result<TokenLayout, String> {
+    let found = ids.iter().filter(|&&id| id == placeholder_id).count();
+    if found != counts.len() {
+        return Err(format!(
+            "prompt has {found} media placeholder(s) but {} media item(s)",
+            counts.len()
+        ));
+    }
+    let mut segments = Vec::new();
+    let mut text_start = 0;
+    let mut item = 0;
+    for (pos, &id) in ids.iter().enumerate() {
+        if id == placeholder_id {
+            if text_start < pos {
+                segments.push(Segment::Text(text_start..pos));
+            }
+            segments.push(Segment::Media {
+                item,
+                pattern: TokenPattern::Wrapped {
+                    start_id,
+                    end_id,
+                    id: placeholder_id,
+                    n: counts[item],
+                },
+            });
+            item += 1;
+            text_start = pos + 1;
+        }
+    }
+    if text_start < ids.len() {
+        segments.push(Segment::Text(text_start..ids.len()));
+    }
+    Ok(TokenLayout { segments })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +228,21 @@ mod tests {
     fn count_mismatch_errs() {
         assert!(expand(&[7, 1, 9], 1, &[2, 3]).is_err());
         assert!(expand(&[7, 1, 1, 9], 1, &[2]).is_err());
+    }
+
+    #[test]
+    fn wrapped_offsets_exclude_wrappers() {
+        // [7, PAD, 8] with counts [3] → [7, START, PAD, PAD, PAD, END, 8];
+        // the item's offsets cover the inner run, matching the Python
+        // `get_mm_items_offset` convention for MiniMax-style wrappers.
+        let layout = layout_by_placeholder_wrapped(&[7, 1, 8], 1, 90, 91, &[3]).unwrap();
+        let e = apply_layout(&[7, 1, 8], &layout, 1).unwrap();
+        assert_eq!(e.input_ids, vec![7, 90, 1, 1, 1, 91, 8]);
+        assert_eq!(e.offsets, vec![(2, 4)]);
+
+        assert!(layout_by_placeholder_wrapped(&[7, 1, 9], 1, 90, 91, &[2, 3]).is_err());
+        let zero = layout_by_placeholder_wrapped(&[7, 1, 9], 1, 90, 91, &[0]).unwrap();
+        assert!(apply_layout(&[7, 1, 9], &zero, 1).is_err());
     }
 
     #[test]

@@ -2,6 +2,7 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 """HF processor classes live in sglang.srt.configs.minimax_vl_processor to avoid circular imports with model classes."""
 
+import logging
 import math
 import re
 from typing import Dict, List, Optional, Tuple, Union
@@ -10,13 +11,19 @@ import torch
 import torchvision
 from torchvision.transforms import InterpolationMode
 
+from sglang.srt.environ import envs
 from sglang.srt.managers.schedule_batch import Modality, MultimodalProcessorOutput
 from sglang.srt.models.minimax_m3_vl import MiniMaxM3SparseForConditionalGeneration
+from sglang.srt.multimodal.minimax_m3_image_processing import (
+    MiniMaxM3GPUProcessorWrapper,
+)
 from sglang.srt.multimodal.processors.base_processor import (
     BaseMultimodalProcessor,
     MultimodalSpecialTokens,
 )
-from sglang.srt.utils import round_up
+from sglang.srt.utils import is_npu, round_up
+
+logger = logging.getLogger(__name__)
 
 
 def get_hw_multiple_of(
@@ -175,7 +182,9 @@ class MiniMaxM3VLProcessor(BaseMultimodalProcessor):
         MiniMaxM3SparseForConditionalGeneration,
     ]
 
-    gpu_image_decode = False
+    # High-fidelity nvJPEG for JPEG (PIL-matching chroma upsampling), PIL
+    # fallback when nvImageCodec is unavailable or the image is not JPEG.
+    gpu_image_decode = "nvjpeg_fancy"
 
     # M3's tokenizer has no pad_token.
     tokenizer_padding = False
@@ -212,8 +221,6 @@ class MiniMaxM3VLProcessor(BaseMultimodalProcessor):
         return image_factor, max_size
 
     def __init__(self, hf_config, server_args, _processor, *args, **kwargs):
-        super().__init__(hf_config, server_args, _processor, *args, **kwargs)
-
         tokenizer = _processor.tokenizer
         assert tokenizer is not None, "tokenizer is required"
 
@@ -221,6 +228,39 @@ class MiniMaxM3VLProcessor(BaseMultimodalProcessor):
         self.VIDEO_TOKEN_ID = self._token_id(tokenizer, self.VIDEO_TOKEN)
         self.IM_START_TOKEN_ID = self._token_id(tokenizer, self.IMAGE_START_TOKEN)
         self.IM_END_TOKEN_ID = self._token_id(tokenizer, self.IMAGE_END_TOKEN)
+
+        # The NPU path patches the HF image/video processors and dispatches on
+        # the processor class name; keep the raw HF processor there.
+        self._use_gpu_processor_wrapper = not is_npu()
+        if self._use_gpu_processor_wrapper:
+            image_processor = getattr(_processor, "image_processor", None)
+            _processor = MiniMaxM3GPUProcessorWrapper(
+                _processor,
+                image_token=self.IMAGE_TOKEN,
+                image_token_id=self.IM_TOKEN_ID,
+                image_start_token=self.IMAGE_START_TOKEN,
+                image_start_token_id=self.IM_START_TOKEN_ID,
+                image_end_token=self.IMAGE_END_TOKEN,
+                image_end_token_id=self.IM_END_TOKEN_ID,
+                patch_size=getattr(image_processor, "patch_size", 14),
+                temporal_patch_size=getattr(image_processor, "temporal_patch_size", 2),
+                merge_size=getattr(image_processor, "merge_size", 2),
+                max_pixels=getattr(image_processor, "max_pixels", 451584),
+                min_pixels=getattr(image_processor, "min_pixels", None),
+                image_mean=getattr(
+                    image_processor,
+                    "image_mean",
+                    [0.48145466, 0.4578275, 0.40821073],
+                ),
+                image_std=getattr(
+                    image_processor,
+                    "image_std",
+                    [0.26862954, 0.26130258, 0.27577711],
+                ),
+            )
+
+        super().__init__(hf_config, server_args, _processor, *args, **kwargs)
+
         self.video_fps = self.video_config.pop("fps", None)
         self.video_frame_max_size = self.video_config.pop("frame_max_size", None)
         self.video_max_frames = self.video_config.pop("max_frames", None)
@@ -235,6 +275,28 @@ class MiniMaxM3VLProcessor(BaseMultimodalProcessor):
             video_token_id=self.VIDEO_TOKEN_ID,
             video_token_regex=re.compile(r"<video>|<\|video\|>|\]\<\]video\[\>\["),
         ).build(_processor)
+
+        if envs.SGLANG_MINIMAX_M3_RS_MM_PREPROCESS.get():
+            try:
+                from sglang.srt.multimodal.minimax_m3.image_processing_rust import (
+                    MiniMaxM3RustImageProcessor,
+                )
+
+                self._processor.image_processor = (
+                    MiniMaxM3RustImageProcessor.from_hf_processor(
+                        self._processor.image_processor,
+                        image_token_id=self.IM_TOKEN_ID,
+                        image_start_token_id=self.IM_START_TOKEN_ID,
+                        image_end_token_id=self.IM_END_TOKEN_ID,
+                    )
+                )
+                logger.info("Using Rust-accelerated MiniMax M3 image processor")
+            except ImportError:
+                logger.warning(
+                    "SGLANG_MINIMAX_M3_RS_MM_PREPROCESS=1 but "
+                    "sglang.srt.rust_extensions._multimodal is not available; "
+                    "falling back to the default image processor."
+                )
 
     async def process_mm_data_async(
         self,
@@ -267,10 +329,16 @@ class MiniMaxM3VLProcessor(BaseMultimodalProcessor):
             ]
             base_output.videos, video_metadata = map(list, zip(*videos_processed))
 
+        combine_kwargs = {}
+        if self._use_gpu_processor_wrapper:
+            # The GPU wrapper expands image placeholders from the request's own
+            # token IDs when they exist; string prompts tokenize in the wrapper.
+            combine_kwargs["sglang_original_input_ids"] = base_output.input_ids
         mm_items, input_ids, ret = await self.process_and_combine_mm_data_async(
             base_output=base_output,
             mm_tokens=self.mm_tokens,
             video_metadata=video_metadata,
+            **combine_kwargs,
         )
 
         return MultimodalProcessorOutput(
