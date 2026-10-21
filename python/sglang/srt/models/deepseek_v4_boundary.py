@@ -528,7 +528,7 @@ class MoeTransport(MoeRowTransport):
             completion = MoeFinalize(hidden_states)
             return (
                 completion.complete(reduce=False)
-                if self.mlp_reduce_scatter
+                if self.mlp_reduce_scatter or self.rows.group is None
                 else completion
             )
         if self.rows.group is not None and not self.mlp_reduce_scatter:

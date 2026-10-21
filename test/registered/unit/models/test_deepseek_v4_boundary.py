@@ -301,6 +301,20 @@ class TestDwdpMoeRows(unittest.TestCase):
             self.assertFalse(call._use_tp_moe_gather)
             value = torch.arange(6.0).reshape(2, 3)
             self.assertIs(call.return_output(call.prepare_output(value)), value)
+
+            pieces = boundary.MoEOutput(
+                torch.ones(2, 3), None, SimpleNamespace(quant_method=None), 1.0, False
+            )
+            with patch.object(
+                moe_transport.MoeFinalize,
+                "complete",
+                autospec=True,
+                return_value=value,
+            ) as complete:
+                output = call.prepare_output(pieces)
+            complete.assert_called_once()
+            self.assertEqual(complete.call_args.kwargs, {"reduce": False})
+            self.assertIs(output, value)
             call.release()
 
 
