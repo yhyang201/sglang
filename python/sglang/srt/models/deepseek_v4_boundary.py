@@ -363,10 +363,14 @@ def materialize(hidden_states, batch, *, consume=True, next=None):
     return result
 
 
+def _moe_uses_ep_rows():
+    return not get_moe_a2a_backend().is_none() or get_parallel().dwdp_size > 1
+
+
 def stages(config, layer_id, *, layer=None):
     from sglang.srt.layers.layer_boundary.layout import token_axis_sizes
 
-    ep = not get_moe_a2a_backend().is_none()
+    ep = _moe_uses_ep_rows()
     table_attn, table_ffn, overlapped_ffn = {}, {}, {}
     for variant in (BatchVariant.ORDINARY, BatchVariant.CONTEXT_PARALLEL):
         cp = variant is BatchVariant.CONTEXT_PARALLEL
@@ -491,7 +495,7 @@ class MoeTransport(MoeRowTransport):
     def __init__(self, layer, hidden_states, forward_batch, call, rows):
         self.source_rows = hidden_states.shape[0]
         self.rows = rows
-        if (rows.group is None) != (not get_moe_a2a_backend().is_none()):
+        if (rows.group is None) != _moe_uses_ep_rows():
             raise ValueError("MoE backend does not match its transport output contract")
         cp = TokenAxis.ATTN_CP in rows.source.sharded
         super().__init__(
@@ -503,8 +507,7 @@ class MoeTransport(MoeRowTransport):
             cp_return_contiguous=layer.config.model_type == "deepseek_v41",
             use_cp=cp,
             moe_gather=not cp
-            and TokenAxis.ATTN_DP in rows.source.sharded - rows.compute.sharded
-            and get_parallel().dwdp_size <= 1,
+            and TokenAxis.ATTN_DP in rows.source.sharded - rows.compute.sharded,
             attn_scatter=not cp
             and TokenAxis.ATTN_TP in rows.compute.sharded - rows.source.sharded,
         )

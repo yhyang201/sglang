@@ -217,12 +217,15 @@ class TestMoeSourceRows(unittest.TestCase):
         )
         backend = SimpleNamespace(is_none=lambda: True)
         group = SimpleNamespace(all_reduce=lambda value: value * 2)
-        parallel = SimpleNamespace(attn_cp_size=2, attn_cp_rank=1, tp_group=group)
+        parallel = SimpleNamespace(
+            attn_cp_size=2, attn_cp_rank=1, tp_group=group, dwdp_size=1
+        )
         batch = SimpleNamespace(dp_padding_mode=None)
         with (
             patch.object(moe_transport, "get_moe_a2a_backend", return_value=backend),
             patch.object(boundary, "get_moe_a2a_backend", return_value=backend),
             patch.object(moe_transport, "get_parallel", return_value=parallel),
+            patch.object(boundary, "get_parallel", return_value=parallel),
             patch.object(
                 moe_transport,
                 "attn_cp_interleave_gather",
@@ -248,6 +251,57 @@ class TestMoeSourceRows(unittest.TestCase):
                 torch.testing.assert_close(result, expected * 2)
                 call.release()
         interleave.assert_called_once()
+
+
+class TestDwdpMoeRows(unittest.TestCase):
+    def test_dwdp_moe_computes_on_source_rows_and_owes_no_sum(self):
+        from sglang.srt.layers.layer_boundary.contracts import BatchVariant
+        from sglang.srt.models import deepseek_v4
+
+        backend = SimpleNamespace(is_none=lambda: True)
+        parallel = SimpleNamespace(
+            attn_dp_size=4, attn_cp_size=1, attn_tp_size=1, dwdp_size=4
+        )
+        layer = SimpleNamespace(
+            boundary_mhc_fusions=False,
+            mlp=SimpleNamespace(),
+            config=SimpleNamespace(model_type="deepseek_v4"),
+        )
+        with (
+            patch.object(boundary, "get_moe_a2a_backend", return_value=backend),
+            patch.object(moe_transport, "get_moe_a2a_backend", return_value=backend),
+            patch.object(boundary, "get_parallel", return_value=parallel),
+            patch(
+                "sglang.srt.layers.layer_boundary.layout.get_parallel",
+                return_value=parallel,
+            ),
+            patch.object(
+                deepseek_v4, "is_cross_layer_mhc_fusion_enabled", return_value=False
+            ),
+            patch.object(
+                deepseek_v4, "_is_fused_mhc_post_pre_enabled_xpu", return_value=False
+            ),
+            patch.object(boundary, "declare_attn", side_effect=lambda **kw: kw),
+            patch.object(boundary, "declare_ffn", side_effect=lambda **kw: kw),
+        ):
+            _, ffn = boundary.stages(
+                SimpleNamespace(hc_pre_from_prev_sublayer=False), 0
+            )
+            rows = ffn["row_transport"].rows[BatchVariant.ORDINARY]
+            self.assertEqual(rows.compute, rows.source)
+            self.assertIsNone(rows.group)
+
+            call = boundary.MoeTransport(
+                layer,
+                torch.ones(2, 3),
+                SimpleNamespace(dp_padding_mode=None),
+                boundary.LayerCall(),
+                rows,
+            )
+            self.assertFalse(call._use_tp_moe_gather)
+            value = torch.arange(6.0).reshape(2, 3)
+            self.assertIs(call.return_output(call.prepare_output(value)), value)
+            call.release()
 
 
 if __name__ == "__main__":
